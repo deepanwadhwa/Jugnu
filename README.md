@@ -9,13 +9,291 @@ Jugnu is ~4,000 lines of dependency-free C. It keeps 1.3 GB of dense weights
 resident in RAM and streams the 16.6 GB of mixture-of-experts weights from
 SSD on demand, so a 35B-parameter model fits in a 2–3 GB memory footprint.
 
-## Demo
+## Examples
 
-Generation and memory footprint, live (35B parameters, 2.5 GB peak RSS):
+Real output from this model running on the 16 GB test machine, commands shown verbatim.
 
-<p align="center"><img src="assets/demo.gif" alt="jugnu demo: streaming generation with live memory footprint" width="740"></p>
+### A landing page
 
-Reproduce it yourself after installing: `./demo.sh`
+```sh
+jugnu --fast --long "Write a complete, single-file landing page (HTML with embedded CSS, \
+no JavaScript) for a small specialty coffee shop called Kaapi. Include a hero section, \
+a menu with four items, and a footer. Clean, modern, dark theme. Keep the CSS compact."
+```
+
+<p align="center"><img src="assets/example-landing.png" alt="generated landing page, rendered" width="740"></p>
+
+<details>
+<summary>Full generated HTML (1,807 tokens, unedited)</summary>
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kaapi | Specialty Coffee</title>
+    <style>
+        /* Reset & Base Styles */
+        :root {
+            --bg-color: #121212;
+            --text-color: #E0E0E0;
+            --accent-color: #D4A373; /* Warm Coffee Gold */
+            --card-bg: #1E1E1E;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+        }
+
+        a { color: inherit; text-decoration: none; }
+        ul { list-style: none; }
+
+        /* Layout Utilities */
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+
+        /* Header */
+        header {
+            padding: 2rem 0;
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            font-weight: 300;
+            letter-spacing: -1px;
+        }
+
+        p.subtitle {
+            color: var(--accent-color);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            font-size: 0.875rem;
+            margin-top: 0.5rem;
+        }
+
+        /* Hero Section */
+        .hero {
+            text-align: center;
+            padding: 4rem 0;
+            border-top: 1px solid #333;
+            border-bottom: 1px solid #333;
+            margin-bottom: 4rem;
+        }
+
+        h2 {
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .intro-text {
+            max-width: 600px;
+            margin: 0 auto;
+            font-weight: 300;
+            opacity: 0.8;
+        }
+
+        /* Menu Section */
+        .menu-section {
+            padding-bottom: 4rem;
+        }
+
+        .menu-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+        }
+
+        .menu-item {
+            background: var(--card-bg);
+            padding: 25px;
+            border-radius: 8px;
+            border: 1px solid #333;
+            transition: transform 0.2s ease;
+        }
+
+        .menu-item:hover {
+            transform: translateY(-3px);
+            border-color: var(--accent-color);
+        }
+
+        .item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-bottom: 10px;
+        }
+
+        .item-name {
+            font-weight: 700;
+            font-size: 1.1rem;
+        }
+
+        .item-price {
+            color: var(--accent-color);
+            font-weight: bold;
+        }
+
+        .item-desc {
+            font-size: 0.9rem;
+            opacity: 0.7;
+            font-weight: 300;
+        }
+
+        /* Footer */
+        footer {
+            background: var(--card-bg);
+            padding: 4rem 0;
+            text-align: center;
+            border-top: 1px solid #333;
+        }
+
+        .footer-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 2rem;
+            margin-bottom: 3rem;
+            text-align: left;
+        }
+
+        h4 { color: var(--accent-color); margin-bottom: 0.5rem; }
+
+        .copyright {
+            font-size: 0.8rem;
+            opacity: 0.5;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <header>
+            <h1>Kaapi</h1>
+            <p class="subtitle">Specialty Coffee Roasters</p>
+        </header>
+
+        <section class="hero">
+            <h2>Pure. Roasted. Served.</h2>
+            <p class="intro-text">
+                We source single-origin beans from sustainable micro-lots. 
+                Roasting in small batches to unlock flavors you haven't tasted yet.
+                No sugar coating, just great coffee.
+            </p>
+        </section>
+
+        <section class="menu-section">
+            <ul class="menu-grid">
+                <li class="menu-item">
+                    <div class="item-header">
+                        <span class="item-name">Etiopya</span>
+                        <span class="item-price">$6.50</span>
+                    </div>
+                    <p class="item-desc">Yirgacheff Washed<br>Chamomile, Lemon Zest, Clean Finish</p>
+                </li>
+                <li class="menu-item">
+                    <div class="item-header">
+                        <span class="item-name">Tumba</span>
+                        <span class="item-price">$6.75</span>
+                    </div>
+                    <p class="item-desc">Tumaco Supremo<br>Caramel Sweetness, Cream Body</p>
+                </li>
+                <li class="menu-item">
+                    <div class="item-header">
+                        <span class="item-name">Pacafist</span>
+                        <span class="item-price">$7.00</span>
+                    </div>
+                    <p class="item-desc">Nariño Honey<br>Tropical Fruit, Peach Flesh</p>
+                </li>
+                <li class="menu-item">
+                    <div class="item-header">
+                        <span class="item-name">Mandev</span>
+                        <span class="item-price">$6.25</span>
+                    </div>
+                    <p class="item-desc">Sud Valley Washed<br>Pumpkin Spiced, Milk Chocolate</p>
+                </li>
+            </ul>
+        </section>
+    </div>
+
+    <footer>
+        <div class="container">
+            <div class="footer-info">
+                <div>
+                    <h4>Find Us</h4>
+                    <p>4234 24th St<br>Metro, CA 94127</p>
+                </div>
+                <div>
+                    <h4>Cafe</h4>
+                    <p>Mon - Fri: 7am - 4pm<br>Sat - Sun: 8am - 4pm</p>
+                </div>
+                <div>
+                    <h4>Keep in Touch</h4>
+                    <p>hello@kaapi.com<br>@kaapi.coffee</p>
+                </div>
+            </div>
+            <p class="copyright">&copy; 2024 Kaapi. All rights reserved.</p>
+        </div>
+    </footer>
+
+</body>
+</html>
+```
+
+</details>
+
+Engine stats for this exact run (seed 11, 4 threads):
+`generated=1807 prefill 16.3 tok/s decode 9.60 tok/s peak_rss=2.47 GB`
+
+### A Python utility
+
+```sh
+jugnu "Write a Python function merge_intervals(intervals) that merges overlapping \
+intervals. Include type hints, a concise docstring, and three assert-based test cases."
+```
+
+```python
+from typing import List, Tuple
+
+
+def merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    """Merge overlapping intervals.
+
+    Given a list of [start, end] pairs, merge all overlapping intervals.
+    """
+
+    if not intervals:
+        return []
+
+    # Sort by start time
+    sorted_intervals = sorted(intervals, key=lambda x: x[0])
+
+    merged = [sorted_intervals[0]]
+
+    for current in sorted_intervals[1:]:
+        last_start, last_end = merged[-1]
+        new_start, new_end = current
+
+        if new_start <= last_end:
+            # Overlapping or adjacent, merge them
+            merged[-1] = (last_start, max(last_end, new_end))
+        else:
+            merged.append(current)
+
+    return merged
+```
+
+Output verified: the function passes overlap, adjacency, empty-input, and
+unsorted-input tests. Stats: `generated=191 decode 11.19 tok/s peak_rss=2.53 GB`.
 
 ## Install
 
@@ -92,6 +370,17 @@ checkpoint shard-by-shard in under 25 GB of working disk.
   (bit-identical to the sequential implementation).
 - Sessions (`QWSESS01`): geometry-bound, SHA-256-sealed snapshots written
   atomically (tmp + fsync + rename).
+
+## Known limitations
+
+- The int4 conversion occasionally doubles a short function word during
+  generation ("of of"), roughly once per ~10 longer answers. It is a
+  quantization artifact of generation-time states, not present under
+  teacher forcing; analysis notes live in the source history. Re-asking or a
+  different seed avoids it. `--presence-penalty` and `--no-doubling` exist as
+  experimental sampler knobs, but the artifact can bypass token-id-level
+  penalties, so neither is a complete fix.
+- Text-only: the vision tower of the upstream model is not included.
 
 ## Credits and license
 

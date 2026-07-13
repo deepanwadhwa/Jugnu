@@ -1,48 +1,25 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 200" width="640" height="200" role="img" aria-label="jugnu">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200" role="img" aria-label="Jugnu">
   <defs>
-    <radialGradient id="core" cx="50%" cy="50%" r="50%">
-      <stop offset="0%"  stop-color="#fffbe6" stop-opacity="1"/>
-      <stop offset="30%" stop-color="#ffe98a" stop-opacity="0.9"/>
-      <stop offset="65%" stop-color="#d9e75c" stop-opacity="0.35"/>
-      <stop offset="100%" stop-color="#d9e75c" stop-opacity="0"/>
-    </radialGradient>
-    <radialGradient id="faint" cx="50%" cy="50%" r="50%">
-      <stop offset="0%"  stop-color="#e8f0a0" stop-opacity="0.5"/>
-      <stop offset="100%" stop-color="#e8f0a0" stop-opacity="0"/>
+    <linearGradient id="stem" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#e8ecf4"/>
+      <stop offset="100%" stop-color="#aab4c8"/>
+    </linearGradient>
+    <radialGradient id="dot" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"  stop-color="#fff8d0"/>
+      <stop offset="45%" stop-color="#e9e15e"/>
+      <stop offset="100%" stop-color="#e9e15e" stop-opacity="0"/>
     </radialGradient>
   </defs>
 
-  <rect width="640" height="200" rx="12" fill="#0d1117"/>
+  <rect width="200" height="200" rx="44" fill="#0d1117"/>
 
-  <!-- distant fireflies -->
-  <circle cx="90"  cy="52"  r="14" fill="url(#faint)"/>
-  <circle cx="90"  cy="52"  r="1.6" fill="#f4f8c8" opacity="0.85"/>
-  <circle cx="560" cy="150" r="11" fill="url(#faint)"/>
-  <circle cx="560" cy="150" r="1.3" fill="#f4f8c8" opacity="0.7"/>
-  <circle cx="480" cy="40"  r="9"  fill="url(#faint)"/>
-  <circle cx="480" cy="40"  r="1.1" fill="#f4f8c8" opacity="0.6"/>
+  <!-- J: top bar, stem, hook -->
+  <path d="M 78 52 L 138 52"
+        stroke="url(#stem)" stroke-width="20" stroke-linecap="round" fill="none"/>
+  <path d="M 118 52 L 118 122 Q 118 152 88 152 Q 64 152 58 132"
+        stroke="url(#stem)" stroke-width="20" stroke-linecap="round" fill="none"/>
 
-  <!-- flight trail: fading dots along a swoop -->
-  <g fill="#cfe06a">
-    <circle cx="40"  cy="160" r="1.0" opacity="0.10"/>
-    <circle cx="62"  cy="148" r="1.1" opacity="0.14"/>
-    <circle cx="86"  cy="134" r="1.2" opacity="0.18"/>
-    <circle cx="112" cy="120" r="1.3" opacity="0.24"/>
-    <circle cx="138" cy="108" r="1.4" opacity="0.30"/>
-    <circle cx="163" cy="100" r="1.5" opacity="0.38"/>
-    <circle cx="186" cy="96"  r="1.6" opacity="0.48"/>
-    <circle cx="207" cy="96"  r="1.7" opacity="0.60"/>
-    <circle cx="225" cy="99"  r="1.8" opacity="0.74"/>
-    <circle cx="240" cy="104" r="1.9" opacity="0.88"/>
-  </g>
-
-  <!-- the firefly -->
-  <circle cx="252" cy="108" r="34" fill="url(#core)"/>
-  <circle cx="252" cy="108" r="3.2" fill="#fffdf0"/>
-
-  <!-- wordmark -->
-  <text x="300" y="118" font-family="Menlo, SFMono-Regular, Consolas, monospace"
-        font-size="46" font-weight="700" fill="#e8ecf4">jugnu</text>
-  <text x="303" y="148" font-family="Menlo, SFMono-Regular, Consolas, monospace"
-        font-size="15" fill="#7d8590">a 35B model on a 16 GB laptop</text>
+  <!-- terminal glow -->
+  <circle cx="55" cy="124" r="17" fill="url(#dot)"/>
+  <circle cx="55" cy="124" r="5"  fill="#f4eda0"/>
 </svg>
