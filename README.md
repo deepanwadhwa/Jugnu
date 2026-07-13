@@ -1,5 +1,3 @@
-<p align="center"><img src="assets/jugnu.svg" alt="jugnu" width="640"></p>
-
 # Jugnu
 
 Run **Qwen3.6-35B-A3B** (int4, text-only) locally on a **16 GB Apple Silicon
