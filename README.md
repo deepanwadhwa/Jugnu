@@ -1,79 +1,127 @@
 <div align="center">
   <img src="assets/samosa-chat_medium.png" alt="Samosa Chat mascot" width="210">
   <h1>Samosa Chat</h1>
-  <p><strong>Qwen3.6-35B-A3B, tested locally on a 16 GB Apple Silicon Mac.</strong></p>
-  <p>Native Apple Silicon app &nbsp;·&nbsp; No cloud account &nbsp;·&nbsp; No telemetry</p>
+  <p><strong>Run Qwen3.6-35B-A3B as a local chat app on a 16 GB Apple Silicon Mac.</strong></p>
+  <p>Runs on the CPU &nbsp;·&nbsp; No cloud account &nbsp;·&nbsp; No telemetry</p>
 </div>
 
-> **Foundation and model credit.** Samosa Chat is built on
-> [colibrì](https://github.com/JustVugg/colibri) by JustVugg. Its
-> expert-streaming design, SIMD kernels, and core utility headers made this
-> project possible. The model is the text portion of
+> **Credit.** Samosa Chat is built on [colibrì](https://github.com/JustVugg/colibri)
+> by JustVugg. Its expert-streaming design, SIMD kernels, and core utility
+> headers made this project possible. The model is the text part of
 > [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B), created and
-> released by the Qwen team. Samosa Chat is an independent, unofficial
-> Apache-2.0 project and is not affiliated with or endorsed by either team.
+> released by the Qwen team. Samosa Chat is an independent, unofficial,
+> Apache-2.0 project. It is not affiliated with or endorsed by either team.
 
-Samosa Chat is a small C inference runtime for running Qwen's 35B-total,
-3B-active Mixture-of-Experts model without loading all 35B parameters into
-RAM. Dense weights stay resident; routed experts are read from SSD as the
-model selects them. The current macOS build uses CPU SIMD and does **not** use
-Metal or the Apple GPU. In other words: no dedicated GPU is required, even
-though every Apple Silicon Mac physically includes an integrated GPU.
+## What this is
 
-> **Platform scope:** CPU-only does **not** mean “any laptop with 16 GB RAM.”
-> The current installer requires macOS on Apple Silicon (`arm64`) and rejects
-> other platforms. The full product has been exercised on one 16 GB M3
-> MacBook Air. Portable kernel branches exist, but Linux/x86 and Windows are
-> not supported Samosa Chat products today.
+Samosa Chat runs Qwen's 35-billion-parameter model on a Mac that has only 16 GB
+of RAM.
 
-This repository is deliberately text-only. Qwen3.6 is natively multimodal,
-but Samosa's converted artifact omits the vision tower.
+The model is a Mixture of Experts. It has 35B parameters in total, but it only
+uses about 3B of them for each token. Samosa never loads all 35B into memory.
+The shared ("dense") weights stay in RAM. The expert weights are read from the
+SSD as the model chooses which experts each token needs.
 
-## Design principles
+Samosa runs entirely on the CPU. It does not use Metal or the Apple GPU. You do
+not need a dedicated GPU.
 
-Every decision in this project answers to three goals, in priority order:
+The model is text only. Qwen3.6 can also read images, but Samosa's converted
+model leaves the image part out.
 
-1. **Stable on a machine like mine.** It must run safely on a fanless 16 GB
-   Apple Silicon Mac — bounded RAM, no runaway growth, and graceful limits
-   instead of crashes or swap thrash.
-2. **Actually useful for something.** It has to do real work locally — real
-   answers, real code, real multi-turn conversations — not merely load and
-   demo.
-3. **No excessive wear and tear.** Running it must not grind down the machine:
-   bounded memory to keep the system out of heavy swap, a cool two-thread
-   default, and restraint on the SSD-heavy expert streaming that dominates
-   real wear.
+**Where it runs.** macOS on Apple Silicon (`arm64`) only. It has been tested on
+one 16 GB M3 MacBook Air. "Runs on the CPU" does **not** mean it runs on any
+16 GB laptop. The installer refuses other systems. Linux and Windows are not
+supported.
 
-If a feature can't hold all three, it doesn't ship as released — it stays a
-source preview until it does.
+## Two things you can get, and they are at different versions
 
-## What is available today
+There are two separate things. They are not at the same version, and the
+difference is the single most important thing to understand here.
 
-The published package and this repository are not yet at the same release
-level. This distinction matters:
+**1. The published download (Hugging Face).** One command installs it. You get
+a command-line tool and an older version of the model. This download does **not**
+include the browser app yet. This is the easiest way to try Samosa today.
 
-| surface | status | what it contains |
-|---|---|---|
-| [Hugging Face package](https://huggingface.co/deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-int4) | usable CLI release | legacy whole-row int4 artifact, one-shot chat, thinking switch, exact session resume |
-| GitHub `main` | source preview | interactive local chat app, revised thinking controls, groupwise-q4, resident server, cancellation, bounded queue, atomic-upgrade tooling, expanded tests |
-| Browser app | implemented on `main` | `samosa app` opens a responsive local UI with SSE streaming, conversation history, thinking display, stop control, settings, and live telemetry |
-| Group-32 artifact | local development baseline | converted and tested on one reference Mac; not published to Hugging Face |
+**2. This repository (source).** This is the current, more advanced system. It
+includes the browser chat app, the local server, and a newer, higher-quality
+model format (called group-32). The browser app is **finished and working** —
+it is what the maintainer uses every day. It is simply not packaged into the
+Hugging Face download yet.
 
-The one-line installer therefore installs the **published CLI release**, not
-the server/app preview. The next model upload must be treated as a separate,
-verified release event.
+So: the **command-line tool is published** and easy to install. The **browser
+app is done and working in this repository**, but you currently run it by
+building from source, not from the published download.
 
-## Install the published CLI release
+## The three principles
+
+Every decision follows these three goals, in this order:
+
+1. **It must be stable on a machine like this one** — a 16 GB Apple Silicon Mac.
+   Memory stays bounded. It does not grow without limit. It stops at clear
+   limits instead of crashing.
+2. **It must be actually useful.** Real answers, real code, real multi-turn
+   conversations. Not a demo that only loads.
+3. **It must not wear out the machine.** Keep memory bounded so the system does
+   not swap heavily. Use two threads by default so the Mac stays cool. Be
+   careful with the SSD reads that cause the real wear (explained below).
+
+A feature is only called "released" once it meets all three. Until then it
+stays in this repository as source.
+
+## The browser app
+
+`samosa app` starts a local server and opens a chat page in your browser.
+Everything runs on your machine. The page makes no outside requests.
+
+```sh
+samosa serve          # start the server in the foreground on 127.0.0.1:8642
+samosa app            # start the server in the background and open the chat page
+samosa serve --stop   # stop the server
+```
+
+What the app does:
+
+- Streams the answer as the model writes it.
+- Shows the model's thinking separately from its final answer.
+- Lets you stop a generation at any time.
+- Saves your conversations so you can continue them later.
+- Shows live speed (tokens per second) and current memory use.
+- Has settings for thinking mode, maximum answer length, and a fixed seed.
+
+The server answers these HTTP endpoints:
+
+- `GET /healthz` — status, memory use, the context limit, queue state, last speed
+- `GET /v1/models`
+- `POST /v1/chat/completions` — reply as JSON, or stream token by token (SSE)
+- `POST /v1/cancel` — stop the current generation
+- `POST /v1/shutdown` — stop the server cleanly
+
+Only one request runs at a time. Extra requests wait in a short queue.
+
+**Stopping an answer is safe.** When you stop an answer partway through, Samosa
+saves the conversation only up to the last complete sentence. This matters:
+before this fix, if you stopped an answer in the middle of a sentence, the next
+answer in that chat would copy the cut-off style and reply with only a word or
+two before stopping. That is now fixed. If a stopped answer has no complete
+sentence yet, Samosa keeps the previous saved state instead of overwriting it.
+
+**Context limit.** Before a turn runs, Samosa checks it against a 24,576-token
+limit. That limit covers the saved history, your new message, and the maximum
+answer length, all added together. If a turn would go over, the server rejects
+it before using any memory. Only the conversation you are using is loaded into
+RAM. Opening other saved chats does not add to memory.
+
+## Install the published command-line tool
 
 ```sh
 curl -fsSL https://huggingface.co/deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-int4/resolve/main/install.sh | sh
 ```
 
-Requirements: an Apple Silicon Mac, 16 GB RAM, a C compiler from Apple's
-Command Line Tools, and roughly 25 GB free disk space. The current download is
-about 18 GB. The published installer resumes downloads, verifies SHA-256
-checksums, compiles the engine locally, and runs a smoke test. It requires no
-administrator privileges.
+You need an Apple Silicon Mac, 16 GB of RAM, Apple's Command Line Tools (for the
+C compiler), and about 25 GB of free disk. The download is about 18 GB. The
+installer resumes interrupted downloads, checks SHA-256 checksums, compiles the
+engine on your machine, and runs a quick test. It does not need administrator
+rights.
 
 ```sh
 samosa "explain how a hash table handles collisions"
@@ -85,203 +133,198 @@ samosa --seed 11 "give me a deterministic sample"
 samosa doctor
 ```
 
-The published wrapper defaults to a 512-new-token ceiling; `--long` raises it
-to 2,048. The model may stop earlier when it emits its end-of-turn token.
+By default an answer stops at 512 new tokens. `--long` raises that to 2,048. The
+model often stops earlier on its own.
 
-## What Samosa adds on top
+## Build and run from source
 
-The Qwen checkpoint and colibrì foundation are the starting point. Work added
-in this repository includes:
-
-- a Qwen3.6 text engine in C covering the 30 Gated DeltaNet layers, 10 gated
-  attention layers, shared/routed MoE path, tokenizer behavior, and chat
-  template;
-- a shard-by-shard converter and manifest-based expert container;
-- legacy row-q4 loading, group-32 symmetric q4, and an experimental mixed
-  group-q4 gate/up plus row-q8 down-projection format;
-- Apple NEON dot-product and portable AVX2 grouped-q4/q8-down paths;
-- a byte-budget expert cache with LRU eviction, per-layer floors, reusable
-  slabs, pressure monitoring, and structured I/O telemetry;
-- geometry-bound, SHA-256-sealed `QWSESS01` sessions with atomic writes and
-  byte-identical continuation from saved state;
-- Qwen's published direct/general/precise-code sampling profiles;
-- a bounded thinking-budget transition, separate natural/forced closure
-  telemetry, and a repeated-token-cycle guard;
-- a dependency-free C localhost server with JSON/SSE responses, a bounded
-  FIFO, cooperative cancellation, health telemetry, and clean shutdown;
-- a 32 KB framework-free local chat UI with no remote scripts, analytics, or
-  external requests, packaged with the transparent Samosa mascot;
-- an atomic, versioned installer design that verifies and smoke-tests an
-  inactive release before switching it live;
-- regression tooling for output structure, task-specific correctness,
-  upstream controls, quantized kernels, route traces, installer rollback, and
-  machine-pressure guardrails.
-
-## Thinking controls on `main`
-
-The source preview follows Qwen's published sampling recommendations:
-
-| profile | temperature | top-p | top-k | presence penalty | internal thinking budget |
-|---|---:|---:|---:|---:|---:|
-| direct | 0.7 | 0.80 | 20 | 1.5 | disabled |
-| general thinking | 1.0 | 0.95 | 20 | 1.5 | 1,024 |
-| precise code/WebDev | 0.6 | 0.95 | 20 | 0.0 | 2,048 |
-
-The source wrapper uses an 8,192-new-token **outer ceiling**, not a fixed answer
-length. The model decides when to stop inside that ceiling. If thinking reaches
-its internal budget, Samosa appends Qwen's trained natural-language early-stop
-transition before `</think>`; it does not inject a bare closing token. The
-transition is containment, not proof that the resulting answer is correct.
-
-A six-run upstream-compatible FP8 control used 353–616 reasoning tokens on the
-small arithmetic family. A matched local group-32 run closed naturally and
-answered correctly after 933 generated tokens with a 1,024-token thinking
-budget. That validates this path for one prompt family; it is **not** evidence
-of broad benchmark parity or release-wide stability. See
-[the upstream-control report](docs/UPSTREAM_CONTROL_2026-07-14.md) and
-[regression ledger](docs/REGRESSION_LEDGER.md).
-
-## Local app on `main`
-
-The interactive app is implemented and bounded-real tested on `main`; it is
-not in the current Hugging Face package yet.
+The browser app lives in this repository. To run it you need three things: the
+compiled engine, the model files, and the tokenizer.
 
 ```sh
-samosa serve          # foreground server on 127.0.0.1:8642
-samosa app            # background singleton + open the local chat UI
-samosa serve --stop   # cooperative shutdown
+make            # portable CPU build
+make omp        # multithreaded build (needs libomp on macOS)
+make test       # run the bounded tests
 ```
 
-Implemented endpoints:
+`make` builds the engine only. It has no Python dependency. The model files come
+from either the Hugging Face download (older model) or your own conversion with
+`tools/convert_qwen36.py`. Once the engine and model are in place, `samosa serve`
+and `samosa app` start the server. Full server details and the exact request
+format are in [docs/SERVE_API.md](docs/SERVE_API.md).
 
-- `GET /healthz`
-- `GET /v1/models`
-- `POST /v1/chat/completions`
-- `POST /v1/cancel`
-- `POST /v1/shutdown`
+Python is only used for conversion, analysis, and testing. It is not needed to
+run the model.
 
-Chat completions support JSON or SSE, separate reasoning/content deltas,
-sampler controls, `thinking`, `thinking_budget`, `max_tokens`, and a sanitized
-`conversation_id`. Requests are serialized through one model with a bounded
-wait queue. The UI streams answers and reasoning separately, can stop
-generation, stores its display transcript in browser-local storage, and shows
-tokens/s, RSS, and thinking closure. Conversation snapshots are durable, but
-the planned four-slot in-RAM LRU, server-side transcript index, and write
-batching are not implemented yet. API details and measured acceptance are in
-[docs/SERVE_API.md](docs/SERVE_API.md).
+## What Samosa adds on top of Qwen and colibrì
 
-Stopping a generation is safe for the conversation's history. A cancelled turn
-is saved only up to its last complete sentence, so an interrupted, mid-sentence
-answer cannot derail later turns; if the turn produced no complete sentence,
-the previous snapshot is kept untouched and the response reports
-`session_saved: false`. Before this fix, resuming from a mid-sentence
-truncation caused the model to imitate the cutoff and reply with only a few
-tokens before stopping. Natural, length, and repetition stops are unaffected.
+The Qwen model and the colibrì runtime are the starting point. This repository
+adds:
 
-Every turn is preflighted against a 24,576-token total context cap: saved
-history plus the newly tokenized user turn plus the requested output ceiling
-must fit. The server rejects an oversized turn before queueing or allocating
-KV state. Only the active conversation is restored into RAM; opening more
-saved chats does not keep multiple KV caches resident.
+- A Qwen3.6 text engine written in C. It covers the 30 Gated DeltaNet layers,
+  the 10 gated attention layers, the shared and routed expert path, the
+  tokenizer, and the chat template.
+- A converter that turns the original Qwen checkpoint into Samosa's format,
+  shard by shard, with a manifest-based container for the expert weights.
+- Three weight formats: the older whole-row int4, the newer group-32 int4, and
+  an experimental mixed format (group int4 for gate/up, row int8 for the
+  down-projection).
+- CPU math for those formats: Apple NEON dot-product on Apple Silicon, and a
+  portable AVX2 path for other CPUs.
+- An expert cache that keeps a fixed byte budget in RAM, drops the
+  least-recently-used experts first, keeps a floor per layer, reuses freed
+  memory, watches system memory pressure, and reports its I/O.
+- Saved conversations (`QWSESS01` files) that are checked against the model
+  geometry, sealed with a SHA-256 hash, written atomically, and can be resumed
+  exactly.
+- Qwen's published sampling settings for direct, general-thinking, and
+  precise-code modes.
+- A thinking-budget limit with a clean hand-off to the answer, separate counts
+  for natural versus forced endings, and a guard that stops a repeating token
+  loop.
+- A local HTTP server in C with no dependencies: JSON or streaming replies, a
+  bounded request queue, cancellation, health reporting, and clean shutdown.
+- A 32 KB browser chat page with no external scripts, no analytics, and no
+  outside requests, shipped with the Samosa logo.
+- An installer that verifies and tests a new version in place before switching
+  to it, and rolls back if the new version is bad.
+- Test tooling for output structure, task correctness, upstream comparisons,
+  the quantized math, route traces, installer rollback, and memory-pressure
+  limits.
 
-A real group-32 app-path check served the UI and logo, then streamed exactly
-`Samosa app works locally.` through the browser endpoint. It stopped naturally
-at Qwen's end-of-turn token, saved its session, decoded at 5.13 tok/s on two
-threads, and peaked at 3.28 GB RSS. That check also caught and fixed an earlier
-server bug that leaked special control tokens into visible output.
+## Thinking modes
 
-## Model layout and storage
+Samosa uses Qwen's published sampling settings:
 
-Qwen describes the upstream language model as 35B parameters total with 3B
-activated per token, 40 layers, 256 routed experts, and 8 routed plus 1 shared
-expert active per MoE layer.
+| mode | temperature | top-p | top-k | presence penalty | thinking budget |
+|---|---:|---:|---:|---:|---:|
+| direct | 0.7 | 0.80 | 20 | 1.5 | off |
+| general thinking | 1.0 | 0.95 | 20 | 1.5 | 1,024 tokens |
+| precise code | 0.6 | 0.95 | 20 | 0.0 | 2,048 tokens |
 
-Samosa currently has two materially different artifacts:
+The maximum answer length is an outer limit, up to 8,192 new tokens. It is not a
+fixed length. The model decides when to stop within that limit. If the thinking
+reaches its budget, Samosa adds Qwen's trained wind-down text before closing the
+`</think>` block, rather than cutting it off with a bare token. Closing the
+thinking block keeps the output well-formed; it does not prove the answer is
+correct.
 
-| artifact | routed experts | resident weights | release status |
+One test compared this against an upstream FP8 reference on a small set of
+arithmetic problems. The reference used 353–616 thinking tokens. A matching
+local group-32 run answered correctly and stopped on its own after 933 tokens
+with a 1,024-token thinking budget. This confirms the path works for that one
+kind of problem. It is not proof of broad benchmark quality. See the
+[upstream-control report](docs/UPSTREAM_CONTROL_2026-07-14.md) and the
+[regression ledger](docs/REGRESSION_LEDGER.md).
+
+## The two model versions
+
+Qwen describes the model as 35B parameters in total with about 3B used per
+token, 40 layers, 256 routed experts, and 8 routed plus 1 shared expert active
+in each Mixture-of-Experts layer.
+
+Samosa has two model versions:
+
+| version | expert weights | shared weights | status |
 |---|---:|---:|---|
-| published legacy row-q4 | 16.6 GB | 1.3 GB | available from Hugging Face |
-| local group-32 q4 baseline | 20.94 GB | 3.02 GB | tested locally, not published |
+| older whole-row int4 | 16.6 GB | 1.3 GB | published on Hugging Face |
+| newer group-32 int4 | 20.94 GB | 3.02 GB | tested locally, not published |
 
-Group-32 uses more scale data and larger resident row-q8 payloads. It reduced
-measured weight reconstruction error relative to the original whole-row q4
-format, but one successful reasoning control is not enough to call the artifact
-release-stable. The mixed q4/q8-down format exists in code only; no full mixed
-artifact was produced.
+The group-32 version uses finer scaling data and larger shared int8 weights. It
+reconstructs the original weights with less error than the older whole-row
+format. One good reasoning run is not enough to call it fully proven, so it is
+not published yet. The mixed int4/int8 format exists in code only; no full model
+was built in it.
 
-## Measured performance
+## Speed
 
-All numbers below are from one fanless MacBook Air M3 with 16 GB RAM. They are
-workload-specific observations, not cross-platform guarantees.
+All numbers are from one fanless MacBook Air M3 with 16 GB of RAM. They describe
+specific runs on this one machine, not a guarantee for other machines.
 
-| artifact / workload | threads | result |
+| model and task | threads | speed |
 |---|---:|---:|
-| published legacy, ordinary decode | 2 | typically 7–8 tok/s |
-| published legacy, `--fast` decode | 4 | about 9.5 tok/s |
-| published legacy, prefill | 2–4 | about 14–24 tok/s |
-| group-32 direct control | 2 | 7.27 tok/s |
-| group-32 933-token thinking control | 2 | 4.85 tok/s |
-| selective-precision 5,000-token WebDev control | 4 | 6.47 tok/s |
+| older model, normal decode | 2 | about 7–8 tokens/sec |
+| older model, `--fast` decode | 4 | about 9.5 tokens/sec |
+| older model, prefill | 2–4 | about 14–24 tokens/sec |
+| group-32, direct answer | 2 | 7.27 tokens/sec |
+| group-32, 933-token thinking answer | 2 | 4.85 tokens/sec |
+| group-32, 5,000-token code page | 4 | 6.47 tokens/sec |
 
-Historical CLI runs reported roughly 2.5–3 GB peak RSS on the legacy artifact
-and 3.2–3.9 GB on group-32 runs. In the resident app, memory behaves in three
-stages. Fresh model load is about **2.5 GiB**. The first turn warms the expert
-cache by roughly 1.3 GB, taking the footprint to about **3.9 GiB**. After that,
-the footprint **rises with the length of the active conversation**: in one test
-it grew about 143 MB as a single chat went from 176 to 1,017 tokens, while the
-expert-cache payload stayed flat at 1.29 GB the whole time.
+Decode is the speed of writing the answer. Prefill is the speed of reading your
+input before it starts. Prefill is the slow part for long inputs: reading a
+5,000-token document once takes about 3.5–6 minutes. Saved conversations mean a
+document is read only once.
 
-That growth is bounded, not a leak. KV state itself is about 40 KiB per token
-across the ten attention layers; the observed footprint climb is somewhat
-higher because the allocator retains its high-water mark. For a fixed-length
-conversation the footprint plateaus — a same-length eight-turn test held at
-**3.91–3.92 GiB**. The 24,576-token context cap bounds the worst case to
-roughly **5–5.5 GiB** after a maximum-length chat, and only one conversation is
-resident at a time. An earlier build leaked about 210 MB per turn until its
-surplus evicted-slab pool was fixed.
+## Memory use
 
-Footprint and telemetry now use the macOS physical-footprint metric
-(`TASK_VM_INFO`), which a live Activity Monitor comparison confirmed matches.
-Residual swap can linger from an earlier high-pressure period even after memory
-frees up — macOS does not shrink the swap file or page data back in on its own —
-so a nonzero swap figure does not by itself mean Samosa is swapping now; the
-signal to trust is green memory pressure. Durable sessions write a roughly
-63–70 MB sealed snapshot at turn end. Model data itself is read-only.
+On the command-line tool, older runs used about 2.5–3 GB and group-32 runs used
+about 3.2–3.9 GB.
 
-### The real wear driver is SSD reads, not swap
+In the app, memory grows in three stages:
 
-This matters for the machine, so read it plainly. Samosa keeps memory small by
-**not** holding all 35B parameters in RAM — instead it streams each token's
-routed experts from the SSD as the model selects them. The longer an answer is,
-the more expert data it reads, and popular experts are read again and again.
+1. **Model loaded, no chat yet:** about **2.5 GiB**.
+2. **After the first answer:** about **3.9 GiB**. The first answer fills the
+   expert cache, which adds about 1.3 GB and then holds steady.
+3. **As a conversation gets longer:** memory rises slowly with the length of the
+   conversation you are in. In one test it rose about 143 MB while a single chat
+   grew from 176 to 1,017 tokens. The expert cache stayed flat at 1.29 GB the
+   whole time.
 
-The numbers are not small. One 933-token group-32 **thinking** run reread
-**376 GB** of expert data from disk. By comparison, the swap traffic people
-sometimes worry about is trivial: on the reference machine the whole system —
-Samosa, editor, browser, everything — had written under ~9 GB to swap since
-boot. **Expert streaming — not swap — is what actually puts wear on your SSD**,
-and it scales with how long the model thinks.
+That growth is bounded, not a leak. The per-token memory (the KV cache) is about
+40 KiB per token across the 10 attention layers. The measured rise is a little
+higher because the memory allocator holds on to its high point. For a
+conversation of fixed length, memory levels off — an eight-turn test on the same
+length held at **3.91–3.92 GiB**. The 24,576-token limit caps the worst case at
+roughly **5–5.5 GiB** after a maximum-length chat. Only one conversation is in
+memory at a time.
 
-What this means for you, and how Samosa honors the "no excessive wear"
-principle:
+The memory number the app shows is the real macOS "physical footprint," which
+matches Activity Monitor.
 
-- **Longer thinking costs disk, not just time.** A quick factual answer reads a
-  little; a long chain-of-thought reads a lot. Use `thinking: off` / `--direct`
-  when you don't need reasoning.
-- Two threads are the cool default so the machine stays quiet and cool; `--fast`
-  (4 threads) is opt-in.
-- Real-model test runs are deliberately kept short — a single long reasoning
-  run can reread hundreds of gigabytes, so the project does not spray them.
-- SSD speed and endurance genuinely matter here. This is a fundamental
-  trade-off of running a 35B model in 16 GB, not a bug — but it is the one
-  resource worth being deliberate about.
+A note on swap: on macOS, swap can stay in use from an earlier busy period even
+after memory frees up. macOS does not shrink the swap file or pull that data
+back on its own. So swap being in use does **not** by itself mean Samosa is
+swapping now. The signal to trust is green memory pressure.
 
-## Real output from the legacy row-q4 artifact
+Each saved turn writes a 63–70 MB sealed file to disk. The model files
+themselves are read-only.
 
-The following landing page was generated on the 16 GB reference machine from
-the same legacy row-q4 model format as the published artifact. The current
-published wrapper needs `--long` to leave enough room for the 1,807-token
-answer. The rendered screenshot is unedited.
+## SSD wear: the one thing to be deliberate about
+
+This is the most important part for the health of your machine, so it is stated
+plainly.
+
+Samosa keeps memory small by **not** holding all 35B parameters in RAM. Instead
+it reads each token's expert weights from the SSD as the model needs them. The
+longer an answer is, the more expert data it reads. The same popular experts get
+read again and again.
+
+The amount is large. One 933-token thinking answer read **376 GB** of expert
+data from the SSD. For comparison, swap — which people often worry about — is
+tiny here: over the same session the whole system (Samosa, editor, browser, all
+of it) wrote under about 9 GB to swap since the machine booted.
+
+So the reads from expert streaming, not swap, are what actually wear the SSD,
+and the amount scales with how long the model thinks.
+
+What this means for you:
+
+- **Longer thinking costs disk reads, not just time.** A short factual answer
+  reads little. A long chain of thought reads a lot. Use direct mode
+  (`thinking: off` in the app, `--direct` on the command line) when you do not
+  need step-by-step reasoning.
+- Two threads is the default so the Mac stays cool. `--fast` (4 threads) is
+  something you choose on purpose.
+- Real-model test runs are kept short on purpose, because one long thinking run
+  can read hundreds of gigabytes.
+- SSD speed and lifespan genuinely matter here. This is the basic trade-off of
+  running a 35B model in 16 GB of RAM. It is not a bug. It is the one resource
+  worth spending on purpose.
+
+## Example answers
+
+These were generated on the 16 GB reference Mac using the same older model
+format that is on Hugging Face. The screenshot is not edited.
 
 ```sh
 samosa --fast --long --seed 11 "Write a complete, single-file landing page (HTML with embedded CSS, \
@@ -291,9 +334,10 @@ a menu with four items, and a footer. Clean, modern, dark theme. Keep the CSS co
 
 <p align="center"><img src="assets/example-landing.png" alt="Kaapi landing page generated by Samosa Chat" width="740"></p>
 
-Exact-run stats: 1,807 generated tokens, 9.60 tok/s decode, 2.47 GB peak RSS.
+This run: 1,807 tokens, 9.60 tokens/sec, 2.47 GB peak memory. The published tool
+needs `--long` to leave room for an answer this long.
 
-The same published artifact generated the following Python utility:
+The same model wrote this Python function:
 
 ```sh
 samosa "Write a Python function merge_intervals(intervals) that merges overlapping \
@@ -331,80 +375,65 @@ def merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
     return merged
 ```
 
-The function passed overlap, adjacency, empty-input, and unsorted-input tests.
-Exact-run stats: 191 generated tokens, 11.19 tok/s decode, 2.53 GB peak RSS.
+It passed the overlap, adjacent, empty-input, and unsorted-input tests. This
+run: 191 tokens, 11.19 tokens/sec, 2.53 GB peak memory.
 
-## Validation and release discipline
+## Testing
 
-`make test` currently covers the expert cache, long-context KV math, repetition
-guard, Qwen budget transition, grouped-q4/q8-down kernels, server components,
-wrapper behavior, atomic installer rollback, output structure, route analysis,
-and converter layouts. The OpenMP engine build and shell/Python syntax checks
-also pass.
+`make test` covers the expert cache, the long-context KV math, the repetition
+guard, the thinking wind-down, the quantized math, the server, the command-line
+wrapper, installer rollback, output structure, route analysis, and the converter
+layout. The multithreaded build and the shell and Python syntax checks also run.
 
-The earlier evaluation harness contained a serious false positive: substring
-checks reported 14/15 passes even though 0/15 samples closed `</think>`.
-Structural closure, natural-versus-forced termination, repetition, model stop,
-and task correctness are now scored separately. The current evidence is still
-too small to publish a general benchmark score. The intended evaluation ladder
-is documented in [docs/BENCHMARK_PLAN.md](docs/BENCHMARK_PLAN.md).
-
-## Build from source
-
-```sh
-make            # portable CPU build
-make omp        # multithreaded build; requires libomp on macOS
-make test       # bounded tests; does not run long real-model generation
-```
-
-The engine has no Python runtime dependency. Python is used by conversion,
-analysis, and regression tooling. `tools/convert_qwen36.py` consumes the
-original Qwen checkpoint; conversion is not part of a normal user install.
+An earlier test harness had a serious false positive: it reported 14 of 15
+passes using substring checks, even though 0 of 15 answers actually closed their
+`</think>` block. Structural closing, natural versus forced endings, repetition,
+model stop, and task correctness are now scored separately. There is still not
+enough evidence to publish a general benchmark score. The planned evaluation
+steps are in [docs/BENCHMARK_PLAN.md](docs/BENCHMARK_PLAN.md).
 
 ## Privacy and machine safety
 
-- Inference is local. The engine contains no telemetry client and the server
-  binds to IPv4 loopback only.
-- The one-line installer contacts Hugging Face to download public release
-  files; normal inference does not require a cloud account.
-- The macOS build is CPU-only. It uses NEON/SDOT and optional OpenMP, not Metal.
-- CPU-only describes the current compute backend, not cross-platform support.
-- Two threads remain the cool default; `--fast` is explicit.
-- The expert cache monitors pressure and can evict payloads before the OS is
-  forced to swap.
-- Cancellation is checked between generated tokens in server mode.
-- Real-model regressions are bounded because a single long reasoning run can
-  reread hundreds of gigabytes from the expert store.
+- The model runs on your machine. The engine has no telemetry. The server
+  listens on local loopback only.
+- The installer contacts Hugging Face only to download the public release files.
+  Running the model does not need a cloud account.
+- The macOS build is CPU-only. It uses NEON and optional OpenMP, not Metal.
+- Two threads is the cool default. `--fast` is a deliberate choice.
+- The expert cache watches memory pressure and can drop cached experts before
+  the system is forced to swap.
+- In the server, a generation can be cancelled between tokens.
+- Real-model test runs are kept short because one long run can read hundreds of
+  gigabytes from the SSD.
 
-## Known limitations
+## What is not done yet
 
-- The published artifact still uses coarse whole-row q4. It can produce
-  isolated word-level defects such as `of ofof`; re-asking or changing the seed
-  may avoid an instance but is not a complete fix.
-- The group-32 baseline is promising, not broadly validated or published.
-- In-RAM conversation slots, server-side transcript management, document chat,
-  and web access remain roadmap items. Deleting a chat in the current UI
-  removes its browser transcript but does not yet remove its server snapshot.
-- Long-context generation coverage is still thin. A stack-overflow defect above
-  4,096 tokens was fixed, but the bounded >4K/>8K release regression remains
-  open.
-- Only macOS on Apple Silicon has been exercised as a product. Linux paths are
-  present but unvalidated; Windows is not supported by Samosa Chat.
-- Metal acceleration is not implemented. Apple GPU work is a planned measured
-  optimization; the current SSD-streaming path remains partly I/O-bound.
-- Text only: images, video, audio, tool calling, and Qwen's vision tower are not
-  supported.
-- SSD speed and endurance matter because routed experts are streamed and can be
-  reread many times during long answers.
+- The published model still uses the coarse whole-row int4 format. It can make
+  small word-level mistakes such as `of ofof`. Asking again or changing the seed
+  can avoid a given case but does not fully fix it.
+- The group-32 model is promising but not broadly tested or published.
+- Some app features are still planned: keeping recent conversations in RAM
+  instead of reading them from disk each turn, managing transcripts on the
+  server, chatting over a document, and web access. Deleting a chat in the app
+  removes it from the browser but does not yet delete its saved file on disk.
+- Long-answer coverage is still thin. A crash above 4,096 tokens was fixed, but
+  the planned test for very long answers is not written yet.
+- Only macOS on Apple Silicon has been tested as a product. Linux code paths
+  exist but are unverified. Windows is not supported.
+- There is no Metal (GPU) support yet. It is a planned optimization. For now,
+  part of the work is limited by SSD read speed.
+- Text only. No images, video, audio, tool calling, or Qwen's vision part.
+- SSD speed and lifespan matter, because expert weights are streamed and reread
+  many times during long answers.
 
-## Roadmap and documentation
+## More documentation
 
 - [App task program](docs/APP_TASKS.md)
-- [Resident server API and acceptance](docs/SERVE_API.md)
+- [Server API and acceptance tests](docs/SERVE_API.md)
 - [Thinking-mode diagnosis](docs/THINKING_DIAGNOSIS.md)
-- [Group-32 baseline](docs/GROUP32_BASELINE.md)
-- [Storage migration ledger](docs/STORAGE_MIGRATION_2026-07-14.md)
-- [Upstream-compatible control](docs/UPSTREAM_CONTROL_2026-07-14.md)
+- [Group-32 model notes](docs/GROUP32_BASELINE.md)
+- [Storage migration log](docs/STORAGE_MIGRATION_2026-07-14.md)
+- [Upstream comparison](docs/UPSTREAM_CONTROL_2026-07-14.md)
 - [Detailed work log](docs/WORK_LOG_2026-07-14.md)
 
 ## License
