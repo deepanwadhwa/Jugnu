@@ -31,6 +31,16 @@ int main(void){
     assert(!context_fits(24000,500,77));
     assert(!context_fits(24576,1,1));
 
+    assert(piece_ends_sentence("2003.",5));
+    assert(piece_ends_sentence(".\n\n",3));
+    assert(piece_ends_sentence(" done!)\n",8));
+    assert(piece_ends_sentence("?\"",2));
+    assert(piece_ends_sentence("cost.**",7));
+    assert(!piece_ends_sentence(" trains",7));
+    assert(!piece_ends_sentence("\n\n",2));
+    assert(!piece_ends_sentence("list:\n",6));
+    assert(!piece_ends_sentence(")",1));
+
     ServeBuffer escaped={0};
     assert(serve_json_escape(&escaped,"a\n\"b",4));
     assert(!strcmp(escaped.data,"a\\n\\\"b"));free(escaped.data);

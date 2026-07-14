@@ -2920,6 +2920,7 @@ typedef struct {
     int thinking_forced;
     int session_save_requested;
     int session_save_failed;
+    int session_save_skipped;
     double prefill_s, decode_s, total_s;
 } GenStats;
 
@@ -3192,6 +3193,42 @@ static int session_save(Model *m, const int *tokens, int len, const char *path) 
 static void session_die(const char *path, const char *why) {
     fprintf(stderr, "sessione: %s non valida: %s\n", path, why);
     exit(1);
+}
+
+/* Vero se il pezzo decodificato termina una frase: .!? dopo aver ignorato
+ * spazi, a-capo e chiusure tipo )]"'*` in coda. */
+static int piece_ends_sentence(const char *piece, int n) {
+    while (n > 0) {
+        char c = piece[n-1];
+        if (c==' '||c=='\t'||c=='\n'||c=='\r'||c==')'||c==']'||c=='"'||c=='\''||c=='*'||c=='`') n--;
+        else break;
+    }
+    return n > 0 && (piece[n-1]=='.' || piece[n-1]=='!' || piece[n-1]=='?');
+}
+
+/* Un turno annullato non deve persistere un troncamento a metà frase nella
+ * storia durevole: il modello imita le risposte tronche e i turni successivi
+ * degenerano fino a fermarsi dopo pochi token. Teniamo il prefisso fino
+ * all'ultima frase completa fuori da un blocco <think> aperto; 0 = nessuna
+ * frase completa, non sovrascrivere lo snapshot precedente. Lo stato
+ * ricorrente DeltaNet resta quello corrente: residuo semantico innocuo dei
+ * token scartati, mentre token e righe KV sono un prefisso esatto. */
+static int cancelled_turn_trim(Tok *tok, const int *transcript, int answer_start,
+                               int final_len, int think_open, int think_close) {
+    int last_open = -1, last_close = -1;
+    for (int i = answer_start; i < final_len; i++) {
+        if (transcript[i] == think_open) last_open = i;
+        else if (transcript[i] == think_close) last_close = i;
+    }
+    if (last_open > last_close) final_len = last_open;
+    int from = last_close >= answer_start ? last_close + 1 : answer_start;
+    int boundary = -1;
+    for (int i = from; i < final_len; i++) {
+        int id = transcript[i]; char piece[512];
+        int n = tok_decode(tok, &id, 1, piece, (int)sizeof(piece) - 1);
+        if (n > 0 && piece_ends_sentence(piece, n)) boundary = i;
+    }
+    return boundary >= 0 ? boundary + 1 : 0;
 }
 
 static void session_read(FILE *f, RefineSha256 *sha, void *out, size_t bytes,
@@ -3805,8 +3842,23 @@ static int run_chat(Model *m, const char *tokenizer_path, const char *user,
         }
     }
     stats.session_save_requested = save_session != NULL;
-    if (save_session)
-        stats.session_save_failed = session_save(m, transcript, final_len, save_session) != 0;
+    int save_len = final_len;
+    if (save_session && stats.cancelled) {
+        save_len = cancelled_turn_trim(tok, transcript, np, final_len,
+                                       tok_id_of(tok, "<think>"),
+                                       tok_id_of(tok, "</think>"));
+        if (!save_len) {
+            stats.session_save_skipped = 1;
+            fprintf(stderr, "[session] turno annullato senza frase completa: "
+                            "snapshot precedente conservato\n");
+        } else if (save_len < final_len) {
+            fprintf(stderr, "[session] turno annullato: salvo %d/%d token "
+                            "(fino all'ultima frase completa)\n",
+                    save_len - np, final_len - np);
+        }
+    }
+    if (save_session && !stats.session_save_skipped)
+        stats.session_save_failed = session_save(m, transcript, save_len, save_session) != 0;
     stats.prompt=np;
     double hit_rate=(m->hits+m->miss)?(double)m->hits/(double)(m->hits+m->miss):0.0;
     double decode_tps=(stats.generated>1 && stats.decode_s>0)
@@ -4084,7 +4136,7 @@ static int serve_send_nonstream(int fd,ServeTokenSink *sink,const GenStats *stat
         stats->prompt+stats->generated,closure,
         stats->generated>1&&stats->decode_s>0?(stats->generated-1)/stats->decode_s:0,
         rss_gb(),stats->session_save_requested
-            ? (stats->session_save_failed?"false":"true") : "null");
+            ? ((stats->session_save_failed||stats->session_save_skipped)?"false":"true") : "null");
     ok=ok&&n>0&&serve_buffer_append(&body,suffix,(size_t)n)&&
        samosa_http_headers(fd,200,"application/json",body.length,NULL)&&
        samosa_send_all(fd,body.data,body.length);
@@ -4103,7 +4155,7 @@ static int serve_send_stream_end(int fd,const GenStats *stats){
         stats->generated,stats->prompt+stats->generated,closure,
         stats->generated>1&&stats->decode_s>0?(stats->generated-1)/stats->decode_s:0,
         rss_gb(),stats->session_save_requested
-            ? (stats->session_save_failed?"false":"true") : "null");
+            ? ((stats->session_save_failed||stats->session_save_skipped)?"false":"true") : "null");
     return n>0&&(size_t)n<sizeof(event)&&samosa_send_all(fd,event,(size_t)n);
 }
 
