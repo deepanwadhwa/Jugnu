@@ -152,6 +152,12 @@ the planned four-slot in-RAM LRU, server-side transcript index, and write
 batching are not implemented yet. API details and measured acceptance are in
 [docs/SERVE_API.md](docs/SERVE_API.md).
 
+Every turn is preflighted against a 24,576-token total context cap: saved
+history plus the newly tokenized user turn plus the requested output ceiling
+must fit. The server rejects an oversized turn before queueing or allocating
+KV state. Only the active conversation is restored into RAM; opening more
+saved chats does not keep multiple KV caches resident.
+
 A real group-32 app-path check served the UI and logo, then streamed exactly
 `Samosa app works locally.` through the browser endpoint. It stopped naturally
 at Qwen's end-of-turn token, saved its session, decoded at 5.13 tok/s on two
@@ -191,9 +197,24 @@ workload-specific observations, not cross-platform guarantees.
 | group-32 933-token thinking control | 2 | 4.85 tok/s |
 | selective-precision 5,000-token WebDev control | 4 | 6.47 tok/s |
 
-Measured peak RSS was roughly 2.5–3 GB on legacy direct runs and 3.2–3.9 GB
-on group-32 chat/server runs. Durable sessions write a roughly 63–70 MB sealed
-snapshot at turn end. Model data itself is read-only.
+Historical CLI runs reported roughly 2.5–3 GB peak RSS on the legacy artifact
+and 3.2–3.9 GB on group-32 runs. In the resident app, the authoritative macOS
+physical footprint measured 2.51 GiB immediately after model load and 4.07 GiB
+after a real two-turn continuation; `footprint` independently reported
+2,566 MiB and 4,170 MiB for the same samples. The app now reports that
+physical-footprint metric, and a live Activity Monitor comparison confirmed
+the displayed value matches macOS.
+
+GQA KV state grows by about 40 KiB per context token, so the 24,576-token cap
+bounds that variable component to about 960 MiB. Only one conversation state
+is loaded at a time. The allocator may retain a previous high-water mark, so
+the process is bounded rather than expected to stay flat at exactly 4.07 GiB.
+An eight-turn repeated-conversation test on the current build plateaued at
+3.91–3.92 GiB after first-turn expert-cache warm-up, confirmed by macOS
+`footprint`; an earlier build grew about 210 MB per turn until its surplus
+evicted-slab pool was fixed.
+Durable sessions write a roughly 63–70 MB sealed snapshot at turn end. Model
+data itself is read-only.
 
 The 933-token group-32 reasoning control reread 376.77 GB of expert data. That
 read amplification is a real product constraint: longer thinking can be useful,

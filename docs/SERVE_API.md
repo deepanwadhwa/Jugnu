@@ -19,7 +19,8 @@ samosa serve --stop   # cooperative cancellation + clean shutdown
 
 - `GET /` — dependency-free interactive Samosa Chat application.
 - `GET /assets/samosa-chat.png` — local transparent app mascot.
-- `GET /healthz` — RSS, uptime, queue state, and last-generation speed.
+- `GET /healthz` — macOS physical footprint, the 24,576-token context cap,
+  uptime, queue state, and last-generation speed.
 - `GET /v1/models` — OpenAI-shaped model listing.
 - `POST /v1/chat/completions` — JSON or SSE chat response.
 - `POST /v1/cancel` — cooperatively stop the active generation between tokens.
@@ -34,7 +35,16 @@ Supported controls are `stream`, `max_tokens`/`max_completion_tokens` (1..8192),
 The current developer preview persists a sealed `session.qws` under
 `~/.samosa/chats/<id>/`, so later turns avoid history prefill and survive a
 restart. The planned four-slot in-RAM LRU is not implemented yet; turns restore
-the snapshot from disk.
+the snapshot from disk. Only the active request's conversation state is loaded,
+so multiple saved chats do not accumulate KV allocations in RAM.
+
+The exact tokenized request is checked before queue admission or stream
+headers. Saved history + the new turn + the requested completion ceiling must
+not exceed 24,576 tokens. Oversized turns receive `400 context_limit` without
+allocating their KV state. At roughly 40 KiB per token across the ten GQA
+layers, this bounds the variable KV component to about 960 MiB.
+The session choice and token count are checked again after queue admission, so
+two requests for the same conversation cannot race against a stale snapshot.
 
 Example:
 
@@ -70,6 +80,14 @@ visible instead of being silently reported as durable.
   bodies are rejected. The listener is hard-bound to IPv4 loopback.
 - Per-request KV/DeltaNet state and sampler bitmaps are explicitly reclaimed;
   the tokenizer and model/expert cache remain resident.
+- On macOS, API/UI `rss_gb` is the process's current physical footprint from
+  `TASK_VM_INFO`, matching Activity Monitor and `footprint`. CLI regression
+  logs retain their separate historical peak-RSS metric.
+- After each turn, Samosa frees surplus evicted-expert slabs that are outside
+  the live byte-budgeted cache; the 64 miss-scratch slots already provide the
+  needed cross-turn allocation reuse. It then asks Darwin malloc to return
+  free KV/scratch pages to the OS. Live model weights and cache entries are
+  untouched.
 
 ## Verified 2026-07-14
 
@@ -93,6 +111,19 @@ from visible answers, stops generation, keeps browser-local transcripts, and
 reports speed/RSS/closure telemetry. A bounded group-32 app-path check returned
 the exact requested answer in 8 generated tokens, stopped on Qwen's end-of-turn
 token, saved the session, decoded at 5.13 tok/s, and peaked at 3.28 GB RSS.
+
+After the context-cap and telemetry correction, a fresh resident process
+reported 2.51 GiB while macOS `footprint` reported 2,566 MiB. A real two-turn
+sealed-session check returned exactly `OK` then `YES` at 7.05/6.96 tok/s;
+both the API and `footprint` agreed on 4.07 GiB / 4,170 MiB after the turn.
+The user separately confirmed the app value matched Activity Monitor. The
+temporary 64 MB test snapshot was removed.
+
+After the evicted-slab pool fix, an eight-turn repeated test on one resumed
+conversation (including a 64-token generation) loaded fresh at 2.51 GiB,
+warmed to 3.91 GiB on the first turn, and plateaued at 3.91–3.92 GiB;
+`footprint` reported 4,010–4,017 MB for the same samples. Before the fix the
+identical test grew about 210 MB per turn.
 
 Still required for the broader app program: in-RAM conversation slots with
 write batching, server-side transcript management, the bounded long-context

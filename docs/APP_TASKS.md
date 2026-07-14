@@ -15,9 +15,11 @@ tradition of the engine's own task program.
   (2-thread cool default) / ~9.5 (4T); prefill ~14 (2T) / ~24 tok/s (4T).
   **Prefill is the document-chat constraint**: a 5,000-token document costs
   ~3.5–6 minutes to read once. Sessions make it pay-once-per-document.
-- RAM: ~2.5 GB peak RSS in chat; KV grows 40 KB/token → a 24K-token context
-  budget costs ~1 GB. 16 GB machines have headroom; zero-swap is a standing
-  guardrail.
+- RAM: the resident app's macOS physical footprint measured 2.51 GiB fresh and
+  4.07 GiB after a real two-turn continuation. KV grows ~40 KiB/token; the
+  enforced 24,576-token total-context cap bounds that variable component to
+  ~960 MiB. One conversation state is resident at a time. Zero new swap remains
+  a standing guardrail.
 - Context safety: contexts > 4,096 tokens are exercised and safe as of the
   2026-07-13 `attention_gqa` fix; long-context generation coverage is still
   thin (see A0.4).
@@ -132,9 +134,12 @@ opens `http://127.0.0.1:8642` in the default browser, prints the URL.
 
 ### A0.4 Long-context generation test (debt from the 4096 fix)  ~0.5 day
 
-**Status (2026-07-14): not yet implemented.** The acceptance design below was
-corrected to use a tiny fixture plus bounded real prefill, but neither arm is
-being claimed as complete.
+**Status (2026-07-14): safety cap implemented; long-context regression still
+open.** The server now tokenizes and rejects any turn whose saved history + new
+turn + requested generation can exceed 24,576 tokens, before KV allocation or
+stream headers. Pure boundary tests cover the cap arithmetic. The acceptance
+design below still requires a tiny attention fixture plus bounded real prefill;
+neither long-context arm is being claimed as complete.
 
 The stack-overflow class was invisible to every existing test. Add a tiny
 fixture that crosses shrunken equivalents of both boundaries on every test

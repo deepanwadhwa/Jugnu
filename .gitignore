@@ -5,3 +5,8 @@ test_kv_cache
 *.dSYM/
 model/
 .env
+test_groupwise_q4
+test_repetition_guard
+test_samosa_serve
+test_thinking_budget
+__pycache__/

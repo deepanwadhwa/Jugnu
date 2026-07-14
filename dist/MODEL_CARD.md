@@ -93,6 +93,11 @@ early-stop transition before `</think>` instead of injecting a bare control
 token. Natural closure, budget transition, repetition stop, cancellation, and
 length stop remain distinct in telemetry.
 
+Saved history, the newly tokenized turn, and the requested completion ceiling
+must fit a 24,576-token total context cap. Samosa rejects an oversized request
+before queueing or allocating KV state. One conversation state is resident at
+a time; other conversations remain as sealed snapshots on disk.
+
 ## Model layout
 
 Qwen describes the upstream language model as 35B parameters total with 3B
@@ -132,6 +137,14 @@ saved the conversation snapshot, decoded at 5.13 tok/s, and peaked at 3.28 GB
 RSS. The full bounded test suite covers grouped quantization, sessions, server
 behavior, special-token stopping, cancellation, the wrapper, and corrupt
 atomic-upgrade rollback.
+
+For the resident app, macOS physical footprint measured 2.51 GiB after model
+load and 4.07 GiB after a real two-turn continuation; the independent
+`footprint` tool reported 2,566 MiB and 4,170 MiB. A live Activity Monitor
+comparison also matched the value displayed by Samosa. GQA KV grows by about
+40 KiB per context token, so the 24,576-token cap bounds that variable
+component to about 960 MiB. The allocator may retain its high-water mark, but
+chat history cannot grow KV memory beyond the cap.
 
 Long thinking is expensive: one 933-token group-32 control reread 376.77 GB of
 expert data. More output tokens can be useful, but they increase time and SSD

@@ -26,6 +26,11 @@ static char *request(int port,const char *wire){
 }
 
 int main(void){
+    assert(context_fits(0,16384,8192));
+    assert(context_fits(24000,500,76));
+    assert(!context_fits(24000,500,77));
+    assert(!context_fits(24576,1,1));
+
     ServeBuffer escaped={0};
     assert(serve_json_escape(&escaped,"a\n\"b",4));
     assert(!strcmp(escaped.data,"a\\n\\\"b"));free(escaped.data);
@@ -50,7 +55,8 @@ int main(void){
     pthread_t thread;assert(!pthread_create(&thread,NULL,run_server_thread,&server));
 
     char *health=request(server.port,"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert(strstr(health,"HTTP/1.1 200 OK"));assert(strstr(health,"\"status\":\"ok\""));free(health);
+    assert(strstr(health,"HTTP/1.1 200 OK"));assert(strstr(health,"\"status\":\"ok\""));
+    assert(strstr(health,"\"context_limit_tokens\":24576"));free(health);
     double warm_rss=rss_gb();
     for(int i=0;i<20;i++){
         health=request(server.port,"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");

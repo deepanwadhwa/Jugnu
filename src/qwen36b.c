@@ -23,6 +23,7 @@
 #include "compat.h"
 #ifdef __APPLE__
 #include <mach/mach.h>
+#include <malloc/malloc.h>
 #include <sys/sysctl.h>
 #endif
 #ifdef _OPENMP
@@ -50,12 +51,21 @@ static float *falloc(int64_t n){
     float *p=malloc((size_t)n*sizeof(float)); if(!p){fprintf(stderr,"OOM\n");exit(1);} return p; 
 }
 static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec*1e-9; }
-static double rss_gb(void) { struct rusage r; getrusage(RUSAGE_SELF, &r);
+static double peak_rss_gb(void) {
+    struct rusage r; getrusage(RUSAGE_SELF,&r);
 #ifdef __APPLE__
-    return r.ru_maxrss / (1024.0*1024.0*1024.0);
+    return r.ru_maxrss/(1024.0*1024.0*1024.0);
 #else
-    return r.ru_maxrss / (1024.0*1024.0);
+    return r.ru_maxrss/(1024.0*1024.0);
 #endif
+}
+static double rss_gb(void) {
+#ifdef __APPLE__
+    task_vm_info_data_t info; mach_msg_type_number_t count=TASK_VM_INFO_COUNT;
+    if(task_info(mach_task_self(),TASK_VM_INFO,(task_info_t)&info,&count)==KERN_SUCCESS)
+        return info.phys_footprint/(1024.0*1024.0*1024.0);
+#endif
+    return peak_rss_gb();
 }
 
 static inline float sigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
@@ -1887,6 +1897,17 @@ static void eslot_release(void *context, const ecache_release_event *event) {
     }
 }
 
+static uint64_t eslot_pool_trim(Model *m,int keep){
+    if(keep<0)keep=0;
+    uint64_t released=0;
+    while(m->eslot_pool_n>keep){
+        ESlot *slot=m->eslot_pool[--m->eslot_pool_n];
+        if(slot->slab_cap>0)released+=(uint64_t)slot->slab_cap;
+        free(slot->slab);free(slot);
+    }
+    return released;
+}
+
 static ecache_key eslot_key(int layer, int eid, uint8_t refine_mask) {
     /* La maschera di precisione entra nella chiave (3 bit sopra l'expert id)
      * per conservare il determinismo mask-aware di T5.3 negli esperimenti
@@ -1928,11 +1949,7 @@ static void ecache_service_pressure(Model *m) {
     ecache_apply_pressure(m->ec, ECACHE_PRESSURE_CRITICAL, target, &reclaimed);
     /* Gli slab tornati nel pool dal reclaim vanno liberati davvero, o la
      * pressione non restituisce pagine al sistema. */
-    while (m->eslot_pool_n > 0) {
-        ESlot *slot = m->eslot_pool[--m->eslot_pool_n];
-        free(slot->slab);
-        free(slot);
-    }
+    eslot_pool_trim(m,0);
     fprintf(stderr, "[ecache] memory pressure %s: released %.1f MB\n",
             critical ? "CRITICAL" : "WARN", (double)reclaimed / 1e6);
 #else
@@ -2139,7 +2156,10 @@ static void model_init(Model *m, const char *snap, const char *refine_dir,
         fprintf(stderr, "ecache init: %s\n", ecache_status_string(st));
         exit(1);
     }
-    m->eslot_pool_cap = 192;
+    /* Scratch already retains up to 64 reusable miss slabs. This auxiliary
+     * pool only absorbs short-lived size mismatches/multiple evictions; a
+     * large persistent pool looked like a per-turn RAM leak in the app. */
+    m->eslot_pool_cap = 32;
     m->eslot_pool = calloc((size_t)m->eslot_pool_cap, sizeof(ESlot*));
     if (!m->eslot_pool) { fprintf(stderr, "OOM eslot pool\n"); exit(1); }
     fprintf(stderr,
@@ -3068,6 +3088,7 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out,
  *   | u8 sha256[32]
  */
 #define SESSION_MAGIC "QWSESS01"
+#define SAMOSA_MAX_CONTEXT_TOKENS 24576
 
 static void session_write(FILE *f, RefineSha256 *sha, const void *data, size_t bytes) {
     refine_sha256_update(sha, data, bytes);
@@ -3084,6 +3105,34 @@ static void session_geometry(const Cfg *c, uint32_t g[9]) {
     g[6]=(uint32_t)c->linear_num_key_heads;
     g[7]=(uint32_t)c->linear_num_value_heads;
     g[8]=(uint32_t)c->linear_value_head_dim;
+}
+
+static int context_fits(int existing,int extra,int generated){
+    if(existing<0||extra<0||generated<0)return 0;
+    if(existing>SAMOSA_MAX_CONTEXT_TOKENS||
+       extra>SAMOSA_MAX_CONTEXT_TOKENS-existing)return 0;
+    return generated<=SAMOSA_MAX_CONTEXT_TOKENS-existing-extra;
+}
+
+/* Cheap preflight before KV allocation. session_resume still performs the
+ * complete SHA-256 verification before trusting the saved state. */
+static int session_peek(Model *m,const char *path,int *len_out,int *last_out){
+    FILE *file=fopen(path,"rb");if(!file)return 0;
+    char magic[8];uint32_t geometry[9],expected[9],len=0,kv_rows=0;int ok=1;
+    session_geometry(&m->c,expected);
+    ok=fread(magic,1,8,file)==8&&!memcmp(magic,SESSION_MAGIC,8);
+    ok=ok&&fread(geometry,1,sizeof(geometry),file)==sizeof(geometry)&&
+       !memcmp(geometry,expected,sizeof(geometry));
+    ok=ok&&fread(&len,1,4,file)==4&&fread(&kv_rows,1,4,file)==4&&
+       len>=2&&len<=SAMOSA_MAX_CONTEXT_TOKENS&&kv_rows==len-1;
+    for(int i=0;ok&&i<m->c.n_layers;i++){
+        uint8_t type=0;ok=fread(&type,1,1,file)==1&&type==(uint8_t)m->c.layer_type[i];
+    }
+    long token_start=ok?ftell(file):-1;int last=-1;
+    if(token_start<0||fseek(file,token_start+(long)(len-1)*4,SEEK_SET)||
+       fread(&last,1,4,file)!=4)ok=0;
+    fclose(file);if(!ok)return 0;
+    *len_out=(int)len;*last_out=last;return 1;
 }
 
 static int session_save(Model *m, const int *tokens, int len, const char *path) {
@@ -3171,6 +3220,8 @@ static int *session_resume(Model *m, const char *path, int reserve, int *len_out
     session_read(f, &sha, &len_u, 4, path);
     session_read(f, &sha, &kv_rows, 4, path);
     if (len_u < 2 || kv_rows != len_u - 1) session_die(path, "contatori incoerenti");
+    if(!context_fits((int)len_u,0,reserve))
+        session_die(path,"limite contesto 24576 token superato");
     for (int i = 0; i < c->n_layers; i++) {
         uint8_t t = 0; session_read(f, &sha, &t, 1, path);
         if (t != (uint8_t)c->layer_type[i]) session_die(path, "layer_type incoerente");
@@ -3668,26 +3719,30 @@ static int run_chat(Model *m, const char *tokenizer_path, const char *user,
         if (resume_decode > 0) n_new = resume_decode;
         int *extra = NULL; int n_extra = 0;
         char *cont_text = NULL;
-        /* La ripresa legge prima solo i token per decidere il template?  No:
-         * serve un solo passaggio — riprendiamo con una riserva che copre il
-         * caso peggiore del turno e ricodifichiamo dopo. */
-        int hlen = 0;
-        int reserve_guess = n_new + (user ? (int)strlen(user) + 64 : 4);
-        int *hist = session_resume(m, resume_session, reserve_guess, &hlen);
+        int hlen_hint=0,last_hint=-1;
+        if(!session_peek(m,resume_session,&hlen_hint,&last_hint)){
+            fprintf(stderr,"sessione: intestazione non valida: %s\n",resume_session);
+            return 1;
+        }
         if (resume_decode > 0) {
             /* modalita' di validazione: continua la decodifica esatta */
         } else {
             if (!user) { fprintf(stderr, "--resume-session richiede --chat o --resume-decode\n"); return 1; }
-            int ended = (hist[hlen-1] == cli_sink.eos);
+            int ended = (last_hint == cli_sink.eos);
             cont_text = qwen_chat_continuation(user, no_thinking, ended);
             int cap = (int)strlen(cont_text) + 32;
             extra = malloc((size_t)cap * sizeof(int));
             n_extra = tok_encode(tok, cont_text, (int)strlen(cont_text), extra, cap);
-            if (n_extra + n_new > reserve_guess) {
-                fprintf(stderr, "sessione: turno troppo lungo per la riserva\n");
-                return 1;
-            }
+            if(n_extra<=0){fprintf(stderr,"sessione: continuazione senza token\n");
+                free(extra);free(cont_text);return 1;}
         }
+        if(!context_fits(hlen_hint,n_extra,n_new)){
+            fprintf(stderr,"sessione: il turno supererebbe il limite totale di %d token\n",
+                    SAMOSA_MAX_CONTEXT_TOKENS);
+            free(extra);free(cont_text);return 1;
+        }
+        int hlen=0;
+        int *hist=session_resume(m,resume_session,n_extra+n_new,&hlen);
         if (!output_sink) {
             printf("%s", "\n--- risposta ---\n");
             fflush(stdout);
@@ -3714,6 +3769,11 @@ static int run_chat(Model *m, const char *tokenizer_path, const char *user,
         int *prompt = malloc((size_t)cap * sizeof(int));
         np = tok_encode(tok, text, (int)strlen(text), prompt, cap);
         if (!np) { fprintf(stderr, "Il prompt non ha prodotto token\n"); free(text); free(prompt); return 1; }
+        if(!context_fits(0,np,n_new)){
+            fprintf(stderr,"Il turno supererebbe il limite totale di %d token\n",
+                    SAMOSA_MAX_CONTEXT_TOKENS);
+            free(text);free(prompt);return 1;
+        }
         int *out = malloc((size_t)(np + n_new) * sizeof(int));
         if (!output_sink) {
             printf("%s", "\n--- risposta ---\n");
@@ -3761,7 +3821,7 @@ static int run_chat(Model *m, const char *tokenizer_path, const char *user,
         stats.prefill_s,stats.prefill_s>0?np/stats.prefill_s:0.0,
         stats.decode_s,decode_tps,stats.total_s,
         (unsigned long long)m->hits,(unsigned long long)(m->hits+m->miss),100.0*hit_rate,
-        m->t_edisk,m->t_emm,rss_gb());
+        m->t_edisk,m->t_emm,peak_rss_gb());
     {
         ecache_stats est; ecache_get_stats(m->ec,&est);
         fprintf(stderr,"[ecache] budget=%.2f GB payload=%.2f GB peak=%.2f GB "
@@ -3785,6 +3845,18 @@ static int run_chat(Model *m, const char *tokenizer_path, const char *user,
         options->seen=NULL;
     }
     teacher_state_end(m);
+#ifdef __APPLE__
+    /* Multi-eviction admissions can leave surplus reusable expert slabs even
+     * though the live cache payload is flat. Scratch already owns up to 64
+     * reusable miss slabs, so discard the auxiliary surplus between turns,
+     * then ask Darwin to return those and other free KV/scratch pages. */
+    uint64_t pool_released=eslot_pool_trim(m,0);
+    size_t relieved=malloc_zone_pressure_relief(NULL,0);
+    if(pool_released>=(1u<<20)||relieved>=(1u<<20))
+        fprintf(stderr,"[memory] freed_pool=%.1f MB allocator_relief=%.1f MB\n",
+                (double)pool_released/(1024.0*1024.0),
+                (double)relieved/(1024.0*1024.0));
+#endif
     if(!shared_tokenizer)tok_free(tok);
     refine_report(m);
     return route_close();
@@ -3960,6 +4032,31 @@ static const char *serve_last_user(jval *root,const char **system){
     return user;
 }
 
+/* Validate the exact tokenized turn before queueing, allocating KV, or
+ * sending stream headers.  Returns 1 when it fits, 0 when it exceeds the
+ * product cap, and -1 for an unreadable/incompatible saved session. */
+static int serve_context_preflight(SamosaServeContext *ctx,const char *user,
+                                   const char *system,int no_thinking,
+                                   const char *resume_session,int generated){
+    int existing=0,last=-1;
+    char *text=NULL;
+    if(resume_session){
+        if(!session_peek(ctx->model,resume_session,&existing,&last))return -1;
+        int im_end=tok_id_of(&ctx->tokenizer,"<|im_end|>");
+        text=qwen_chat_continuation(user,no_thinking,last==im_end);
+    }else text=qwen_chat_prompt(user,system,no_thinking);
+    if(!text)return -1;
+    size_t bytes=strlen(text);
+    if(bytes>(size_t)INT_MAX-32u){free(text);return 0;}
+    int capacity=(int)bytes+32;
+    int *tokens=malloc((size_t)capacity*sizeof(int));
+    if(!tokens){free(text);return -1;}
+    int extra=tok_encode(&ctx->tokenizer,text,(int)bytes,tokens,capacity);
+    free(tokens);free(text);
+    if(extra<=0)return -1;
+    return context_fits(existing,extra,generated)?1:0;
+}
+
 static int serve_finish_reason(const GenStats *stats,const char **closure){
     if(stats->cancelled){*closure="cancelled";return 4;}
     if(stats->repetition_stopped){*closure="repetition";return 3;}
@@ -4064,9 +4161,30 @@ static int samosa_serve_chat(SamosaServeContext *ctx,int fd,jval *root){
         save_session=session_path; if(!access(session_path,R_OK))resume_session=session_path;
     }
 
+    int context_ok=serve_context_preflight(ctx,user,system,no_thinking,
+                                            resume_session,max_tokens);
+    if(context_ok<0)return samosa_http_json_error(fd,409,"invalid_session",
+        "The saved conversation is invalid or incompatible with this model.");
+    if(!context_ok)return samosa_http_json_error(fd,400,"context_limit",
+        "This turn could exceed Samosa Chat's 24576-token total context limit. "
+        "Start a new chat, shorten the message, or request fewer output tokens.");
+
     double wait_s=0; int admitted=serve_scheduler_acquire(&ctx->scheduler,&wait_s);
     if(admitted==0)return samosa_http_json_error(fd,429,"queue_full","The inference queue is full.");
     if(admitted<0)return samosa_http_json_error(fd,503,"shutting_down","Samosa is shutting down.");
+    /* A queued request for the same conversation may have created or replaced
+     * the snapshot while this request waited. Refresh and revalidate while we
+     * hold exclusive model admission, before allocation or response headers. */
+    if(save_session)resume_session=!access(session_path,R_OK)?session_path:NULL;
+    context_ok=serve_context_preflight(ctx,user,system,no_thinking,
+                                       resume_session,max_tokens);
+    if(context_ok<0){serve_scheduler_release(&ctx->scheduler);
+        return samosa_http_json_error(fd,409,"invalid_session",
+            "The saved conversation header is invalid or incompatible with this model.");}
+    if(!context_ok){serve_scheduler_release(&ctx->scheduler);
+        return samosa_http_json_error(fd,400,"context_limit",
+            "This turn could exceed Samosa Chat's 24576-token total context limit. "
+            "Start a new chat, shorten the message, or request fewer output tokens.");}
     atomic_store(&ctx->cancel,0); g_moe_down_idot=thinking_code?0:g_idot;
     ServeTokenSink sink={.fd=fd,.stream=stream,.thinking_open=!no_thinking,
         .close_token=tok_id_of(&ctx->tokenizer,"</think>"),.tokenizer=&ctx->tokenizer,
@@ -4103,9 +4221,11 @@ static int samosa_serve_handler(SamosaHttpServer *server,int fd,
         pthread_mutex_lock(&ctx->scheduler.mu);int active=ctx->scheduler.active,queued=ctx->scheduler.waiting;pthread_mutex_unlock(&ctx->scheduler.mu);
         char body[1024];snprintf(body,sizeof(body),
             "{\"status\":\"ok\",\"model\":\"qwen3.6-35b-a3b\",\"rss_gb\":%.2f,"
-            "\"uptime_seconds\":%.0f,\"scheduler\":{\"active\":%s,\"queued\":%d,"
+            "\"context_limit_tokens\":%d,\"uptime_seconds\":%.0f,"
+            "\"scheduler\":{\"active\":%s,\"queued\":%d,"
             "\"max_queue\":%d},\"last_generation\":{\"available\":%s,"
-            "\"tokens\":%d,\"tokens_per_second\":%.2f}}",rss_gb(),now_s()-ctx->started,
+            "\"tokens\":%d,\"tokens_per_second\":%.2f}}",rss_gb(),
+            SAMOSA_MAX_CONTEXT_TOKENS,now_s()-ctx->started,
             active?"true":"false",queued,ctx->scheduler.max_waiting,has?"true":"false",
             stats.generated,stats.generated>1&&stats.decode_s>0?(stats.generated-1)/stats.decode_s:0);
         return samosa_http_response(fd,200,"application/json",body,NULL);
