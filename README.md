@@ -1,271 +1,207 @@
 <div align="center">
   <img src="assets/samosa-chat_medium.png" alt="Samosa Chat mascot" width="210">
   <h1>Samosa Chat</h1>
-  <p><strong>A capable local AI for the Mac you already own.</strong></p>
-  <p>Qwen3.6-35B-A3B &nbsp;·&nbsp; 16 GB Apple Silicon &nbsp;·&nbsp; No cloud, account, telemetry, or GPU</p>
+  <p><strong>Qwen3.6-35B-A3B, locally on a 16 GB Apple Silicon Mac.</strong></p>
+  <p>CPU-only on macOS &nbsp;·&nbsp; No cloud account &nbsp;·&nbsp; No telemetry</p>
 </div>
 
-Samosa Chat runs **Qwen3.6-35B-A3B** (int4, text-only) locally on a **16 GB
-Apple Silicon Mac**.
+> **Foundation and model credit.** Samosa Chat is built on
+> [colibrì](https://github.com/JustVugg/colibri) by JustVugg. Its
+> expert-streaming design, SIMD kernels, and core utility headers made this
+> project possible. The model is the text portion of
+> [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B), created and
+> released by the Qwen team. Samosa Chat is an independent, unofficial
+> Apache-2.0 project and is not affiliated with or endorsed by either team.
 
-Samosa Chat is a dependency-free C inference engine and localhost app server.
-The current group-32 development baseline keeps approximately 3.0 GB of dense
-weights resident and streams its 20.94 GB mixture-of-experts store from SSD on
-demand. Measured chat/server runs peak around 3.2–3.9 GB RSS on the reference
-machine.
+Samosa Chat is a small C inference runtime for running Qwen's 35B-total,
+3B-active Mixture-of-Experts model without loading all 35B parameters into
+RAM. Dense weights stay resident; routed experts are read from SSD as the
+model selects them. The current macOS build uses CPU SIMD and does **not** use
+Metal or the Apple GPU. In other words: no dedicated GPU is required, even
+though every Apple Silicon Mac physically includes an integrated GPU.
 
-The CLI is usable today. The resident OpenAI-shaped server, bounded request
-queue, SSE reasoning/content stream, cancellation, health telemetry, clean
-shutdown, and `samosa app` launcher are implemented in the repository. The
-full browser chat interface and in-RAM multi-conversation slot pool remain
-under active development; see [docs/APP_TASKS.md](docs/APP_TASKS.md).
+This repository is deliberately text-only. Qwen3.6 is natively multimodal,
+but Samosa's converted artifact omits the vision tower.
 
-## Examples
+## What is available today
 
-Real output from this model running on the 16 GB test machine, commands shown verbatim.
+The published package and this repository are not yet at the same release
+level. This distinction matters:
 
-### A landing page
+| surface | status | what it contains |
+|---|---|---|
+| [Hugging Face package](https://huggingface.co/deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-int4) | usable CLI release | legacy whole-row int4 artifact, one-shot chat, thinking switch, exact session resume |
+| GitHub `main` | source preview | revised thinking controls, groupwise-q4 support, resident localhost server, cancellation, bounded queue, atomic-upgrade tooling, expanded tests |
+| Browser app | not implemented yet | `samosa app` on `main` starts the server and opens a technical status page, not a finished chat UI |
+| Group-32 artifact | local development baseline | converted and tested on one reference Mac; not published to Hugging Face |
+
+The one-line installer therefore installs the **published CLI release**, not
+the server/app preview. The next model upload must be treated as a separate,
+verified release event.
+
+## Install the published CLI release
 
 ```sh
-samosa --fast --seed 11 "Write a complete, single-file landing page (HTML with embedded CSS, \
+curl -fsSL https://huggingface.co/deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-int4/resolve/main/install.sh | sh
+```
+
+Requirements: an Apple Silicon Mac, 16 GB RAM, a C compiler from Apple's
+Command Line Tools, and roughly 25 GB free disk space. The current download is
+about 18 GB. The published installer resumes downloads, verifies SHA-256
+checksums, compiles the engine locally, and runs a smoke test. It requires no
+administrator privileges.
+
+```sh
+samosa "explain how a hash table handles collisions"
+samosa --continue "and which strategy does Python use?"
+samosa --think "solve this logic puzzle"
+samosa --long "write a detailed explanation"
+samosa --fast "summarize this design"
+samosa --seed 11 "give me a deterministic sample"
+samosa doctor
+```
+
+The published wrapper defaults to a 512-new-token ceiling; `--long` raises it
+to 2,048. The model may stop earlier when it emits its end-of-turn token.
+
+## What Samosa adds on top
+
+The Qwen checkpoint and colibrì foundation are the starting point. Work added
+in this repository includes:
+
+- a Qwen3.6 text engine in C covering the 30 Gated DeltaNet layers, 10 gated
+  attention layers, shared/routed MoE path, tokenizer behavior, and chat
+  template;
+- a shard-by-shard converter and manifest-based expert container;
+- legacy row-q4 loading, group-32 symmetric q4, and an experimental mixed
+  group-q4 gate/up plus row-q8 down-projection format;
+- Apple NEON dot-product and portable AVX2 grouped-q4/q8-down paths;
+- a byte-budget expert cache with LRU eviction, per-layer floors, reusable
+  slabs, pressure monitoring, and structured I/O telemetry;
+- geometry-bound, SHA-256-sealed `QWSESS01` sessions with atomic writes and
+  byte-identical continuation from saved state;
+- Qwen's published direct/general/precise-code sampling profiles;
+- a bounded thinking-budget transition, separate natural/forced closure
+  telemetry, and a repeated-token-cycle guard;
+- a dependency-free C localhost server with JSON/SSE responses, a bounded
+  FIFO, cooperative cancellation, health telemetry, and clean shutdown;
+- an atomic, versioned installer design that verifies and smoke-tests an
+  inactive release before switching it live;
+- regression tooling for output structure, task-specific correctness,
+  upstream controls, quantized kernels, route traces, installer rollback, and
+  machine-pressure guardrails.
+
+## Thinking controls on `main`
+
+The source preview follows Qwen's published sampling recommendations:
+
+| profile | temperature | top-p | top-k | presence penalty | internal thinking budget |
+|---|---:|---:|---:|---:|---:|
+| direct | 0.7 | 0.80 | 20 | 1.5 | disabled |
+| general thinking | 1.0 | 0.95 | 20 | 1.5 | 1,024 |
+| precise code/WebDev | 0.6 | 0.95 | 20 | 0.0 | 2,048 |
+
+The source wrapper uses an 8,192-new-token **outer ceiling**, not a fixed answer
+length. The model decides when to stop inside that ceiling. If thinking reaches
+its internal budget, Samosa appends Qwen's trained natural-language early-stop
+transition before `</think>`; it does not inject a bare closing token. The
+transition is containment, not proof that the resulting answer is correct.
+
+A six-run upstream-compatible FP8 control used 353–616 reasoning tokens on the
+small arithmetic family. A matched local group-32 run closed naturally and
+answered correctly after 933 generated tokens with a 1,024-token thinking
+budget. That validates this path for one prompt family; it is **not** evidence
+of broad benchmark parity or release-wide stability. See
+[the upstream-control report](docs/UPSTREAM_CONTROL_2026-07-14.md) and
+[regression ledger](docs/REGRESSION_LEDGER.md).
+
+## Resident server on `main`
+
+The server is a developer preview and is not in the current Hugging Face
+package.
+
+```sh
+samosa serve          # foreground server on 127.0.0.1:8642
+samosa app            # background singleton + open the status page
+samosa serve --stop   # cooperative shutdown
+```
+
+Implemented endpoints:
+
+- `GET /healthz`
+- `GET /v1/models`
+- `POST /v1/chat/completions`
+- `POST /v1/cancel`
+- `POST /v1/shutdown`
+
+Chat completions support JSON or SSE, separate reasoning/content deltas,
+sampler controls, `thinking`, `thinking_budget`, `max_tokens`, and a sanitized
+`conversation_id`. Requests are serialized through one model with a bounded
+wait queue. Conversation snapshots are durable, but the planned four-slot
+in-RAM LRU and write batching are not implemented yet. The current root page
+is technical status only. API details and measured acceptance results are in
+[docs/SERVE_API.md](docs/SERVE_API.md).
+
+## Model layout and storage
+
+Qwen describes the upstream language model as 35B parameters total with 3B
+activated per token, 40 layers, 256 routed experts, and 8 routed plus 1 shared
+expert active per MoE layer.
+
+Samosa currently has two materially different artifacts:
+
+| artifact | routed experts | resident weights | release status |
+|---|---:|---:|---|
+| published legacy row-q4 | 16.6 GB | 1.3 GB | available from Hugging Face |
+| local group-32 q4 baseline | 20.94 GB | 3.02 GB | tested locally, not published |
+
+Group-32 uses more scale data and larger resident row-q8 payloads. It reduced
+measured weight reconstruction error relative to the original whole-row q4
+format, but one successful reasoning control is not enough to call the artifact
+release-stable. The mixed q4/q8-down format exists in code only; no full mixed
+artifact was produced.
+
+## Measured performance
+
+All numbers below are from one fanless MacBook Air M3 with 16 GB RAM. They are
+workload-specific observations, not cross-platform guarantees.
+
+| artifact / workload | threads | result |
+|---|---:|---:|
+| published legacy, ordinary decode | 2 | typically 7–8 tok/s |
+| published legacy, `--fast` decode | 4 | about 9.5 tok/s |
+| published legacy, prefill | 2–4 | about 14–24 tok/s |
+| group-32 direct control | 2 | 7.27 tok/s |
+| group-32 933-token thinking control | 2 | 4.85 tok/s |
+| selective-precision 5,000-token WebDev control | 4 | 6.47 tok/s |
+
+Measured peak RSS was roughly 2.5–3 GB on legacy direct runs and 3.2–3.9 GB
+on group-32 chat/server runs. Durable sessions write a roughly 63–70 MB sealed
+snapshot at turn end. Model data itself is read-only.
+
+The 933-token group-32 reasoning control reread 376.77 GB of expert data. That
+read amplification is a real product constraint: longer thinking can be useful,
+but it costs time and sustained SSD traffic even when memory and thermals stay
+within bounds.
+
+## Real output from the legacy row-q4 artifact
+
+The following landing page was generated on the 16 GB reference machine from
+the same legacy row-q4 model format as the published artifact. The current
+published wrapper needs `--long` to leave enough room for the 1,807-token
+answer. The rendered screenshot is unedited.
+
+```sh
+samosa --fast --long --seed 11 "Write a complete, single-file landing page (HTML with embedded CSS, \
 no JavaScript) for a small specialty coffee shop called Kaapi. Include a hero section, \
 a menu with four items, and a footer. Clean, modern, dark theme. Keep the CSS compact."
 ```
 
-<p align="center"><img src="assets/example-landing.png" alt="generated landing page, rendered" width="740"></p>
+<p align="center"><img src="assets/example-landing.png" alt="Kaapi landing page generated by Samosa Chat" width="740"></p>
 
-<details>
-<summary>Full generated HTML (1,807 tokens, unedited)</summary>
+Exact-run stats: 1,807 generated tokens, 9.60 tok/s decode, 2.47 GB peak RSS.
 
-```html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kaapi | Specialty Coffee</title>
-    <style>
-        /* Reset & Base Styles */
-        :root {
-            --bg-color: #121212;
-            --text-color: #E0E0E0;
-            --accent-color: #D4A373; /* Warm Coffee Gold */
-            --card-bg: #1E1E1E;
-        }
-
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-
-        body {
-            background-color: var(--bg-color);
-            color: var(--text-color);
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            line-height: 1.6;
-        }
-
-        a { color: inherit; text-decoration: none; }
-        ul { list-style: none; }
-
-        /* Layout Utilities */
-        .container {
-            max-width: 1100px;
-            margin: 0 auto;
-            padding: 0 20px;
-        }
-
-        /* Header */
-        header {
-            padding: 2rem 0;
-            text-align: center;
-            margin-bottom: 3rem;
-        }
-
-        h1 {
-            font-size: 2.5rem;
-            font-weight: 300;
-            letter-spacing: -1px;
-        }
-
-        p.subtitle {
-            color: var(--accent-color);
-            text-transform: uppercase;
-            letter-spacing: 2px;
-            font-size: 0.875rem;
-            margin-top: 0.5rem;
-        }
-
-        /* Hero Section */
-        .hero {
-            text-align: center;
-            padding: 4rem 0;
-            border-top: 1px solid #333;
-            border-bottom: 1px solid #333;
-            margin-bottom: 4rem;
-        }
-
-        h2 {
-            font-size: 1.5rem;
-            margin-bottom: 1rem;
-        }
-
-        .intro-text {
-            max-width: 600px;
-            margin: 0 auto;
-            font-weight: 300;
-            opacity: 0.8;
-        }
-
-        /* Menu Section */
-        .menu-section {
-            padding-bottom: 4rem;
-        }
-
-        .menu-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 20px;
-        }
-
-        .menu-item {
-            background: var(--card-bg);
-            padding: 25px;
-            border-radius: 8px;
-            border: 1px solid #333;
-            transition: transform 0.2s ease;
-        }
-
-        .menu-item:hover {
-            transform: translateY(-3px);
-            border-color: var(--accent-color);
-        }
-
-        .item-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: baseline;
-            margin-bottom: 10px;
-        }
-
-        .item-name {
-            font-weight: 700;
-            font-size: 1.1rem;
-        }
-
-        .item-price {
-            color: var(--accent-color);
-            font-weight: bold;
-        }
-
-        .item-desc {
-            font-size: 0.9rem;
-            opacity: 0.7;
-            font-weight: 300;
-        }
-
-        /* Footer */
-        footer {
-            background: var(--card-bg);
-            padding: 4rem 0;
-            text-align: center;
-            border-top: 1px solid #333;
-        }
-
-        .footer-info {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 2rem;
-            margin-bottom: 3rem;
-            text-align: left;
-        }
-
-        h4 { color: var(--accent-color); margin-bottom: 0.5rem; }
-
-        .copyright {
-            font-size: 0.8rem;
-            opacity: 0.5;
-        }
-    </style>
-</head>
-<body>
-
-    <div class="container">
-        <header>
-            <h1>Kaapi</h1>
-            <p class="subtitle">Specialty Coffee Roasters</p>
-        </header>
-
-        <section class="hero">
-            <h2>Pure. Roasted. Served.</h2>
-            <p class="intro-text">
-                We source single-origin beans from sustainable micro-lots. 
-                Roasting in small batches to unlock flavors you haven't tasted yet.
-                No sugar coating, just great coffee.
-            </p>
-        </section>
-
-        <section class="menu-section">
-            <ul class="menu-grid">
-                <li class="menu-item">
-                    <div class="item-header">
-                        <span class="item-name">Etiopya</span>
-                        <span class="item-price">$6.50</span>
-                    </div>
-                    <p class="item-desc">Yirgacheff Washed<br>Chamomile, Lemon Zest, Clean Finish</p>
-                </li>
-                <li class="menu-item">
-                    <div class="item-header">
-                        <span class="item-name">Tumba</span>
-                        <span class="item-price">$6.75</span>
-                    </div>
-                    <p class="item-desc">Tumaco Supremo<br>Caramel Sweetness, Cream Body</p>
-                </li>
-                <li class="menu-item">
-                    <div class="item-header">
-                        <span class="item-name">Pacafist</span>
-                        <span class="item-price">$7.00</span>
-                    </div>
-                    <p class="item-desc">Nariño Honey<br>Tropical Fruit, Peach Flesh</p>
-                </li>
-                <li class="menu-item">
-                    <div class="item-header">
-                        <span class="item-name">Mandev</span>
-                        <span class="item-price">$6.25</span>
-                    </div>
-                    <p class="item-desc">Sud Valley Washed<br>Pumpkin Spiced, Milk Chocolate</p>
-                </li>
-            </ul>
-        </section>
-    </div>
-
-    <footer>
-        <div class="container">
-            <div class="footer-info">
-                <div>
-                    <h4>Find Us</h4>
-                    <p>4234 24th St<br>Metro, CA 94127</p>
-                </div>
-                <div>
-                    <h4>Cafe</h4>
-                    <p>Mon - Fri: 7am - 4pm<br>Sat - Sun: 8am - 4pm</p>
-                </div>
-                <div>
-                    <h4>Keep in Touch</h4>
-                    <p>hello@kaapi.com<br>@kaapi.coffee</p>
-                </div>
-            </div>
-            <p class="copyright">&copy; 2024 Kaapi. All rights reserved.</p>
-        </div>
-    </footer>
-
-</body>
-</html>
-```
-
-</details>
-
-Engine stats for this exact run (seed 11, 4 threads):
-`generated=1807 prefill 16.3 tok/s decode 9.60 tok/s peak_rss=2.47 GB`
-
-### A Python utility
+The same published artifact generated the following Python utility:
 
 ```sh
 samosa "Write a Python function merge_intervals(intervals) that merges overlapping \
@@ -303,175 +239,78 @@ def merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
     return merged
 ```
 
-Output verified: the function passes overlap, adjacency, empty-input, and
-unsorted-input tests. Stats: `generated=191 decode 11.19 tok/s peak_rss=2.53 GB`.
+The function passed overlap, adjacency, empty-input, and unsorted-input tests.
+Exact-run stats: 191 generated tokens, 11.19 tok/s decode, 2.53 GB peak RSS.
 
-## Install
+## Validation and release discipline
 
-```sh
-curl -fsSL https://huggingface.co/deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-int4/resolve/main/install.sh | sh
-```
+`make test` currently covers the expert cache, long-context KV math, repetition
+guard, Qwen budget transition, grouped-q4/q8-down kernels, server components,
+wrapper behavior, atomic installer rollback, output structure, route analysis,
+and converter layouts. The OpenMP engine build and shell/Python syntax checks
+also pass.
 
-Requirements: Apple Silicon Mac (M1 or newer) and 16 GB RAM. Disk need is
-release-specific; the installer reads exact artifact sizes before downloading
-and preserves a 2 GB completion margin. Allow roughly 30 GB free for the local
-groupwise build. Downloads are resumable and staged as an inactive versioned
-release. Every byte size and SHA-256 digest, the compiled engine, and a smoke
-test must pass before one atomic `current` pointer switches. A failed or corrupt
-upgrade leaves the live release untouched. No admin rights needed. Uninstall:
-`rm -rf ~/.samosa`.
-
-## Use
-
-```sh
-samosa "explain how a hash table handles collisions"
-samosa --continue "and which strategy does Python use?"  # resumes last conversation
-samosa --think "tricky logic puzzle"                     # general reasoning profile
-samosa --think-code "build a responsive settings page"   # precise coding/WebDev
-samosa --fast "..."                                      # all P-cores
-samosa serve                                             # foreground localhost API
-samosa app                                               # start server + open browser
-samosa serve --stop                                      # clean server shutdown
-samosa doctor                                            # verify the install
-```
-
-The resident server binds only to `127.0.0.1:8642` and exposes
-`GET /healthz`, `GET /v1/models`, `POST /v1/chat/completions`,
-`POST /v1/cancel`, and `POST /v1/shutdown`. Chat completions support ordinary
-JSON and SSE streaming, `thinking: "off" | "general" | "code"`,
-`thinking_budget`, `max_tokens`, sampler controls, and an optional sanitized
-`conversation_id` backed by sealed session snapshots.
-
-Thinking modes use Qwen3.6's task-specific sampling profiles. General
-reasoning uses temperature 1.0 with presence penalty 1.5; precise coding uses
-temperature 0.6 without a presence penalty. The distinction matters: applying
-the general temperature to WebDev, or omitting the general presence penalty,
-can send otherwise valid reasoning into a repetition loop. Precise coding also
-uses float activations specifically for the routed/shared expert down
-projections; this avoids the long-output attractor reproduced by the fully
-W4A8 path without imposing the roughly 4 tok/s cost of full float activations.
-See the controlled same-seed ledger in
-[docs/THINKING_DIAGNOSIS.md](docs/THINKING_DIAGNOSIS.md).
-
-The token setting is a ceiling, not a fixed answer size. The model normally
-stops early on its end-of-turn token. Every profile allows up to 8,192 new
-tokens by default; `--max-tokens N` overrides the outer ceiling. General
-reasoning has a 1,024-token internal thinking budget and precise code has
-2,048. The model may finish reasoning earlier; otherwise Samosa appends Qwen's
-published natural-language early-stop transition before `</think>`, then
-preserves the remaining budget for the requested answer. A bare control-token
-injection is deliberately not used because it does not match Qwen's trained
-budget protocol.
-`--thinking-budget N` overrides that safety bound. Samosa prints an explicit
-notice if the outer ceiling is reached, because that answer may be incomplete.
-A repeated-token-cycle guard stops pathological loops early.
-
-For example, `samosa --think --thinking-budget 2048 "your prompt"` permits a
-longer reasoning trajectory. A higher budget does not change the arithmetic
-performed per token or force the model to consume the whole allowance; it can
-increase total response time and expert-cache traffic when the model chooses
-to think longer. The current 1,024 general default remains the cooler bounded
-choice pending upstream-calibrated results from more than the arithmetic pilot.
-
-`--continue` restores the previous conversation from a ~70 MB snapshot
-instead of re-processing the history, including across reboots. 30 of the
-model's 40 layers are DeltaNet linear-attention layers with a fixed 63 MB
-state, and only 10 layers keep a KV cache (~40 KB/token), which is what makes
-the snapshot small and the resume exact: continuation output is byte-identical
-to an uninterrupted session.
-
-## Performance (measured, MacBook Air M3 16 GB, fanless)
-
-| workload | tokens/s |
-|---|---|
-| decode, default (2 threads) | 7–8 |
-| decode, `--fast` (4 threads) | ~9.5 |
-| recalibrated 933-token thinking control (2 threads) | 4.85 |
-| 5,000-token WebDev, selective-precision control (4 threads) | 6.47 |
-| 5,000-token WebDev, full float-activation validation (4 threads) | 4.19 |
-| prefill, default | ~14 |
-| prefill, `--fast` | ~24 |
-
-Measured peak RSS ranges from about 2.5 GB on the legacy direct path to
-3.2–3.9 GB on the group-32 chat/server path. The engine performs no model-data
-writes; durable conversations atomically replace a roughly 63–70 MB sealed
-session snapshot at turn end. The 5,000-token stability control peaked at
-2.48 GB RSS, left 69% system memory free, held swap at 5 MB, and triggered no
-macOS thermal or performance warning. The engine has quantization-aware
-teacher-forcing checks, but release quality also requires structural generation
-checks; the older substring-only suite did not detect unfinished thinking.
-
-## Evaluation
-
-There is no single benchmark suite run identically by every model company.
-Samosa's reproducible evaluation ladder covers runtime stability first, then
-public knowledge/reasoning, coding, instruction-following, long-context, and
-agent benchmarks with pinned prompts and dataset revisions. See
-[docs/BENCHMARK_PLAN.md](docs/BENCHMARK_PLAN.md). Results are not compared with
-upstream unless the template, sampler, tool scaffold, context limit, and
-scorer match.
+The earlier evaluation harness contained a serious false positive: substring
+checks reported 14/15 passes even though 0/15 samples closed `</think>`.
+Structural closure, natural-versus-forced termination, repetition, model stop,
+and task correctness are now scored separately. The current evidence is still
+too small to publish a general benchmark score. The intended evaluation ladder
+is documented in [docs/BENCHMARK_PLAN.md](docs/BENCHMARK_PLAN.md).
 
 ## Build from source
 
 ```sh
-make            # portable single-threaded build
-make omp        # multithreaded (brew install libomp first)
-make test       # standalone cache test suites
+make            # portable CPU build
+make omp        # multithreaded build; requires libomp on macOS
+make test       # bounded tests; does not run long real-model generation
 ```
 
-`tools/convert_qwen36.py` reproduces the int4 container from the original
-checkpoint shard-by-shard in under 25 GB of working disk.
+The engine has no Python runtime dependency. Python is used by conversion,
+analysis, and regression tooling. `tools/convert_qwen36.py` consumes the
+original Qwen checkpoint; conversion is not part of a normal user install.
 
-## Platform support
+## Privacy and machine safety
 
-- **macOS, Apple Silicon** — tested.
-- **Linux (x86_64/ARM)** — untested; the code is POSIX and `kernels.h` has an
-  AVX2 path. A fast NVMe (~3 GB/s) matters more than the CPU. PRs welcome.
-- **Windows** — not supported natively (POSIX I/O). WSL2 untested.
-
-## Architecture notes
-
-- legacy int4 experts use per-row scales; the replacement groupwise-q4 format
-  and kernels are implemented and awaiting a reconverted release artifact.
-  Quantized weights normally use int8 activations and SDOT/AVX2 integer-dot
-  kernels. Precise coding keeps the MoE down-projection input in float;
-  `IDOT=0` switches every quantized matmul to float activations for validation.
-- Expert blobs are 16 KB-aligned and streamed with F_NOCACHE + F_RDADVISE;
-  a byte-budget LRU cache with per-layer floors handles residency, and a
-  kernel memory-pressure poll evicts under system pressure (zero-swap
-  verified under a forced WARN storm).
-- Gated DeltaNet recurrence and causal-conv are parallelized per-head /
-  per-channel with the per-chain float operation order preserved
-  (bit-identical to the sequential implementation).
-- Sessions (`QWSESS01`): geometry-bound, SHA-256-sealed snapshots written
-  atomically (tmp + fsync + rename).
-
-## Roadmap
-
-A local chat app on this engine — ChatGPT-style UI in the browser, document
-chat built on instant-resume sessions, and user-initiated web access — is
-specified with measured acceptance gates in
-[docs/APP_TASKS.md](docs/APP_TASKS.md).
+- Inference is local. The engine contains no telemetry client and the server
+  binds to IPv4 loopback only.
+- The one-line installer contacts Hugging Face to download public release
+  files; normal inference does not require a cloud account.
+- The macOS build is CPU-only. It uses NEON/SDOT and optional OpenMP, not Metal.
+- Two threads remain the cool default; `--fast` is explicit.
+- The expert cache monitors pressure and can evict payloads before the OS is
+  forced to swap.
+- Cancellation is checked between generated tokens in server mode.
+- Real-model regressions are bounded because a single long reasoning run can
+  reread hundreds of gigabytes from the expert store.
 
 ## Known limitations
 
-- The int4 conversion can still produce isolated word-level defects such as
-  `of ofof`, even on the full float-activation validation path. This is
-  distinct from the catastrophic W4A8 repetition attractor fixed by the
-  selective thinking path. Re-asking or a different seed can avoid a local
-  defect; token-level penalties are not a complete fix.
-- Text-only: the vision tower of the upstream model is not included.
+- The published artifact still uses coarse whole-row q4. It can produce
+  isolated word-level defects such as `of ofof`; re-asking or changing the seed
+  may avoid an instance but is not a complete fix.
+- The group-32 baseline is promising, not broadly validated or published.
+- The browser chat UI, in-RAM conversation slots, document chat, and web access
+  remain roadmap items.
+- Long-context generation coverage is still thin. A stack-overflow defect above
+  4,096 tokens was fixed, but the bounded >4K/>8K release regression remains
+  open.
+- Only macOS on Apple Silicon has been exercised as a product. Linux paths are
+  present but unvalidated; Windows is not supported by Samosa Chat.
+- Text only: images, video, audio, tool calling, and Qwen's vision tower are not
+  supported.
+- SSD speed and endurance matter because routed experts are streamed and can be
+  reread many times during long answers.
 
-## Credits and license
+## Roadmap and documentation
 
-Built on [colibrì](https://github.com/JustVugg/colibri) by JustVugg: the
-expert-streaming design and the SIMD kernels (`src/kernels.h`) and utility
-headers originate there. Samosa Chat adds the Qwen3.6 engine (DeltaNet, gated GQA,
-256-expert MoE), the converter, sessions, and the distribution.
+- [App task program](docs/APP_TASKS.md)
+- [Resident server API and acceptance](docs/SERVE_API.md)
+- [Thinking-mode diagnosis](docs/THINKING_DIAGNOSIS.md)
+- [Group-32 baseline](docs/GROUP32_BASELINE.md)
+- [Upstream-compatible control](docs/UPSTREAM_CONTROL_2026-07-14.md)
+- [Detailed work log](docs/WORK_LOG_2026-07-14.md)
 
-Weights converted from
-[Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) — credit
-to the Qwen team.
+## License
 
-Apache-2.0 (`LICENSE`, `NOTICE`). Not affiliated with or endorsed by
-Alibaba/Qwen or the colibrì project.
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for the full attribution
+and derivative-work notice.

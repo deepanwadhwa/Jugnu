@@ -14,14 +14,19 @@ pipeline_tag: text-generation
 # Samosa Chat — Qwen3.6-35B-A3B int4 for 16 GB Macs
 
 Run Qwen3.6-35B-A3B (int4, text-only) locally on an Apple Silicon Mac with
-16 GB of RAM. No cloud, no account, no telemetry, no GPU. This repo contains
-the quantized model, the dependency-free C inference engine, a loopback app
-server, and a one-command installer.
+16 GB of RAM. The macOS runtime is CPU-only and requires no dedicated GPU,
+cloud account, or telemetry. This repo contains the quantized model, the
+dependency-free C inference engine, a loopback app server, and a one-command
+installer.
 
-> ⚠️ Unofficial, text-only int4 conversion of
-> [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)
-> (vision tower removed). Credit for the model goes to the Qwen team.
-> Apache-2.0, same as the original.
+> **Foundation and model credit.** Samosa Chat is built on
+> [colibrì](https://github.com/JustVugg/colibri) by JustVugg; its
+> expert-streaming design, SIMD kernels, and utility headers made this project
+> possible. The converted checkpoint comes from
+> [Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) by the
+> Qwen team. This is an independent, unofficial text-only conversion; the
+> vision tower is not included. It is not affiliated with or endorsed by
+> either upstream team.
 
 ## Install
 
@@ -121,12 +126,7 @@ Source repository: https://github.com/deepanwadhwa/samosa-chat
   catastrophic fast-path attractor addressed by selective precision.
 - Text-only: the upstream vision tower is not included.
 
-## Credits and license
+## License
 
-Built on [colibrì](https://github.com/JustVugg/colibri) by JustVugg: the
-expert-streaming design, SIMD kernels, and utility headers originate there.
-Samosa Chat adds the Qwen3.6 engine (DeltaNet linear attention, gated GQA,
-256-expert MoE), the converter, sessions, and the distribution.
-
-Apache-2.0. Weights converted from Qwen/Qwen3.6-35B-A3B — credit to the Qwen
-team. Not affiliated with or endorsed by Alibaba/Qwen or the colibrì project.
+Apache-2.0. The source distribution includes `LICENSE` and `NOTICE` with the
+complete derivative-work attribution.
