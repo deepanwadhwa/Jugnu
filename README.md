@@ -201,11 +201,11 @@ Full detail and reasoning: **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 - **Make x86 fast.** Linux and Windows now work; what is left is the scalar-path
   penalty. Runtime CPU dispatch should be worth ~3x
   ([G10/H2](docs/TASKS_HARDWARE.md)).
-- **Vision.** Qwen3.6 is multimodal, and — by accident — **the vision tower
-  already ships in every install**: the converter's filter tests for `vision`
-  while Qwen names the tensors `model.visual.*`, so it never matched. All 27
-  blocks are there, and measured usable (mean cosine 0.9976 against the BF16
-  reference). What is missing is the forward pass ([docs/TASKS_VISION.md](docs/TASKS_VISION.md)).
+- **Vision.** Qwen3.6 is multimodal, and **the vision tower already ships inside
+  every install** — all 27 blocks, validated at mean cosine 0.9976 against the
+  reference weights. The weights are on your disk and usable today; what is
+  missing is the runtime: an image decoder, the encoder in C, and splicing image
+  embeddings into the language model ([docs/TASKS_VISION.md](docs/TASKS_VISION.md)).
 - **Documents and internet access** ([#5](docs/TASKS_DOCUMENTS.md),
   [#4](docs/TASKS_INTERNET.md)).
 - **A Metal backend**, eventually — though the 70/30 split above caps it at ~1.4x.

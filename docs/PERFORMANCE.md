@@ -110,8 +110,7 @@ The amount of data read is large. One 933-token thinking answer read **376 GB** 
 
 ### Does this wear out the SSD? No — and the comparison people reach for is backwards
 
-Reading 376 GB sounds alarming, so this section used to say that expert streaming
-is what wears the drive. **That was wrong, and it is corrected here.**
+376 GB sounds alarming. It is worth knowing why it is not.
 
 **SSD lifespan is consumed by writes, not reads.** Flash endurance is rated in
 **TBW** (Terabytes *Written*, per the JEDEC JESD218 standard) or **DWPD** (Drive
@@ -125,10 +124,11 @@ a threshold, which is a write. But those thresholds are on the order of tens of
 thousands to millions of reads **of the same block**. 376 GB spread over a 20.9 GB
 file is about 18 reads per byte. It is orders of magnitude away from mattering.
 
-Which inverts the swap comparison this section used to make. Over that same
-session the whole system — Samosa, editor, browser, everything — wrote under about
-9 GB to swap. Those **9 GB of writes consume more drive life than the 376 GB of
-reads do.** The scary number was the wrong number.
+For perspective, swap is the thing people usually worry about, and it is the
+opposite way round: over that same session the whole system — Samosa, editor,
+browser, everything — wrote under about 9 GB to swap. Those **9 GB of writes
+consume more drive life than the 376 GB of reads do.** The big number is the
+harmless one.
 
 *How we know:* from the definition of the endurance rating, not from a measurement
 on the reference machine — Apple Silicon's internal NVMe does not expose SMART

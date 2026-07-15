@@ -32,15 +32,17 @@ storage-bound — the same regime as the Mac.
 Qwen3.6 is natively multimodal, and the engine has no vision runtime — so Samosa
 is text only today.
 
-**But the vision tower is already on your disk.** The converter *intended* to skip
-it: its filter tests for the substring `vision`, and Qwen names those tensors
-`model.visual.*`, so the filter never matched. All 27 blocks — 444 tensors,
-0.454 GB — were quantized and shipped inside `resident.safetensors`. Every
-install already has them, inert.
+**But the vision tower is already on your disk.** All 27 blocks — 444 tensors,
+0.454 GB — ship quantized inside `resident.safetensors`, in every install. They
+sit inert today because the engine has nothing to run them.
 
-They also work: a numerical parity check against the upstream BF16 reference
-measured **mean cosine 0.9976, min 0.9923** — the accidentally-quantized weights
-are usable as they are.
+They are also good weights: a numerical parity check against the upstream BF16
+reference measured **mean cosine 0.9976, min 0.9923**. They are usable as they
+are, with no re-download and no re-quantization.
+
+That removes most of what looked like the cost here. The weights, the tokenizer's
+image tokens, and the projector's output dimension all line up with the language
+model already.
 
 **The goal is to add image input back.** It means building a vision encoder
 alongside the language engine — roughly "colibrì, but for vision": an image
