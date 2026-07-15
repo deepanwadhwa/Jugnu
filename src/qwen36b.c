@@ -969,7 +969,7 @@ static void route_record_or_replay(int position, int token_id, int layer,
  * checkpoint reale, che annida tutto sotto text_config). */
 static jval *json_get_req(jval *o, const char *key, const char *ctx) {
     jval *v = json_get(o, key);
-    if (!v) { fprintf(stderr, "config.json: campo obbligatorio mancante '%s' (%s)\n", key, ctx); exit(1); }
+    if (!v) { fprintf(stderr, "config.json: required field missing: '%s' (%s)\n", key, ctx); exit(1); }
     return v;
 }
 
@@ -997,7 +997,7 @@ static void load_cfg(Cfg *c, const char *snap) {
     jval *mtp_layers = json_get(cfg_root, "mtp_num_hidden_layers");
     c->mtp_layers = mtp_layers ? (int)mtp_layers->num : 0;
     if (c->mtp_layers < 0 || c->mtp_layers > 16) {
-        fprintf(stderr, "config.json: mtp_num_hidden_layers non valido: %d\n", c->mtp_layers);
+        fprintf(stderr, "config.json: invalid mtp_num_hidden_layers: %d\n", c->mtp_layers);
         exit(1);
     }
 
@@ -1075,7 +1075,7 @@ static float *load_float_t(Model *m, const char *name) {
         st_read_f32(&m->S, wrapped, p, 0);
         return p;
     }
-    fprintf(stderr, "manca tensore float: %s\n", name);
+    fprintf(stderr, "missing float tensor: %s\n", name);
     exit(1);
 }
 
@@ -1124,7 +1124,7 @@ static QT qt_load(Model *m, const char *name, int O, int I) {
         }
     }
     if (!tw) {
-        fprintf(stderr, "manca tensore quantizzato: %s\n", name);
+        fprintf(stderr, "missing quantized tensor: %s\n", name);
         exit(1);
     }
     
@@ -1161,7 +1161,7 @@ static void load_manifest(Model *m, const char *snap) {
     snprintf(path, sizeof(path), "%s/manifest.json", snap);
     FILE *f = fopen(path, "rb");
     if (!f) {
-        fprintf(stderr, "Errore: manifest.json mancante in %s\n", snap);
+        fprintf(stderr, "Error: manifest.json missing in %s\n", snap);
         exit(1);
     }
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
@@ -1198,7 +1198,7 @@ static void load_manifest(Model *m, const char *snap) {
             (down_bits && (down_bits->t != J_NUM || !isfinite(down_bits->num) ||
                            floor(down_bits->num) != down_bits->num ||
                            (int)down_bits->num != expected_down))) {
-            fprintf(stderr, "manifest.json: expert_quantization non valida\n");
+            fprintf(stderr, "manifest.json: invalid expert_quantization\n");
             exit(1);
         }
         m->expert_group_size = (int)group->num;
@@ -1228,7 +1228,7 @@ static void load_manifest(Model *m, const char *snap) {
                     floor(off->num) != off->num || floor(sz->num) != sz->num ||
                     off->num > (double)INT64_MAX || sz->num > (double)INT64_MAX ||
                     !refine_hex_digest(sha->str, m->expert_sha256 + ((size_t)l * E + e) * 32)) {
-                    fprintf(stderr, "manifest.json: expert non valido: %s\n", key);
+                    fprintf(stderr, "manifest.json: invalid expert: %s\n", key);
                     exit(1);
                 }
                 m->expert_offsets[l * E + e] = (int64_t)off->num;
@@ -1809,7 +1809,7 @@ static void expert_load(Model *m, int layer, int eid, uint8_t refine_mask,
     int64_t sz = m->expert_sizes[layer * E + eid];
     
     if (sz == 0) {
-        fprintf(stderr, "Errore: expert %d al layer %d non ha una taglia valida!\n", eid, layer);
+        fprintf(stderr, "Error: expert %d at layer %d has an invalid size\n", eid, layer);
         exit(1);
     }
     
@@ -2096,7 +2096,7 @@ static void model_init(Model *m, const char *snap, const char *refine_dir,
     uint32_t max_entries;
     if (budget_env) {
         double gb = atof(budget_env);
-        if (gb <= 0) { fprintf(stderr, "EBUDGET_GB deve essere positivo\n"); exit(1); }
+        if (gb <= 0) { fprintf(stderr, "EBUDGET_GB must be positive\n"); exit(1); }
         budget = (uint64_t)(gb * 1e9);
         max_entries = (uint32_t)((size_t)NL * (size_t)E);
         budget_mode = "EBUDGET_GB";
@@ -2188,7 +2188,7 @@ static void attention_gqa(Model *m, Layer *l, int layer, float *x, int S, int po
     int grp = H / G;
     
     if (pos_base + S > m->max_t) {
-        fprintf(stderr, "Errore bounds check cache: pos_base=%d, S=%d, max_t=%d\n", pos_base, S, m->max_t);
+        fprintf(stderr, "Error: cache bounds check failed: pos_base=%d, S=%d, max_t=%d\n", pos_base, S, m->max_t);
         exit(1);
     }
     
@@ -3094,7 +3094,7 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out,
 static void session_write(FILE *f, RefineSha256 *sha, const void *data, size_t bytes) {
     refine_sha256_update(sha, data, bytes);
     if (fwrite(data, 1, bytes, f) != bytes) {
-        fprintf(stderr, "sessione: scrittura fallita (%s)\n", strerror(errno));
+        fprintf(stderr, "session: write failed (%s)\n", strerror(errno));
         exit(1);
     }
 }
@@ -3138,11 +3138,11 @@ static int session_peek(Model *m,const char *path,int *len_out,int *last_out){
 
 static int session_save(Model *m, const int *tokens, int len, const char *path) {
     Cfg *c = &m->c;
-    if (len < 2) { fprintf(stderr, "sessione: niente da salvare (len=%d)\n", len); return 1; }
+    if (len < 2) { fprintf(stderr, "session: nothing to save (len=%d)\n", len); return 1; }
     char tmp[4096];
     snprintf(tmp, sizeof(tmp), "%s.tmp.%d", path, (int)getpid());
     FILE *f = fopen(tmp, "wb");
-    if (!f) { fprintf(stderr, "sessione: impossibile creare %s (%s)\n", tmp, strerror(errno)); return 1; }
+    if (!f) { fprintf(stderr, "session: cannot create %s (%s)\n", tmp, strerror(errno)); return 1; }
     RefineSha256 sha; refine_sha256_init(&sha);
     session_write(f, &sha, SESSION_MAGIC, 8);
     uint32_t geo[9]; session_geometry(c, geo);
@@ -3177,21 +3177,21 @@ static int session_save(Model *m, const int *tokens, int len, const char *path) 
     }
     uint8_t digest[32]; refine_sha256_final(&sha, digest);
     if (fwrite(digest, 1, 32, f) != 32 || fflush(f) != 0 || fsync(fileno(f)) != 0 || fclose(f) != 0) {
-        fprintf(stderr, "sessione: flush/fsync fallito (%s)\n", strerror(errno));
+        fprintf(stderr, "session: flush/fsync failed (%s)\n", strerror(errno));
         remove(tmp); return 1;
     }
     if (rename(tmp, path) != 0) {
-        fprintf(stderr, "sessione: rename fallito (%s)\n", strerror(errno));
+        fprintf(stderr, "session: rename failed (%s)\n", strerror(errno));
         remove(tmp); return 1;
     }
     struct stat st;
     double mb = (stat(path, &st) == 0) ? st.st_size / 1e6 : 0;
-    fprintf(stderr, "[session] salvata %s: %d token, %.1f MB\n", path, len, mb);
+    fprintf(stderr, "[session] saved %s: %d tokens, %.1f MB\n", path, len, mb);
     return 0;
 }
 
 static void session_die(const char *path, const char *why) {
-    fprintf(stderr, "sessione: %s non valida: %s\n", path, why);
+    fprintf(stderr, "session: %s is invalid: %s\n", path, why);
     exit(1);
 }
 
@@ -3242,9 +3242,9 @@ static void session_read(FILE *f, RefineSha256 *sha, void *out, size_t bytes,
  * capacita' len+reserve (malloc, caller-owned), pronto per l'append. */
 static int *session_resume(Model *m, const char *path, int reserve, int *len_out) {
     Cfg *c = &m->c;
-    if (reserve < 1) { fprintf(stderr, "sessione: reserve deve essere positivo\n"); exit(1); }
+    if (reserve < 1) { fprintf(stderr, "session: reserve must be positive\n"); exit(1); }
     FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "sessione: impossibile aprire %s (%s)\n", path, strerror(errno)); exit(1); }
+    if (!f) { fprintf(stderr, "session: cannot open %s (%s)\n", path, strerror(errno)); exit(1); }
     RefineSha256 sha; refine_sha256_init(&sha);
     char magic[8];
     session_read(f, &sha, magic, 8, path);
@@ -3264,7 +3264,7 @@ static int *session_resume(Model *m, const char *path, int reserve, int *len_out
         if (t != (uint8_t)c->layer_type[i]) session_die(path, "layer_type incoerente");
     }
     int *tokens = malloc(((size_t)len_u + (size_t)reserve) * sizeof(int));
-    if (!tokens) { fprintf(stderr, "OOM tokens sessione\n"); exit(1); }
+    if (!tokens) { fprintf(stderr, "OOM session tokens\n"); exit(1); }
     session_read(f, &sha, tokens, (size_t)len_u * sizeof(int), path);
 
     m->max_t = (int)len_u + reserve;
@@ -3302,7 +3302,7 @@ static int *session_resume(Model *m, const char *path, int reserve, int *len_out
     if (fread(digest, 1, 32, f) != 32) session_die(path, "trailer mancante");
     if (memcmp(digest, expect_digest, 32) != 0) session_die(path, "SHA-256 non corrisponde");
     fclose(f);
-    fprintf(stderr, "[session] ripresa %s: %d token, %u righe KV\n", path, (int)len_u, kv_rows);
+    fprintf(stderr, "[session] resumed %s: %d tokens, %u KV rows\n", path, (int)len_u, kv_rows);
     *len_out = (int)len_u;
     return tokens;
 }
@@ -3758,30 +3758,30 @@ static int run_chat(Model *m, const char *tokenizer_path, const char *user,
         char *cont_text = NULL;
         int hlen_hint=0,last_hint=-1;
         if(!session_peek(m,resume_session,&hlen_hint,&last_hint)){
-            fprintf(stderr,"sessione: intestazione non valida: %s\n",resume_session);
+            fprintf(stderr,"session: invalid header: %s\n",resume_session);
             return 1;
         }
         if (resume_decode > 0) {
             /* modalita' di validazione: continua la decodifica esatta */
         } else {
-            if (!user) { fprintf(stderr, "--resume-session richiede --chat o --resume-decode\n"); return 1; }
+            if (!user) { fprintf(stderr, "--resume-session requires --chat or --resume-decode\n"); return 1; }
             int ended = (last_hint == cli_sink.eos);
             cont_text = qwen_chat_continuation(user, no_thinking, ended);
             int cap = (int)strlen(cont_text) + 32;
             extra = malloc((size_t)cap * sizeof(int));
             n_extra = tok_encode(tok, cont_text, (int)strlen(cont_text), extra, cap);
-            if(n_extra<=0){fprintf(stderr,"sessione: continuazione senza token\n");
+            if(n_extra<=0){fprintf(stderr,"session: continuation produced no tokens\n");
                 free(extra);free(cont_text);return 1;}
         }
         if(!context_fits(hlen_hint,n_extra,n_new)){
-            fprintf(stderr,"sessione: il turno supererebbe il limite totale di %d token\n",
+            fprintf(stderr,"session: this turn would exceed the %d-token total context limit\n",
                     SAMOSA_MAX_CONTEXT_TOKENS);
             free(extra);free(cont_text);return 1;
         }
         int hlen=0;
         int *hist=session_resume(m,resume_session,n_extra+n_new,&hlen);
         if (!output_sink) {
-            printf("%s", "\n--- risposta ---\n");
+            printf("%s", "\n");
             fflush(stdout);
         }
         int *gen_out = malloc((size_t)n_new * sizeof(int));
@@ -3805,15 +3805,15 @@ static int run_chat(Model *m, const char *tokenizer_path, const char *user,
         int cap = (int)strlen(text) + 32;
         int *prompt = malloc((size_t)cap * sizeof(int));
         np = tok_encode(tok, text, (int)strlen(text), prompt, cap);
-        if (!np) { fprintf(stderr, "Il prompt non ha prodotto token\n"); free(text); free(prompt); return 1; }
+        if (!np) { fprintf(stderr, "The prompt produced no tokens\n"); free(text); free(prompt); return 1; }
         if(!context_fits(0,np,n_new)){
-            fprintf(stderr,"Il turno supererebbe il limite totale di %d token\n",
+            fprintf(stderr,"This turn would exceed the %d-token total context limit\n",
                     SAMOSA_MAX_CONTEXT_TOKENS);
             free(text);free(prompt);return 1;
         }
         int *out = malloc((size_t)(np + n_new) * sizeof(int));
         if (!output_sink) {
-            printf("%s", "\n--- risposta ---\n");
+            printf("%s", "\n");
             fflush(stdout);
         }
         generate(m, prompt, np, n_new, out, active_sink, active_ctx, options, &stats);
@@ -3849,11 +3849,11 @@ static int run_chat(Model *m, const char *tokenizer_path, const char *user,
                                        tok_id_of(tok, "</think>"));
         if (!save_len) {
             stats.session_save_skipped = 1;
-            fprintf(stderr, "[session] turno annullato senza frase completa: "
-                            "snapshot precedente conservato\n");
+            fprintf(stderr, "[session] cancelled turn had no complete sentence: "
+                            "kept the previous snapshot\n");
         } else if (save_len < final_len) {
-            fprintf(stderr, "[session] turno annullato: salvo %d/%d token "
-                            "(fino all'ultima frase completa)\n",
+            fprintf(stderr, "[session] cancelled turn: saved %d/%d tokens "
+                            "(up to the last complete sentence)\n",
                     save_len - np, final_len - np);
         }
     }
@@ -4423,15 +4423,15 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--stream")) stream = 1;
         else if (!strcmp(argv[i], "--save-session")) {
-            if (i + 1 >= argc) { fprintf(stderr, "--save-session richiede un percorso\n"); bad_option = 1; }
+            if (i + 1 >= argc) { fprintf(stderr, "--save-session requires a path\n"); bad_option = 1; }
             else cli_save_session = argv[++i];
         }
         else if (!strcmp(argv[i], "--resume-session")) {
-            if (i + 1 >= argc) { fprintf(stderr, "--resume-session richiede un percorso\n"); bad_option = 1; }
+            if (i + 1 >= argc) { fprintf(stderr, "--resume-session requires a path\n"); bad_option = 1; }
             else cli_resume_session = argv[++i];
         }
         else if (!strcmp(argv[i], "--resume-decode")) {
-            if (i + 1 >= argc) { fprintf(stderr, "--resume-decode richiede un numero di token\n"); bad_option = 1; }
+            if (i + 1 >= argc) { fprintf(stderr, "--resume-decode requires a token count\n"); bad_option = 1; }
             else cli_resume_decode = atoi(argv[++i]);
         }
         else if (!strcmp(argv[i], "--greedy")) greedy = 1;
@@ -4448,23 +4448,23 @@ int main(int argc, char **argv) {
             }
         }
         else if (!strcmp(argv[i], "--moe-k")) {
-            if (i + 1 >= argc) { fprintf(stderr, "--moe-k richiede un valore\n"); bad_option = 1; }
+            if (i + 1 >= argc) { fprintf(stderr, "--moe-k requires a value\n"); bad_option = 1; }
             else cli_moe_fixed = argv[++i];
         }
         else if (!strcmp(argv[i], "--moe-mass")) {
-            if (i + 1 >= argc) { fprintf(stderr, "--moe-mass richiede un valore\n"); bad_option = 1; }
+            if (i + 1 >= argc) { fprintf(stderr, "--moe-mass requires a value\n"); bad_option = 1; }
             else cli_moe_mass = argv[++i];
         }
         else if (!strcmp(argv[i], "--moe-max-entropy")) {
-            if (i + 1 >= argc) { fprintf(stderr, "--moe-max-entropy richiede un valore\n"); bad_option = 1; }
+            if (i + 1 >= argc) { fprintf(stderr, "--moe-max-entropy requires a value\n"); bad_option = 1; }
             else cli_moe_max_entropy = argv[++i];
         }
         else if (!strcmp(argv[i], "--moe-min-gap")) {
-            if (i + 1 >= argc) { fprintf(stderr, "--moe-min-gap richiede un valore\n"); bad_option = 1; }
+            if (i + 1 >= argc) { fprintf(stderr, "--moe-min-gap requires a value\n"); bad_option = 1; }
             else cli_moe_min_gap = argv[++i];
         }
         else if (!strcmp(argv[i], "--refine-dir")) {
-            if (i + 1 >= argc) { fprintf(stderr, "--refine-dir richiede un valore\n"); bad_option = 1; }
+            if (i + 1 >= argc) { fprintf(stderr, "--refine-dir requires a value\n"); bad_option = 1; }
             else cli_refine_dir = argv[++i];
         }
         else if (!strcmp(argv[i], "--refine-mode")) {
@@ -4501,7 +4501,7 @@ int main(int argc, char **argv) {
                 ++i;
             }
         }
-        else if (!strncmp(argv[i], "--", 2)) { fprintf(stderr, "Opzione sconosciuta: %s\n", argv[i]); bad_option = 1; }
+        else if (!strncmp(argv[i], "--", 2)) { fprintf(stderr, "Unknown option: %s\n", argv[i]); bad_option = 1; }
     }
     if (bad_option) return 1;
     if(serve_mode && (chat||cli_resume_session||teacher_corpus)){
@@ -4632,10 +4632,9 @@ int main(int argc, char **argv) {
     }
     if (chat || cli_resume_session) {
         if (!snap && argc > 1 && argv[1][0] != '-') snap = argv[1];
-        if (!snap) { fprintf(stderr, "Uso: SNAP=<dir> ./qwen36b --chat <prompt> [--stream] [--no-thinking] [--system <prompt>] [--tokens N] [--tokenizer file] [--moe-k N | --moe-mass P]\n"); return 1; }
+        if (!snap) { fprintf(stderr, "Usage: SNAP=<dir> ./qwen36b --chat <prompt> [--stream] [--no-thinking] [--system <prompt>] [--tokens N] [--tokenizer file] [--moe-k N | --moe-mass P]\n"); return 1; }
         if (!tokenizer_path) tokenizer_path = "tokenizer_qwen36.json";
-        if (n_chat <= 0) { fprintf(stderr, "--tokens deve essere positivo\n"); return 1; }
-        printf("== Qwen3.6 Stage-B chat (prompt tokens via %s) ==\n", tokenizer_path);
+        if (n_chat <= 0) { fprintf(stderr, "--tokens must be positive\n"); return 1; }
         GenOptions options; load_generation_options(snap,&options);
         /* Long thinking runs are a precision-sensitive path. The accelerated
          * kernel quantizes every activation row to int8 on top of the stored
@@ -4678,7 +4677,7 @@ int main(int argc, char **argv) {
             cli_thinking_budget >= 0 ? cli_thinking_budget :
             thinking_code ? 2048 : 1024;
         if(options.temperature<=0 || options.top_k<1 || options.top_p<=0 || options.top_p>1){
-            fprintf(stderr,"Parametri sampling non validi\n"); return 1;
+            fprintf(stderr,"Invalid sampling parameters\n"); return 1;
         }
         int idot_enabled = getenv("IDOT") ? atoi(getenv("IDOT")) : 1;
         int stateful_idot_enabled = getenv("IDOT_STATEFUL")
@@ -4718,7 +4717,7 @@ int main(int argc, char **argv) {
     }
     
     if (!snap) {
-        fprintf(stderr, "Uso: SNAP=<dir> [REF=<json>] ./qwen36b | SNAP=<dir> ./qwen36b --chat <prompt> [--stream] [--no-thinking] [--system <prompt>] [--tokens N]\n");
+        fprintf(stderr, "Usage: SNAP=<dir> [REF=<json>] ./qwen36b | SNAP=<dir> ./qwen36b --chat <prompt> [--stream] [--no-thinking] [--system <prompt>] [--tokens N]\n");
         return 1;
     }
     if (!refpath) {
@@ -4735,7 +4734,7 @@ int main(int argc, char **argv) {
     int *full = read_int_array(ref, "full_ids", &nfull);
     int n_new = nfull - np;
     
-    printf("== Motore C Qwen3.6 Stage-B, Quantizzato ==\n");
+    printf("== Samosa C engine (Qwen3.6, quantized) ==\n");
     Model m; model_init(&m,snap,refine_dir,refine_mode,refine_verify,
                         refine_full_ranks,refine_base_projections,
                         refine_base_layers_text);
@@ -4794,10 +4793,10 @@ int main(int argc, char **argv) {
     double dt = now_s() - t;
     
     int match = 0;
-    printf("\nRiferimento: "); for (int i = np; i < nfull; i++) printf("%d ", full[i]);
-    printf("\nMotore C   : "); for (int i = np; i < nfull; i++) { printf("%d ", out[i]); if (out[i] == full[i]) match++; }
-    printf("\nToken coincidenti: %d/%d\n", match, n_new);
-    printf("Velocita': %.2f tok/s (%.2fs per %d token)\n", n_new / dt, dt, n_new);
+    printf("\nReference  : "); for (int i = np; i < nfull; i++) printf("%d ", full[i]);
+    printf("\nC engine   : "); for (int i = np; i < nfull; i++) { printf("%d ", out[i]); if (out[i] == full[i]) match++; }
+    printf("\nMatching tokens: %d/%d\n", match, n_new);
+    printf("Speed: %.2f tok/s (%.2fs for %d tokens)\n", n_new / dt, dt, n_new);
     
     free(buf); free(arena);
     refine_report(&m);

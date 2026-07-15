@@ -25,6 +25,16 @@
 > released by the Qwen team. Samosa Chat is an independent, unofficial,
 > Apache-2.0 project. It is not affiliated with or endorsed by either team.
 
+## What it looks like
+
+A real, unedited recording on the 16 GB M3 MacBook Air — a question in, an
+answer out, no cloud:
+
+<p align="center"><img src="assets/demo-terminal.gif" alt="Samosa Chat answering a question in the terminal" width="900"></p>
+
+Real time, played at normal speed. The pause before the answer is the model
+loading; after that it writes at about 5–9 tokens per second.
+
 ## Install
 
 ```sh
