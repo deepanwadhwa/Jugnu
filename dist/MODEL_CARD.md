@@ -14,7 +14,8 @@ pipeline_tag: text-generation
 <div align="center">
   <img src="samosa-chat.png" alt="Samosa Chat mascot" width="190">
   <h1>Samosa Chat</h1>
-  <p><strong>Qwen3.6-35B-A3B as a private local app on a 16 GB Apple Silicon Mac.</strong></p>
+  <p><strong>Run Qwen3.6-35B-A3B locally on a 16 GB Apple Silicon Mac.</strong></p>
+  <p>In your terminal, or in your browser · Runs on the CPU · No cloud account · No telemetry</p>
 </div>
 
 > **Foundation and model credit.** Samosa Chat is built on
@@ -27,15 +28,16 @@ pipeline_tag: text-generation
 
 > **This repository hosts the model that powers Samosa Chat.** These are the
 > group-32 model files used by [Samosa Chat](https://github.com/deepanwadhwa/samosa-chat),
-> a free, open-source app that runs Qwen3.6-35B-A3B fully locally on a 16 GB
-> Apple Silicon Mac. The app, complete source, documentation, and issue tracker
-> live on GitHub:
+> a free, open-source project that runs Qwen3.6-35B-A3B fully locally on a
+> 16 GB Apple Silicon Mac. The complete source, documentation, and issue
+> tracker live on GitHub:
 > **[github.com/deepanwadhwa/samosa-chat](https://github.com/deepanwadhwa/samosa-chat)**
 
-Samosa Chat packages the group-32 int4 model, a dependency-free C inference
-engine, and a responsive local chat interface. The model stays on the Mac;
-the app binds only to `127.0.0.1`, has no account or telemetry, and makes no
-remote request during inference.
+Samosa Chat packages the group-32 int4 model and a dependency-free C inference
+engine. You use it from the terminal (`samosa "your question"`), which is the
+normal way, or through a local browser app (`samosa app`), which is currently a
+demo. Everything stays on the Mac: no account, no telemetry, and no remote
+request during inference. The server binds only to `127.0.0.1`.
 
 ## Supported hardware
 

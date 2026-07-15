@@ -1,8 +1,8 @@
 <div align="center">
   <img src="assets/samosa-chat_medium.png" alt="Samosa Chat mascot" width="210">
   <h1>Samosa Chat</h1>
-  <p><strong>Run Qwen3.6-35B-A3B as a local chat app on a 16 GB Apple Silicon Mac.</strong></p>
-  <p>Runs on the CPU &nbsp;·&nbsp; No cloud account &nbsp;·&nbsp; No telemetry</p>
+  <p><strong>Run Qwen3.6-35B-A3B locally on a 16 GB Apple Silicon Mac.</strong></p>
+  <p>In your terminal, or in your browser &nbsp;·&nbsp; Runs on the CPU &nbsp;·&nbsp; No cloud account &nbsp;·&nbsp; No telemetry</p>
 
   <p>
     <a href="https://github.com/deepanwadhwa/samosa-chat/actions/workflows/ci.yml"><img src="https://github.com/deepanwadhwa/samosa-chat/actions/workflows/ci.yml/badge.svg" alt="CI: build and tests"></a>
@@ -169,11 +169,6 @@ message + the answer ceiling). Samosa checks this before it runs and stops
 rather than growing memory without limit.
 
 ## The web app (a demo)
-
-**This is a demo.** It works and everything below is real, but it exists to show
-the engine off — streaming, the model's thinking, live speed and memory — not as
-a polished daily interface. For everyday chatting, use
-[the terminal](#chat-in-your-terminal).
 
 `samosa app` starts a local server and opens a chat page in your browser.
 Everything runs on your machine. The page makes no outside requests.
