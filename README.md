@@ -154,7 +154,7 @@ native `curl | sh` installer supports Linux in this repository, but the copy
 published on Hugging Face is still macOS-only, so **use the Docker path** until
 that is republished.
 
-### Both Docker paths: two things that matter
+### Both Docker paths: three things that matter
 
 **Use a named volume, never a folder.** `-v samosa-model:/model` — not
 `-v /home/you/models:/model` or a Windows path. The file-sharing layer costs
@@ -163,6 +163,33 @@ this wrong.
 
 **Publish as `-p 127.0.0.1:8642:8642`, never `-p 8642:8642`.** The second form
 binds `0.0.0.0` and exposes the model server to your whole network.
+
+**Try more threads — it is probably free speed.** The default targets *half your
+performance cores*, which is a comfort setting tuned for a fanless MacBook Air.
+It is almost certainly too conservative for a desktop or a mains-powered laptop:
+on a 12-core i7-1260P it picks **2 threads**.
+
+```sh
+docker rm -f samosa
+docker run -d --name samosa -p 127.0.0.1:8642:8642 -v samosa-model:/model --memory=6g -e OMP_NUM_THREADS=8 samosa serve
+```
+
+Why this is worth more on x86 than it is on a Mac: the Mac is storage-bound
+(70% of decode is SSD wait), so more threads bought only **14%** there. x86 runs
+the scalar path today, which makes it *compute*-bound — so threads should pay
+much better. Try 4, then 8. Past your performance-core count you are into
+efficiency cores and it will flatten. It will run warmer; that is the trade.
+
+Time a run before and after with the same prompt and seed:
+
+```sh
+curl -s http://127.0.0.1:8642/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"What is the capital of France?"}],"thinking":"off","max_tokens":16,"seed":11}'
+```
+
+The `tokens_per_second` in the reply is your number. If you find a good setting
+for your CPU, [open an issue](https://github.com/deepanwadhwa/samosa-chat/issues)
+— real numbers from real machines are exactly what the thread policy needs.
 
 ### Where Samosa is installed
 

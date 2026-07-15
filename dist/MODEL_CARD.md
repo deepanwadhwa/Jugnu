@@ -6,6 +6,9 @@ tags:
 - moe
 - int4
 - apple-silicon
+- linux
+- windows
+- docker
 - local-inference
 - c
 pipeline_tag: text-generation
@@ -14,7 +17,7 @@ pipeline_tag: text-generation
 <div align="center">
   <img src="samosa-chat.png" alt="Samosa Chat mascot" width="190">
   <h1>Samosa Chat</h1>
-  <p><strong>Run Qwen3.6-35B-A3B locally on a 16 GB Apple Silicon Mac.</strong></p>
+  <p><strong>Run Qwen3.6-35B-A3B locally on a 16 GB machine.</strong></p>
   <p>In your terminal, or in your browser · Runs on the CPU · No cloud account · No telemetry</p>
 </div>
 
@@ -34,14 +37,14 @@ pipeline_tag: text-generation
 > **This repository hosts the model that powers Samosa Chat.** These are the
 > group-32 model files used by [Samosa Chat](https://github.com/deepanwadhwa/samosa-chat),
 > a free, open-source project that runs Qwen3.6-35B-A3B fully locally on a
-> 16 GB Apple Silicon Mac. The complete source, documentation, and issue
+> 16 GB machine. The complete source, documentation, and issue
 > tracker live on GitHub:
 > **[github.com/deepanwadhwa/samosa-chat](https://github.com/deepanwadhwa/samosa-chat)**
 
 Samosa Chat packages the group-32 int4 model and a dependency-free C inference
 engine. You use it from the terminal (`samosa "your question"`), which is the
 normal way, or through a local browser app (`samosa app`), which is currently a
-demo. Everything stays on the Mac: no account, no telemetry, and no remote
+demo. Everything stays on your computer: no account, no telemetry, and no remote
 request during inference. The server binds only to `127.0.0.1`.
 
 ## What Samosa adds
@@ -72,16 +75,38 @@ Full source and detail:
 
 ## Supported hardware
 
-Version 1 supports **macOS on Apple Silicon (`arm64`) with at least 16 GB of
-RAM**. The installer rejects other operating systems and architectures.
+**macOS on Apple Silicon (`arm64`) runs natively** via the one-line installer,
+with at least 16 GB of RAM. **Linux and Windows run via Docker**, from the
+repository. Every measurement below is from the machine named beside it:
 
-“CPU-only” describes the current inference backend: it uses Apple NEON/SDOT
-and optional OpenMP, not Metal. It does **not** mean that an arbitrary 16 GB
-laptop can run this release. Product testing to date is on one fanless 16 GB
-M3 MacBook Air; M1/M2 and additional machines still need independent release
-validation.
+| Platform | How | Measured decode | Verified on |
+|---|---|---|---|
+| macOS, Apple Silicon | native installer | **5–7 tok/s** | one fanless 16 GB M3 MacBook Air |
+| Windows, x86_64 | Docker in WSL2 | **1.26 tok/s** | one ASUS Zenbook, i7-1260P, 16 GB |
+| Linux, x86_64 | Docker | not yet measured | build + test suite green on Debian 12, Ubuntu 26.04 |
+
+**macOS is the fast path; x86 is ~4–5x slower, for a known and fixable reason.**
+The engine picks its vectorised kernels at compile time and the build passes no
+`-march`, so on x86 the AVX2 kernels are compiled out and it falls back to a
+scalar loop — measured **7.6x slower** on identical hardware. The Zenbook above
+*has* AVX2 and gets none of it. The fix is runtime CPU dispatch; it is tracked
+in the repository as G10/H2.
+
+Output is identical across platforms: the same prompt and seed returns the same
+tokens on macOS/NEON, arm64 Linux, and x86_64 Linux, at the same ~3.84 GB
+footprint. Only speed differs.
+
+“CPU-only” describes the inference backend: NEON/SDOT on Apple Silicon, the
+scalar or AVX2 path on x86, optional OpenMP — not Metal, and not CUDA. It does
+**not** mean an arbitrary 16 GB laptop runs this well. It needs an **NVMe SSD**
+(expert weights stream from disk on every token; a host bind mount instead of a
+named Docker volume costs ~6x, and a hard drive is unusable) and **≥6 GB given
+to the Docker VM** on Linux/Windows. M1/M2 and other machines still need
+independent release validation.
 
 ## Install
+
+### macOS (Apple Silicon)
 
 ```sh
 curl -fsSL https://huggingface.co/REPO_ID_PLACEHOLDER/resolve/main/install.sh | sh
@@ -92,6 +117,28 @@ Then **open a new terminal** and ask it something:
 ```sh
 samosa "explain how DNS works"
 ```
+
+### Linux and Windows
+
+Use Docker, from the GitHub repository — the installer above is macOS-only:
+
+```sh
+git clone https://github.com/deepanwadhwa/samosa-chat
+cd samosa-chat
+docker build -t samosa .
+docker volume create samosa-model
+docker run --rm -v samosa-model:/model samosa pull
+docker run -d --name samosa -p 127.0.0.1:8642:8642 -v samosa-model:/model --memory=6g samosa serve
+```
+
+Then open <http://127.0.0.1:8642>. `samosa pull` fetches these model files into
+the volume and verifies each one by size and SHA-256; an interrupted download
+resumes if you re-run it. On Windows this runs inside WSL2 — the full
+step-by-step, including the Docker VM memory requirement, is in the
+[repository README](https://github.com/deepanwadhwa/samosa-chat#install).
+
+Expect ~1.3 tok/s on x86 today rather than the Mac's 5–7 — see
+[Supported hardware](#supported-hardware) for why.
 
 Allow roughly 30 GB free. The installer downloads into an inactive versioned
 release, verifies every byte size and SHA-256 digest, compiles the C engine,
