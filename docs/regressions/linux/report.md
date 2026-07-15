@@ -18,9 +18,35 @@ Method: Docker on an Apple Silicon host. amd64 legs run under QEMU emulation
 | Target | Arch | `make` | `make omp` | `make test` |
 |---|---|---|---|---|
 | macOS (host, clang) | arm64 | **pass** | **pass** | **pass** (baseline unchanged) |
-| `debian:bookworm-slim` | arm64 | **pass** | **pass** | **pass** |
-| `ubuntu:latest` (26.04) | arm64 | **pass** | **pass** | **pass** |
-| `debian:bookworm-slim` | amd64 | **pass** | **pass** | not run (emulated) |
+| `debian:bookworm-slim` | arm64 | **pass** | **pass** (after G11 fix) | **pass** |
+| `ubuntu:latest` (26.04) | arm64 | **pass** | **pass** (after G11 fix) | **pass** |
+| `debian:bookworm-slim` | amd64 | **pass** | not run (emulated) | not run (emulated) |
+
+### Correction (2026-07-15) — this table previously contained a false claim
+
+The `make omp` column originally read **pass** for both Linux rows. **It was
+wrong, and CI caught it, not this report.**
+
+What actually happened: the Linux legs were verified by invoking the compiler
+**by hand** —
+
+```sh
+gcc -O3 -Wno-unused-function -pthread -fopenmp src/qwen36b.c src/expert_cache.c -o /tmp/q -lm
+```
+
+— under a heading that *said* `make omp`. The real `make omp` target was never
+run on Linux. It failed, because the target hardcoded `-Xclang -fopenmp` and a
+Homebrew `libomp` prefix; `gcc` rejects `-Xclang` outright. See **G11** in
+[../../TASKS_LINUX.md](../../TASKS_LINUX.md).
+
+This is exactly the failure mode the working agreement in
+[../../ISSUE_TASKS.md](../../ISSUE_TASKS.md) exists to prevent: **verifying an
+equivalent command is not verifying the documented command.** The evidence rule
+says paste the command and its output — had that been followed here, the label
+and the command would not have diverged. Re-verified after the fix by running
+the actual target: `make omp` exits 0 on Debian bookworm with gcc (default
+`cc`) and with clang once `libomp-dev` is present, and still exits 0 on macOS
+with OpenMP linked.
 
 Extra x86_64 kernel paths, compile-only, `debian:bookworm-slim` amd64 — all
 **pass**, all never executed:

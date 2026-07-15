@@ -284,6 +284,47 @@ makes **E-L1 mandatory rather than optional**. And E-L1 cannot run on the
 reference Mac: an amd64 container there reports no AVX2, no AVX512-VNNI, not even
 SSE4.2. **G10 needs real x86 hardware to close.**
 
+### G11 — `make omp` was macOS-only  **FIXED 2026-07-15; found by CI, not by us**
+
+The `omp` target hardcoded clang-and-Homebrew flags:
+
+```make
+$(CC) -O3 ... -Xclang -fopenmp -I$(OMP_PREFIX)/include ... -L$(OMP_PREFIX)/lib -lomp
+```
+
+On Linux `cc` is gcc, which rejects `-Xclang` outright, and `/usr/local/opt/libomp`
+is a Homebrew path. The first real CI run on `ubuntu-latest` failed:
+
+```
+cc: error: unrecognized command-line option '-Xclang'
+make: *** [Makefile:12: omp] Error 1
+```
+
+Fixed by branching on `uname -s`, mirroring what `dist/install.sh` already does:
+Apple clang gets `-Xclang -fopenmp` + the Homebrew prefix, everything else gets a
+plain `-fopenmp` and finds libgomp/libomp itself. **Keep the Makefile and
+`install.sh` in step** — they now encode the same platform rule in two places.
+
+Verified by running the **actual target** (see below for why that matters):
+macOS `make omp` exits 0 with OpenMP linked; Debian bookworm `make omp` exits 0
+under gcc (default `cc`) and under clang once `libomp-dev` is installed. Linux
+clang needs `libomp-dev` for `omp.h` — the same shape of dependency as macOS
+needing `brew install libomp`. CI installs it.
+
+**Why this survived G1–G10 and the whole E-L0 matrix.** E-L0's Linux legs
+verified the build by invoking `gcc -fopenmp ...` **by hand**, under a heading
+that said `make omp`. The equivalent compile worked, so it was reported as
+`make omp: pass` in [../regressions/linux/report.md](regressions/linux/report.md).
+The documented command was never run and it did not work.
+
+**The lesson, which is cheap to state and was expensive to learn: verifying an
+equivalent command is not verifying the documented command.** Run the thing the
+user runs — the target, the script, the flag — not a hand-rolled stand-in that
+you believe is the same. This is precisely what the evidence rule in
+[ISSUE_TASKS.md](ISSUE_TASKS.md) asks for (paste the command *and* its output);
+following it would have caught this, because the pasted command would not have
+matched the heading.
+
 ### G7 — CI is macOS-only
 
 [.github/workflows/ci.yml](../.github/workflows/ci.yml) is `runs-on:
