@@ -184,14 +184,20 @@ chmod +x "$LAUNCHER_NEXT"
 mv -f "$LAUNCHER_NEXT" "$LAUNCHER_DIR/samosa"
 mv -f "$MANIFEST_NEXT" "$HOME_DIR/release-manifest.tsv"
 
+NEEDS_NEW_SHELL=0
 if [ "${SAMOSA_INSTALL_TEST:-0}" != 1 ]; then
   case ":$PATH:" in *":$LAUNCHER_DIR:"*) ;; *)
+    # The launcher is not on PATH in this shell. Adding it to the rc file only
+    # affects shells started afterwards, so the caller must be told.
+    NEEDS_NEW_SHELL=1
     case "${SHELL:-}" in
       */zsh) RC="$HOME/.zshrc" ;;
       */bash) RC="$HOME/.bashrc" ;;
       *) RC="$HOME/.profile" ;;
     esac
-    if ! grep -qs "\.samosa/bin" "$RC" 2>/dev/null; then
+    if grep -qs "\.samosa/bin" "$RC" 2>/dev/null; then
+      say "~/.samosa/bin is already configured in $RC"
+    else
       printf '\nexport PATH="$HOME/.samosa/bin:$PATH"\n' >>"$RC"
       say "added ~/.samosa/bin to PATH in $RC"
     fi
@@ -200,4 +206,16 @@ fi
 
 say "Activated verified release $RELEASE_ID."
 say "Previous releases and any legacy ~/.samosa/model directory were left untouched for rollback."
-say "Run: samosa doctor"
+say "Samosa is installed at $LAUNCHER_DIR/samosa"
+if [ "$NEEDS_NEW_SHELL" = 1 ]; then
+  # Do not tell people to run `samosa` in this shell: the PATH change above
+  # only applies to shells started after it, so it would fail here.
+  say ""
+  say "One more step: this terminal does not know about samosa yet."
+  say "Open a new terminal, or run:"
+  say "    export PATH=\"\$HOME/.samosa/bin:\$PATH\""
+  say ""
+  say "Then try:  samosa \"explain how DNS works\""
+else
+  say "Try:  samosa \"explain how DNS works\""
+fi

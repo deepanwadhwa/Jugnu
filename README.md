@@ -39,10 +39,13 @@ loading; after that it writes at about 5–9 tokens per second.
 
 ```sh
 curl -fsSL https://huggingface.co/deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-group32/resolve/main/install.sh | sh
-samosa "explain how DNS works"
 ```
 
-That is the whole thing: install, then ask it something.
+Then **open a new terminal** and ask it something:
+
+```sh
+samosa "explain how DNS works"
+```
 
 You need an Apple Silicon Mac, 16 GB of RAM, Apple's Command Line Tools (for the
 C compiler), and about 30 GB of free disk. The download is about 24 GB. The
@@ -50,6 +53,35 @@ installer resumes interrupted downloads, checks the SHA-256 of every file,
 compiles the C engine on your machine, and smoke-tests it before switching the
 new release live. A corrupt or interrupted upgrade leaves your existing install
 untouched. It does not need administrator rights.
+
+### Where Samosa is installed
+
+Everything lives under `~/.samosa`, and nothing is installed system-wide:
+
+| path | what it is |
+|---|---|
+| `~/.samosa/bin/samosa` | the `samosa` command itself |
+| `~/.samosa/current` | symlink to the active release |
+| `~/.samosa/releases/` | verified releases, kept so an upgrade can roll back |
+| `~/.samosa/chats/` | your saved conversations |
+
+The installer adds `~/.samosa/bin` to your `PATH` by appending one line to your
+shell's rc file (`~/.zshrc` for zsh, `~/.bashrc` for bash, otherwise
+`~/.profile`). **That only affects terminals you open afterwards** — which is
+why the step above says to open a new one. If `samosa` still is not found:
+
+```sh
+# make it work in the terminal you already have
+export PATH="$HOME/.samosa/bin:$PATH"
+
+# or skip PATH entirely and run it directly
+~/.samosa/bin/samosa "how are you"
+```
+
+`samosa doctor` reports which release is active and whether the model, engine,
+and tokenizer are healthy.
+
+To uninstall, delete `~/.samosa` and remove that one line from your rc file.
 
 The model lives at
 [deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-group32](https://huggingface.co/deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-group32).

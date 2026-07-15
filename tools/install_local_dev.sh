@@ -59,3 +59,20 @@ trap - EXIT HUP INT TERM
 echo "Installed local development release $release_id"
 echo "Launcher: $HOME_DIR/bin/samosa"
 echo "Model files were hard-linked, not copied."
+
+# Unlike dist/install.sh, this script never edits your shell rc — a dev install
+# should not mutate your profile behind your back. So say plainly whether the
+# launcher is reachable, instead of leaving you to find out via
+# "command not found".
+case ":$PATH:" in
+  *":$HOME_DIR/bin:"*)
+    echo "PATH: ok — 'samosa' is runnable in this shell."
+    ;;
+  *)
+    echo
+    echo "NOTE: $HOME_DIR/bin is not on your PATH, so 'samosa' will not be found."
+    echo "      For this shell:   export PATH=\"\$HOME/.samosa/bin:\$PATH\""
+    echo "      To make it stick: echo 'export PATH=\"\$HOME/.samosa/bin:\$PATH\"' >> ~/.zshrc"
+    echo "      Or run it directly: $HOME_DIR/bin/samosa \"how are you\""
+    ;;
+esac
