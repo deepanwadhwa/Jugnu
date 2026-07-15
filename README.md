@@ -14,15 +14,12 @@
 
 ## Install
 
-One command gets you the whole product: the group-32 model and the browser chat
-app.
-
 ```sh
 curl -fsSL https://huggingface.co/deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-group32/resolve/main/install.sh | sh
-samosa app
+samosa "explain how DNS works"
 ```
 
-`samosa app` starts the local server and opens the chat page in your browser.
+That is the whole thing: install, then ask it something.
 
 You need an Apple Silicon Mac, 16 GB of RAM, Apple's Command Line Tools (for the
 C compiler), and about 30 GB of free disk. The download is about 24 GB. The
@@ -31,9 +28,26 @@ compiles the C engine on your machine, and smoke-tests it before switching the
 new release live. A corrupt or interrupted upgrade leaves your existing install
 untouched. It does not need administrator rights.
 
-Everything below describes this release: the browser app running the group-32
-model. The model itself lives at
+The model lives at
 [deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-group32](https://huggingface.co/deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-group32).
+
+## Two ways to use it
+
+Both come from the same install. Pick based on what you want:
+
+| | [Terminal](#chat-in-your-terminal) | [Web app](#the-web-app-a-demo) |
+|---|---|---|
+| Command | `samosa "your question"` | `samosa app` |
+| What it is | **the normal way to use Samosa** | **a demo** |
+| Good for | actually chatting, scripting, piping output | seeing tokens stream and watching the model think |
+
+**If you just want to chat with the model, use the terminal.** It starts
+instantly, does everything the model can do, and is the interface that gets used
+day to day.
+
+**The web app is a demo at this point.** It works, and it is the nicest way to
+watch answers stream in and see the model's reasoning unfold. But it exists to
+demonstrate the engine, not as a polished product. Do not feel you need it.
 
 ## What this is
 
@@ -56,7 +70,55 @@ one 16 GB M3 MacBook Air. "Runs on the CPU" does **not** mean it runs on any
 16 GB laptop. The installer refuses other systems. Linux and Windows are not
 supported.
 
-## The browser app
+## Chat in your terminal
+
+This is the main way to use Samosa. Ask a question, get an answer:
+
+```sh
+samosa "explain how a hash table handles collisions"
+```
+
+Keep the conversation going with `--continue`. Your chat resumes from a saved
+snapshot, so a follow-up does not re-read the whole history:
+
+```sh
+samosa "explain how a hash table handles collisions"
+samosa --continue "and which strategy does Python use?"
+samosa --continue "show me the CPython source for that"
+```
+
+The rest of the options:
+
+```sh
+samosa --think "solve this logic puzzle"                # general reasoning
+samosa --think-code "build a responsive settings page"  # precise coding profile
+samosa --fast "summarize this design"                   # all cores, runs warmer
+samosa --seed 11 "give me a deterministic sample"       # reproducible sampling
+samosa --max-tokens 2048 "write a long explanation"     # change the ceiling
+samosa --thinking-budget 512 "..."                      # cap internal reasoning
+samosa doctor                                           # check the installation
+```
+
+An answer can run up to 8,192 new tokens. That is an outer ceiling, not a target
+— the model usually stops earlier on its own when it emits its end-of-turn
+token. Two threads is the default so the Mac stays cool; `--fast` uses all
+performance cores and runs warmer.
+
+By default the model answers directly. `--think` and `--think-code` turn on
+reasoning, which is slower and reads a lot more from your SSD — see
+[SSD wear](#ssd-wear-the-one-thing-to-be-deliberate-about) before using them
+heavily.
+
+A conversation is capped at 24,576 tokens total (saved history + your new
+message + the answer ceiling). Samosa checks this before it runs and stops
+rather than growing memory without limit.
+
+## The web app (a demo)
+
+**This is a demo.** It works and everything below is real, but it exists to show
+the engine off — streaming, the model's thinking, live speed and memory — not as
+a polished daily interface. For everyday chatting, use
+[the terminal](#chat-in-your-terminal).
 
 `samosa app` starts a local server and opens a chat page in your browser.
 Everything runs on your machine. The page makes no outside requests.
@@ -93,33 +155,10 @@ answer in that chat would copy the cut-off style and reply with only a word or
 two before stopping. That is now fixed. If a stopped answer has no complete
 sentence yet, Samosa keeps the previous saved state instead of overwriting it.
 
-**Context limit.** Before a turn runs, Samosa checks it against a 24,576-token
-limit. That limit covers the saved history, your new message, and the maximum
-answer length, all added together. If a turn would go over, the server rejects
-it before using any memory. Only the conversation you are using is loaded into
-RAM. Opening other saved chats does not add to memory.
-
-## Command-line use
-
-The same install also gives you a command-line tool, if you prefer it to the
-browser app:
-
-```sh
-samosa "explain how a hash table handles collisions"
-samosa --continue "and which strategy does Python use?"
-samosa --think "solve this logic puzzle"
-samosa --think-code "build a responsive settings page"
-samosa --fast "summarize this design"
-samosa --seed 11 "give me a deterministic sample"
-samosa --max-tokens 2048 "write a detailed explanation"
-samosa doctor
-```
-
-An answer can run up to 8,192 new tokens. That is an outer ceiling, not a target
-— the model usually stops earlier on its own when it emits its end-of-turn
-token. `--max-tokens N` changes the ceiling and `--thinking-budget N` caps the
-internal reasoning. `--fast` uses all performance cores and runs warmer; two
-threads is the default.
+**Context limit.** The same 24,576-token cap applies here. The server checks a
+turn before queueing it and rejects an oversized one before allocating any
+memory. Only the conversation you are using is loaded into RAM; opening other
+saved chats does not add to memory.
 
 ## Build from source
 
