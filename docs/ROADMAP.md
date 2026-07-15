@@ -22,7 +22,7 @@ Zenbook above has AVX2 and gets none of it: **1.26 tok/s against 5–7 on the M3
 
 The fix is runtime CPU dispatch (`cpuid` at startup, not a compiler flag —
 one Docker image has to run on many CPUs). Tracked as **G10 / H2** in
-[docs/TASKS_HARDWARE.md](docs/TASKS_HARDWARE.md). Measured on the M3, decode is
+[docs/TASKS_HARDWARE.md](TASKS_HARDWARE.md). Measured on the M3, decode is
 70% SSD wait and 30% matmul; on x86 the scalar path inverts that to ~77%
 compute, so removing it should take x86 from compute-bound back to
 storage-bound — the same regime as the Mac.

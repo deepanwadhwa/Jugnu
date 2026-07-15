@@ -22,7 +22,7 @@ The engine's vectorised kernels are selected at compile time, and the build does
 not pass `-march`, so on x86 the AVX2 kernels are never compiled in and the
 engine falls back to a scalar loop — measured **7.6x slower** than the vectorised
 path on identical hardware. The Zenbook above *has* AVX2; the build throws it
-away. That is tracked as **G10 / H2** ([docs/TASKS_HARDWARE.md](docs/TASKS_HARDWARE.md)),
+away. That is tracked as **G10 / H2** ([docs/TASKS_HARDWARE.md](TASKS_HARDWARE.md)),
 and the fix is runtime CPU dispatch rather than a compiler flag, because one
 Docker image has to run on many different CPUs.
 

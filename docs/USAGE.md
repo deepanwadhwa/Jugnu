@@ -112,5 +112,5 @@ arithmetic problems. The reference used 353–616 thinking tokens. A matching
 local group-32 run answered correctly and stopped on its own after 933 tokens
 with a 1,024-token thinking budget. This confirms the path works for that one
 kind of problem. It is not proof of broad benchmark quality. See the
-[upstream-control report](docs/UPSTREAM_CONTROL_2026-07-14.md) and the
-[regression ledger](docs/REGRESSION_LEDGER.md).
+[upstream-control report](UPSTREAM_CONTROL_2026-07-14.md) and the
+[regression ledger](REGRESSION_LEDGER.md).
