@@ -44,9 +44,30 @@ already violated once: on 2026-07-15 an agent reported "Samosa is now optimized
 for Linux" when `make test` did not build on Linux and the installer could not
 install on Debian. See [TASKS_LINUX.md](TASKS_LINUX.md) G8 for both defects.
 
-### 1. One branch per issue
+### 1. One branch per issue — but the plan lives on `main`
 
-Work for an issue lives on its own branch, cut from `main`:
+**The task program is shared documentation and belongs on `main`:** `CLAUDE.md`,
+`docs/ISSUE_TASKS.md`, and **all five `docs/TASKS_*.md` cards**. Every branch
+references them and they cross-link to each other, so scattering them across
+branches breaks the program.
+
+This was got wrong once, on 2026-07-15. The cards were split onto issue branches,
+which left `main` with **no task program at all**, `CLAUDE.md` on only
+`issue-1-linux` (so agents on any other branch got no auto-loaded guide, no index
+and no working agreement), and **every cross-link broken on every branch** —
+`ISSUE_TASKS.md` pointing at `TASKS_VISION.md` that was not on its branch, and
+vice versa.
+
+| Goes on `main` | Goes on the issue branch |
+|---|---|
+| `CLAUDE.md` | implementation (`src/`, `dist/`, `Makefile`, `ci.yml`) |
+| `docs/ISSUE_TASKS.md` | issue-specific tooling (`tools/run_e_v1.py`) |
+| `docs/TASKS_*.md` (all five) | that issue's evidence (`docs/regressions/<slug>/`) |
+
+Update a card as you learn — but land card changes on `main`, not buried in a
+feature branch where the other four issues cannot see them.
+
+**Implementation** for an issue lives on its own branch, cut from `main`:
 
 | Issue | Branch |
 |---|---|

@@ -20,7 +20,19 @@ themselves are one-line titles; the specs are where the work is defined.
 App-level plan: [docs/APP_TASKS.md](docs/APP_TASKS.md) (phases A2/A3 are
 superseded in part — see ISSUE_TASKS.md). Serve API: [docs/SERVE_API.md](docs/SERVE_API.md).
 
-## Open defects — resolved 2026-07-15
+## Open defects
+
+**G9 (OPEN, #1)** — the cgroup pressure signal counts page cache and
+over-triggers. `linux_memory_pressure_level()` uses `memory.current/memory.max`,
+but cgroup v2's `memory.current` includes the page cache the engine fills by
+streaming `experts.bin`. Measured on a **2-token** run: ratio 0.85 fired WARN
+while real usage (`anon`) was 0.56 — the engine dumped 323 MB of its own expert
+cache to relieve pressure that did not exist (2% hit rate, 1803 evictions). Lives
+inside G2, the port's highest-risk change. Evidence:
+[docs/regressions/linux/real-model-run.md](docs/regressions/linux/real-model-run.md);
+spec: [docs/TASKS_LINUX.md](docs/TASKS_LINUX.md) **G9**.
+
+**Resolved 2026-07-15:**
 
 - **G8.1** (Fixed) — Linked `test_kv_cache` in the `Makefile` with `-lm` to avoid undefined references on Linux/glibc.
 - **G8.2** (Fixed) — Removed the awk interval expression `/^[0-9a-f]{64}$/` from `dist/install.sh` for compatibility with older Debian bookworm mawk versions.

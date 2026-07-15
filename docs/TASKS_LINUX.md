@@ -208,6 +208,41 @@ which "does it compile on Ubuntu" will find:
   differ under busybox.
 - **libc** — glibc vs musl (G3, E-L5).
 
+### G9 — cgroup pressure signal counts page cache and over-triggers  **VERIFIED DEFECT, open**
+
+**Full evidence: [../regressions/linux/real-model-run.md](regressions/linux/real-model-run.md).**
+Found on the first real-model run on Linux (2026-07-15). Lives inside G2 — the
+highest-risk change in the port.
+
+`linux_memory_pressure_level()` ([qwen36b.c:1944-1948](../src/qwen36b.c#L1944-L1948))
+uses `ratio = memory.current / memory.max` (CRITICAL >0.90, WARN >0.80). **cgroup
+v2's `memory.current` includes the page cache**, which the engine fills by
+streaming `experts.bin`. Measured at peak during a **2-token** generation:
+
+```
+cur=6.40 GB   anon=4.19 GB   file=2.11 GB (page cache)   limit=7.52 GB
+ratio = 6.40/7.52 = 0.85  -> WARN fires
+anon  = 4.19/7.52 = 0.56  -> no pressure actually exists
+```
+
+The engine evicted 323 MB of its own expert cache to relieve pressure caused by
+the kernel's own reclaimable file cache. Result: `evictions=1803`,
+`expert_hit=50/2509` (**2%**). The kernel reclaims page cache long before it
+OOM-kills; 0.85-with-2.11 GB-of-file-cache is entirely safe.
+
+macOS is unaffected: `kern.memorystatus_vm_pressure_level` is a kernel-computed
+signal that already discounts reclaimable memory. The port replaced it with a
+naive ratio, and that is where the semantics diverged.
+
+Two tokens already tripped `pressure_critical=1`. A real conversation would fire
+it on its 10 s cooldown indefinitely and continuously dump the expert cache.
+
+**Fix — E-L3 decides:** either discount reclaimable cache (`anon` from
+`memory.stat`, or `(current - file)/limit`), or **use PSI**
+(`/sys/fs/cgroup/memory.pressure`), which measures real stall time rather than a
+ratio and is closest in spirit to the macOS signal. PSI is already E-L3's leading
+candidate. **G9 must be fixed before E-L2's plateau result means anything.**
+
 ### G7 — CI is macOS-only
 
 [.github/workflows/ci.yml](../.github/workflows/ci.yml) is `runs-on:
@@ -249,8 +284,50 @@ Debian installer. Minimum matrix:
    real `install.sh` against a synthetic release and is the only thing that
    catches installer-level userland variance.
 
-Then a real-model run if a 32 GB+ Linux box with 24 GB free exists. If none
-does, say so — do not imply one ran.
+### The real model runs on Linux **today**, in Docker — no extra hardware
+
+An earlier version of this card said "a real-model run **if a 32 GB+ Linux box
+with 24 GB free exists**". That was wrong, and it is why no model ran on Linux
+while the port was being written. **Docker on the existing Mac is an arm64 Linux
+box**, and the model bind-mounts read-only — no copy, no hard-link, no second
+machine. Verified 2026-07-15: it loads, generates correct tokens, and reports
+`peak_rss=3.90 GB`, inside the macOS plateau band. It also **found G9**, which no
+amount of `make test` would have.
+
+```sh
+docker run --rm --platform linux/arm64 --memory=7g \
+  -v "$PWD":/src:ro \
+  -v "$HOME/Documents/samosa-models/qwen36_group32_i8":/model:ro \
+  -v "$HOME/.samosa/current":/tok:ro \
+  debian:bookworm-slim bash -c '
+    apt-get update -qq && apt-get install -y -qq gcc libgomp1
+    cp -r /src /work && cd /work
+    gcc -O3 -Wno-unused-function -pthread -fopenmp src/qwen36b.c src/expert_cache.c -o /tmp/q -lm
+    OMP_NUM_THREADS=2 SNAP=/model /tmp/q --chat "Reply with exactly: hello" \
+      --no-thinking --tokens 16 --seed 11 --tokenizer /tok/tokenizer_qwen36.json'
+```
+
+Requires Docker Desktop's VM at **≥ 6 GB** — it defaults to ~2 GB, which cannot
+even load the model. That settings toggle was the entire blocker.
+
+**For G2/G4, Docker is not a workaround — it is the only option.** cgroup
+pressure and `cpu.max` handling cannot be exercised on bare macOS at all, because
+macOS has no cgroups. `--memory=6g` is how you test them, and it is how G9 was
+found.
+
+**What Docker-on-Apple-Silicon still cannot do — do not imply otherwise:**
+
+- **E-L1 x86 parity.** The container is aarch64, running the **same NEON kernels
+  as macOS**. AVX2/AVX512-VNNI still never execute. QEMU amd64 can run them
+  ~10–50× slower: enough for a bounded greedy parity check, useless for
+  throughput.
+- **Any throughput number.** The bind mount is virtiofs: measured **0.55–0.64
+  GB/s** expert reads against the 2.3+ GB/s [st.h:94](../src/st.h#L94) recorded
+  for O_DIRECT on ext4; decode fell to 0.44–0.76 tok/s. **That measures virtiofs,
+  not the engine.** For real numbers, put the model in a Docker volume or use
+  native Linux (E-L4).
+
+If you skip the real-model run, say so — do not imply one ran.
 
 **Deliverable:** a per-distro × per-arch table of build / `make test` /
 `test_atomic_install.sh` results, with the actual output committed under
