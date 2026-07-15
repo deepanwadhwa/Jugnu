@@ -12,6 +12,29 @@
 > released by the Qwen team. Samosa Chat is an independent, unofficial,
 > Apache-2.0 project. It is not affiliated with or endorsed by either team.
 
+## Install
+
+One command gets you the whole product: the group-32 model and the browser chat
+app.
+
+```sh
+curl -fsSL https://huggingface.co/deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-group32/resolve/main/install.sh | sh
+samosa app
+```
+
+`samosa app` starts the local server and opens the chat page in your browser.
+
+You need an Apple Silicon Mac, 16 GB of RAM, Apple's Command Line Tools (for the
+C compiler), and about 30 GB of free disk. The download is about 24 GB. The
+installer resumes interrupted downloads, checks the SHA-256 of every file,
+compiles the C engine on your machine, and smoke-tests it before switching the
+new release live. A corrupt or interrupted upgrade leaves your existing install
+untouched. It does not need administrator rights.
+
+Everything below describes this release: the browser app running the group-32
+model. The model itself lives at
+[deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-group32](https://huggingface.co/deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-group32).
+
 ## What this is
 
 Samosa Chat runs Qwen's 35-billion-parameter model on a Mac that has only 16 GB
@@ -32,43 +55,6 @@ model leaves the image part out.
 one 16 GB M3 MacBook Air. "Runs on the CPU" does **not** mean it runs on any
 16 GB laptop. The installer refuses other systems. Linux and Windows are not
 supported.
-
-## The product: Samosa Chat on the group-32 model
-
-The product is **the browser chat app running the group-32 model**. That is what
-this repository builds, what the app uses, and what every number and example
-below refers to unless it says otherwise. The group-32 model is explained in
-[What group-32 is](#what-group-32-is).
-
-There is also an older, separate thing: a published one-command download on
-Hugging Face. It is easy to install, but it is **behind the product** in two
-ways — it has no browser app, and it still carries the first, lower-quality
-model format (see [What we tried that did not work](#what-we-tried-that-did-not-work)).
-The group-32 product is not packaged into that download yet.
-
-So today:
-
-- **The product (group-32 model + browser app)** runs by building from this
-  repository. It is finished and working — it is what the maintainer uses every
-  day.
-- **The published download** is the quickest way to try Samosa, but it gives you
-  the older command-line tool and the older model.
-
-## The three principles
-
-Every decision follows these three goals, in this order:
-
-1. **It must be stable on a machine like this one** — a 16 GB Apple Silicon Mac.
-   Memory stays bounded. It does not grow without limit. It stops at clear
-   limits instead of crashing.
-2. **It must be actually useful.** Real answers, real code, real multi-turn
-   conversations. Not a demo that only loads.
-3. **It must not wear out the machine.** Keep memory bounded so the system does
-   not swap heavily. Use two threads by default so the Mac stays cool. Be
-   careful with the SSD reads that cause the real wear (explained below).
-
-A feature is only called "released" once it meets all three. Until then it
-stays in this repository as source.
 
 ## The browser app
 
@@ -113,39 +99,32 @@ answer length, all added together. If a turn would go over, the server rejects
 it before using any memory. Only the conversation you are using is loaded into
 RAM. Opening other saved chats does not add to memory.
 
-## Install the published command-line tool
+## Command-line use
 
-This is the quick way to try Samosa, but note what it gives you: the older
-command-line tool and the older whole-row model, **not** the group-32 product or
-the browser app. To run the product, build from source (next section).
-
-```sh
-curl -fsSL https://huggingface.co/deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-int4/resolve/main/install.sh | sh
-```
-
-You need an Apple Silicon Mac, 16 GB of RAM, Apple's Command Line Tools (for the
-C compiler), and about 25 GB of free disk. The download is about 18 GB. The
-installer resumes interrupted downloads, checks SHA-256 checksums, compiles the
-engine on your machine, and runs a quick test. It does not need administrator
-rights.
+The same install also gives you a command-line tool, if you prefer it to the
+browser app:
 
 ```sh
 samosa "explain how a hash table handles collisions"
 samosa --continue "and which strategy does Python use?"
 samosa --think "solve this logic puzzle"
-samosa --long "write a detailed explanation"
+samosa --think-code "build a responsive settings page"
 samosa --fast "summarize this design"
 samosa --seed 11 "give me a deterministic sample"
+samosa --max-tokens 2048 "write a detailed explanation"
 samosa doctor
 ```
 
-By default an answer stops at 512 new tokens. `--long` raises that to 2,048. The
-model often stops earlier on its own.
+An answer can run up to 8,192 new tokens. That is an outer ceiling, not a target
+— the model usually stops earlier on its own when it emits its end-of-turn
+token. `--max-tokens N` changes the ceiling and `--thinking-budget N` caps the
+internal reasoning. `--fast` uses all performance cores and runs warmer; two
+threads is the default.
 
-## Build and run from source
+## Build from source
 
-The browser app lives in this repository. To run it you need three things: the
-compiled engine, the model files, and the tokenizer.
+You do not need this to use Samosa — the installer above compiles the engine for
+you. This is for working on it.
 
 ```sh
 make            # portable CPU build
@@ -153,14 +132,31 @@ make omp        # multithreaded build (needs libomp on macOS)
 make test       # run the bounded tests
 ```
 
-`make` builds the engine only. It has no Python dependency. The model files come
-from either the Hugging Face download (older model) or your own conversion with
-`tools/convert_qwen36.py`. Once the engine and model are in place, `samosa serve`
+`make` builds the engine only, and has no Python dependency. To run it you also
+need the model files and tokenizer: either the published group-32 download
+above, or your own conversion from the original Qwen checkpoint with
+`tools/convert_qwen36.py`. With the engine and model in place, `samosa serve`
 and `samosa app` start the server. Full server details and the exact request
 format are in [docs/SERVE_API.md](docs/SERVE_API.md).
 
 Python is only used for conversion, analysis, and testing. It is not needed to
 run the model.
+
+## The three principles
+
+Every decision follows these three goals, in this order:
+
+1. **It must be stable on a machine like this one** — a 16 GB Apple Silicon Mac.
+   Memory stays bounded. It does not grow without limit. It stops at clear
+   limits instead of crashing.
+2. **It must be actually useful.** Real answers, real code, real multi-turn
+   conversations. Not a demo that only loads.
+3. **It must not wear out the machine.** Keep memory bounded so the system does
+   not swap heavily. Use two threads by default so the Mac stays cool. Be
+   careful with the SSD reads that cause the real wear (explained below).
+
+A feature is only called "released" once it meets all three. Until then it
+stays in this repository as source.
 
 ## What Samosa adds on top of Qwen and colibrì
 
@@ -255,20 +251,22 @@ Finer scales cost more storage, which is why group-32 is larger on disk:
 Group-32 also keeps the down-projection weights at int8 (8 bits) rather than
 int4, which is the main reason its shared weights are larger. The result is a
 model that reconstructs the original Qwen weights with measurably less error
-than the older format. It is tested locally and is what the app runs. It is not
-published on Hugging Face yet, because one good reasoning run is not enough
-evidence to call it fully proven.
+than the older format. It is what the app runs, and it is the published release:
+[deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-group32](https://huggingface.co/deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-group32).
+Its quality is measured on one reference machine and one reasoning control, not
+across a broad benchmark suite — see [What is not done yet](#what-is-not-done-yet).
 
 ## What we tried that did not work
 
-**Whole-row int4 (the older format, still the published one).** This was the
-first quantization attempt: one int4 scale for an entire weight row. It is too
-coarse. A single scale has to cover a whole row of weights with very different
-sizes, so many weights are reconstructed inaccurately. In use this shows up as
-word-level defects such as `of ofof`. Re-asking or changing the seed can avoid a
-given case but does not fix the cause. This is exactly why group-32 was built.
-It is still the model in the Hugging Face download only because the group-32
-release has not shipped yet.
+**Whole-row int4 (the first format).** This was the first quantization attempt:
+one int4 scale for an entire weight row. It is too coarse. A single scale has to
+cover a whole row of weights with very different sizes, so many weights are
+reconstructed inaccurately. In use this shows up as word-level defects such as
+`of ofof`. Re-asking or changing the seed can avoid a given case but does not fix
+the cause. This is exactly why group-32 was built, and group-32 replaced it as
+the product. The old format still exists in an
+[earlier Hugging Face repo](https://huggingface.co/deepanwa/Samosa-Chat-Qwen3.6-35B-A3B-int4),
+kept only so existing installs keep working. Do not start there.
 
 **Mixed int4/int8 format.** An attempt to use int4 for the gate and up
 projections and int8 for the down projection across the whole model. The code
@@ -452,11 +450,9 @@ steps are in [docs/BENCHMARK_PLAN.md](docs/BENCHMARK_PLAN.md).
 
 ## What is not done yet
 
-- The group-32 model (the product) is tested locally but not yet broadly proven
-  or published to Hugging Face. Publishing it is the next release step.
-- The published Hugging Face download still ships the older whole-row model, with
-  its word-level defects, until the group-32 release goes out. See
-  [What we tried that did not work](#what-we-tried-that-did-not-work).
+- Group-32 is published and is what the app runs, but its quality evidence is
+  still thin: one reference machine, one reasoning control, and no broad
+  benchmark suite. It is not proven across many machines or task types.
 - Some app features are still planned: keeping recent conversations in RAM
   instead of reading them from disk each turn, managing transcripts on the
   server, chatting over a document, and web access. Deleting a chat in the app
