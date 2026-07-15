@@ -21,10 +21,14 @@
 #include "tok.h"
 #include "json.h"
 #include "compat.h"
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <malloc/malloc.h>
 #include <sys/sysctl.h>
+#include <notify.h>
 #endif
 #ifdef _OPENMP
 #include <omp.h>
@@ -64,6 +68,16 @@ static double rss_gb(void) {
     task_vm_info_data_t info; mach_msg_type_number_t count=TASK_VM_INFO_COUNT;
     if(task_info(mach_task_self(),TASK_VM_INFO,(task_info_t)&info,&count)==KERN_SUCCESS)
         return info.phys_footprint/(1024.0*1024.0*1024.0);
+#else
+    FILE *f = fopen("/proc/self/statm", "r");
+    if (f) {
+        long long pages = 0;
+        if (fscanf(f, "%*s %lld", &pages) == 1) {
+            fclose(f);
+            return (double)pages * sysconf(_SC_PAGESIZE) / (1024.0 * 1024.0 * 1024.0);
+        }
+        fclose(f);
+    }
 #endif
     return peak_rss_gb();
 }
@@ -1865,6 +1879,129 @@ static void expert_prefetch(Model *m, int layer, int eid, uint8_t refine_mask) {
 /* RAM disponibile ADESSO (GB), stessa semantica di glm.c: pagine recuperabili
  * senza swap.  Misurata DOPO il caricamento dei tensori residenti, quindi il
  * residente e' gia' escluso dal disponibile. */
+#ifndef __APPLE__
+static long long read_cgroup_stat(const char *key) {
+    FILE *f = fopen("/sys/fs/cgroup/memory.stat", "r");
+    if (!f) return -1;
+    char line[256];
+    long long val = -1;
+    while (fgets(line, sizeof(line), f)) {
+        char k[64];
+        long long v;
+        if (sscanf(line, "%63s %lld", k, &v) == 2) {
+            if (strcmp(k, key) == 0) {
+                val = v;
+                break;
+            }
+        }
+    }
+    fclose(f);
+    return val;
+}
+
+static double cgroup_mem_available_gb(void) {
+    long long limit = -1;
+    long long current = -1;
+    FILE *f_curr = fopen("/sys/fs/cgroup/memory.current", "r");
+    if (f_curr) {
+        if (fscanf(f_curr, "%lld", &current) != 1) current = -1;
+        fclose(f_curr);
+    }
+    if (current < 0) return -1.0;
+    
+    // Subtract page cache (file) as it is reclaimable
+    long long file_size = read_cgroup_stat("file");
+    if (file_size > 0 && current > file_size) {
+        current -= file_size;
+    }
+    
+    FILE *f_max = fopen("/sys/fs/cgroup/memory.max", "r");
+    if (f_max) {
+        char buf[64];
+        if (fgets(buf, sizeof(buf), f_max)) {
+            if (strncmp(buf, "max", 3) != 0) limit = atoll(buf);
+        }
+        fclose(f_max);
+    }
+    FILE *f_high = fopen("/sys/fs/cgroup/memory.high", "r");
+    if (f_high) {
+        char buf[64];
+        if (fgets(buf, sizeof(buf), f_high)) {
+            if (strncmp(buf, "max", 3) != 0) {
+                long long high = atoll(buf);
+                if (limit < 0 || high < limit) limit = high;
+            }
+        }
+        fclose(f_high);
+    }
+    if (limit > 0 && limit > current) {
+        return (double)(limit - current) / (1024.0 * 1024.0 * 1024.0);
+    }
+    return -1.0;
+}
+
+static int linux_memory_pressure_level(void) {
+    long long limit = -1;
+    long long current = -1;
+    FILE *f_curr = fopen("/sys/fs/cgroup/memory.current", "r");
+    if (f_curr) {
+        if (fscanf(f_curr, "%lld", &current) != 1) current = -1;
+        fclose(f_curr);
+    }
+    if (current > 0) {
+        // Subtract page cache (file) as it is reclaimable
+        long long file_size = read_cgroup_stat("file");
+        if (file_size > 0 && current > file_size) {
+            current -= file_size;
+        }
+        
+        FILE *f_max = fopen("/sys/fs/cgroup/memory.max", "r");
+        if (f_max) {
+            char buf[64];
+            if (fgets(buf, sizeof(buf), f_max)) {
+                if (strncmp(buf, "max", 3) != 0) limit = atoll(buf);
+            }
+            fclose(f_max);
+        }
+        FILE *f_high = fopen("/sys/fs/cgroup/memory.high", "r");
+        if (f_high) {
+            char buf[64];
+            if (fgets(buf, sizeof(buf), f_high)) {
+                if (strncmp(buf, "max", 3) != 0) {
+                    long long high = atoll(buf);
+                    if (limit < 0 || high < limit) limit = high;
+                }
+            }
+            fclose(f_high);
+        }
+        if (limit > 0) {
+            double ratio = (double)current / (double)limit;
+            if (ratio > 0.90) return 4;
+            if (ratio > 0.80) return 2;
+            return 1;
+        }
+    }
+    FILE *f_mem = fopen("/proc/meminfo", "r");
+    if (f_mem) {
+        char ln[256];
+        double total = 0, avail = 0;
+        int found = 0;
+        while (fgets(ln, sizeof(ln), f_mem)) {
+            if (sscanf(ln, "MemTotal: %lf", &total) == 1) found++;
+            if (sscanf(ln, "MemAvailable: %lf", &avail) == 1) found++;
+            if (found == 2) break;
+        }
+        fclose(f_mem);
+        if (total > 0 && avail > 0) {
+            double ratio = avail / total;
+            if (ratio < 0.08 || avail < 1048576.0) return 4;
+            if (ratio < 0.15 || avail < 2097152.0) return 2;
+        }
+    }
+    return 1;
+}
+#endif
+
 static double mem_available_gb(void) {
 #ifdef __APPLE__
     mach_msg_type_number_t cnt = HOST_VM_INFO64_COUNT;
@@ -1874,12 +2011,17 @@ static double mem_available_gb(void) {
     return ((double)vm.free_count + (double)vm.inactive_count +
             (double)vm.purgeable_count) * (double)sysconf(_SC_PAGESIZE) / 1e9;
 #else
+    double cg_avail = cgroup_mem_available_gb();
     FILE *f = fopen("/proc/meminfo", "r");
-    if (!f) return 0;
+    if (!f) return cg_avail > 0 ? cg_avail : 0;
     char ln[256]; double kb = 0;
     while (fgets(ln, sizeof(ln), f)) if (sscanf(ln, "MemAvailable: %lf", &kb) == 1) break;
     fclose(f);
-    return kb / 1e6;
+    double host_avail = kb / 1e6;
+    if (cg_avail > 0 && cg_avail < host_avail) {
+        return cg_avail;
+    }
+    return host_avail;
 #endif
 }
 
@@ -1925,14 +2067,19 @@ static ecache_key eslot_key(int layer, int eid, uint8_t refine_mask) {
  * 2=warn, 4=critical — lettura non privilegiata, ~1 us) con un contatore di
  * decimazione e un cooldown anti-thrashing tra un reclaim e l'altro. */
 static void ecache_service_pressure(Model *m) {
-#ifdef __APPLE__
     static int poll_decimator = 0;
     static double last_reclaim_ts = 0;
     if (++poll_decimator < 16) return;
     poll_decimator = 0;
-    int level = 0; size_t len = sizeof(level);
-    if (sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &len, NULL, 0) != 0)
-        return;
+    int level = 0;
+#ifdef __APPLE__
+    int apple_level = 0; size_t len = sizeof(apple_level);
+    if (sysctlbyname("kern.memorystatus_vm_pressure_level", &apple_level, &len, NULL, 0) == 0) {
+        level = apple_level;
+    }
+#else
+    level = linux_memory_pressure_level();
+#endif
     if (level < 2) return;
     double now = now_s();
     if (now - last_reclaim_ts < 10.0) return;
@@ -1942,19 +2089,10 @@ static void ecache_service_pressure(Model *m) {
     int critical = level >= 4;
     uint64_t target = critical ? 0 : (stats.payload_bytes / 4) * 3;
     uint64_t reclaimed = 0;
-    /* Le nostre entry sono solo-base (nessun piano residuo), quindi il WARN
-     * del core — che per contratto rilascia solo residui — non libererebbe
-     * nulla: entrambi i livelli kernel usano il reclaim CRITICAL del core
-     * (sfratta le basi rispettando i floor per layer); cambia solo il target. */
     ecache_apply_pressure(m->ec, ECACHE_PRESSURE_CRITICAL, target, &reclaimed);
-    /* Gli slab tornati nel pool dal reclaim vanno liberati davvero, o la
-     * pressione non restituisce pagine al sistema. */
     eslot_pool_trim(m,0);
     fprintf(stderr, "[ecache] memory pressure %s: released %.1f MB\n",
             critical ? "CRITICAL" : "WARN", (double)reclaimed / 1e6);
-#else
-    (void)m;
-#endif
 }
 
 static void model_init(Model *m, const char *snap, const char *refine_dir,
@@ -2995,6 +3133,220 @@ static int choose_controlled_token(const float *logit, int vocab, GenOptions *o,
     return token;
 }
 
+static void adjust_threads(Model *m, int step_index) {
+#if defined(_OPENMP)
+    // 1. If OMP_NUM_THREADS is explicitly set, never override it.
+    if (getenv("OMP_NUM_THREADS")) {
+        return;
+    }
+    // 2. Only adapt if SAMOSA_FAST=1 is explicitly requested.
+    const char *fast_env = getenv("SAMOSA_FAST");
+    if (!fast_env || strcmp(fast_env, "1") != 0) {
+        return;
+    }
+
+    // Static variables to track the dynamic state
+    static int initialized = 0;
+    static int current_threads = 0;
+    static int cool_default = 0;
+    static int max_threads = 0;
+    static int consecutive_green = 0;
+    static int consecutive_critical = 0;
+    static int in_container = -1;
+
+    if (!initialized) {
+        // Detect container status
+        in_container = 0;
+        if (access("/.dockerenv", F_OK) == 0) {
+            in_container = 1;
+        } else {
+            FILE *f_cg = fopen("/proc/self/cgroup", "r");
+            if (f_cg) {
+                char line[256];
+                while (fgets(line, sizeof(line), f_cg)) {
+                    if (strstr(line, "docker") || strstr(line, "containerd")) {
+                        in_container = 1;
+                        break;
+                    }
+                }
+                fclose(f_cg);
+            }
+        }
+
+        // Determine thread boundaries
+        int physical_cores = 1;
+#ifdef __APPLE__
+        int pcores = 0; size_t pl = sizeof(pcores);
+        if (!sysctlbyname("hw.perflevel0.physicalcpu", &pcores, &pl, NULL, 0) && pcores > 0) {
+            physical_cores = pcores;
+        } else {
+            physical_cores = 4; // conservative default P-cores for Apple Silicon
+        }
+#else
+        int logical = (int)sysconf(_SC_NPROCESSORS_ONLN);
+        int smt = 0;
+        FILE *f_smt = fopen("/sys/devices/system/cpu/smt/active", "r");
+        if (f_smt) {
+            char status[16] = {0};
+            if (fscanf(f_smt, "%15s", status) == 1) {
+                if (strcmp(status, "1") == 0 || strcmp(status, "active") == 0) {
+                    smt = 1;
+                }
+            }
+            fclose(f_smt);
+        } else {
+            FILE *f_sib = fopen("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list", "r");
+            if (f_sib) {
+                char sib[64] = {0};
+                if (fgets(sib, sizeof(sib), f_sib)) {
+                    if (strchr(sib, ',') || strchr(sib, '-')) smt = 1;
+                }
+                fclose(f_sib);
+            } else {
+#if defined(__x86_64__)
+                smt = 1;
+#else
+                smt = 0;
+#endif
+            }
+        }
+        physical_cores = smt ? (logical / 2) : logical;
+#endif
+        if (physical_cores < 1) physical_cores = 1;
+
+        // Check cgroup cpu limit to avoid exceeding quota
+        int cgroup_threads = 0;
+        FILE *f_cpu = fopen("/sys/fs/cgroup/cpu.max", "r");
+        if (f_cpu) {
+            char quota_str[64];
+            long long quota = -1, period = -1;
+            if (fscanf(f_cpu, "%59s %lld", quota_str, &period) == 2) {
+                if (strcmp(quota_str, "max") != 0) {
+                    quota = atoll(quota_str);
+                    if (quota > 0 && period > 0) {
+                        cgroup_threads = (int)((quota + period - 1) / period);
+                    }
+                }
+            }
+            fclose(f_cpu);
+        }
+
+        cool_default = physical_cores / 2;
+        if (cool_default < 1) cool_default = 1;
+        max_threads = physical_cores;
+        if (cgroup_threads > 0 && cgroup_threads < max_threads) {
+            max_threads = cgroup_threads;
+            if (cool_default > max_threads) cool_default = max_threads;
+        }
+
+        if (in_container) {
+            /* Container: the guest cannot see the host's thermal sensors, so the
+             * adaptive loop has no signal to close on.  Stay at the cool default
+             * rather than pinning every core: Windows/Linux delivery is Docker
+             * (see docs/TASKS_WINDOWS.md), so this path routinely runs on thin
+             * laptops where "all cores, no feedback" is exactly the case --fast
+             * is supposed to protect against.  OMP_NUM_THREADS remains the
+             * explicit override for anyone who wants max on a cooled machine. */
+            current_threads = cool_default;
+            omp_set_num_threads(current_threads);
+            fprintf(stderr, "[threads] --fast: no thermal visibility in a container; "
+                            "holding the cool default (threads=%d, max=%d). "
+                            "Set OMP_NUM_THREADS=%d to override on a well-cooled machine.\n",
+                    current_threads, max_threads, max_threads);
+            fflush(stderr);
+        } else {
+            // Start at the cool default
+            current_threads = cool_default;
+            omp_set_num_threads(current_threads);
+            fprintf(stderr, "[threads] adaptive thermal control initialized: cool=%d max=%d\n", cool_default, max_threads);
+            fflush(stderr);
+        }
+        initialized = 1;
+    }
+
+    // In container, we do not adapt
+    if (in_container) {
+        return;
+    }
+
+    // Only sample/adapt every 4 tokens
+    if (step_index <= 0 || step_index % 4 != 0) {
+        return;
+    }
+
+    // Obtain thermal status
+    // 0 = normal (green), 1 = warning/fair, >= 2 = serious/critical
+    int thermal_level = 0; 
+#ifdef __APPLE__
+    int token;
+    uint64_t notify_state = 0;
+    if (notify_register_check("com.apple.system.thermalpressurelevel", &token) == NOTIFY_STATUS_OK) {
+        notify_get_state(token, &notify_state);
+        thermal_level = (int)notify_state;
+    }
+#else
+    // Linux thermal zone temp in millidegrees C
+    int max_temp = 0;
+    for (int zone = 0; zone < 10; zone++) {
+        char path[128];
+        snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/temp", zone);
+        FILE *f_t = fopen(path, "r");
+        if (f_t) {
+            int temp = 0;
+            if (fscanf(f_t, "%d", &temp) == 1) {
+                if (temp > max_temp) max_temp = temp;
+            }
+            fclose(f_t);
+        }
+    }
+    /* UNVALIDATED THRESHOLDS.  85 C / 75 C and the 4-sample / 16-token cadence
+     * below are reasoned defaults, not measured ones: E-H3 (the threads ->
+     * sustained tok/s -> thermal-pressure curve, docs/TASKS_HARDWARE.md) has not
+     * been run, so nothing here is tuned against real hardware.  They are
+     * deliberately conservative — the controller can only move between
+     * cool_default and max_threads, so a wrong threshold costs throughput, never
+     * safety.  Do not present this loop as tuned until E-H3 exists, and re-run it
+     * after H2 (SIMD dispatch): 7.6x less CPU time per token will move the curve. */
+    if (max_temp > 0) {
+        if (max_temp >= 85000) thermal_level = 2;       /* serious */
+        else if (max_temp >= 75000) thermal_level = 1;  /* fair */
+        else thermal_level = 0;                         /* normal */
+    }
+#endif
+
+    // Adaptation logic
+    if (thermal_level >= 2) {
+        consecutive_green = 0;
+        consecutive_critical++;
+        if (consecutive_critical >= 1) { // Immediate back-off
+            if (current_threads > cool_default) {
+                current_threads--;
+                omp_set_num_threads(current_threads);
+                fprintf(stderr, "[threads] thermal pressure detected (%d); backing off to %d threads\n", thermal_level, current_threads);
+                fflush(stderr);
+            }
+            consecutive_critical = 0;
+        }
+    } else if (thermal_level == 0) {
+        consecutive_critical = 0;
+        consecutive_green++;
+        if (consecutive_green >= 4) { // Requires 16 tokens of normal temperature to scale up
+            if (current_threads < max_threads) {
+                current_threads++;
+                omp_set_num_threads(current_threads);
+                fprintf(stderr, "[threads] thermal normal; ramping up to %d threads\n", current_threads);
+                fflush(stderr);
+            }
+            consecutive_green = 0;
+        }
+    } else {
+        // Warning/fair level: keep current thread count stable
+        consecutive_green = 0;
+        consecutive_critical = 0;
+    }
+#endif
+}
+
 static void generate(Model *m, const int *prompt, int np, int n_new, int *out,
                      TokenSink sink, void *sink_ctx, GenOptions *options,
                      GenStats *stats) {
@@ -3032,6 +3384,7 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out,
     int cancelled=0;
     
     for (int s = 0; s < n_new; s++) {
+        adjust_threads(m, s);
         if (options && options->cancel_flag &&
             atomic_load_explicit(options->cancel_flag, memory_order_relaxed)) {
             cancelled=1;
@@ -3335,6 +3688,7 @@ static void generate_continue(Model *m, int *hist, int hist_len,
     int repetition_stopped = 0;
     int cancelled = 0;
     for (int s = 0; s < n_new; s++) {
+        adjust_threads(m, s);
         if (options && options->cancel_flag &&
             atomic_load_explicit(options->cancel_flag, memory_order_relaxed)) {
             cancelled=1;
@@ -3908,6 +4262,16 @@ static int run_chat(Model *m, const char *tokenizer_path, const char *user,
         fprintf(stderr,"[memory] freed_pool=%.1f MB allocator_relief=%.1f MB\n",
                 (double)pool_released/(1024.0*1024.0),
                 (double)relieved/(1024.0*1024.0));
+#else
+    uint64_t pool_released=eslot_pool_trim(m,0);
+    int relieved = 0;
+#ifdef __GLIBC__
+    relieved = malloc_trim(0);
+#endif
+    if(pool_released>=(1u<<20)||relieved)
+        fprintf(stderr,"[memory] freed_pool=%.1f MB allocator_relief=%s\n",
+                (double)pool_released/(1024.0*1024.0),
+                relieved ? "trimmed" : "no-op");
 #endif
     if(!shared_tokenizer)tok_free(tok);
     refine_report(m);
@@ -4340,19 +4704,103 @@ static int run_samosa_serve(Model *model,const char *snapshot,
 }
 
 int main(int argc, char **argv) {
-#if defined(_OPENMP) && defined(__APPLE__)
-    /* Default: META' dei P-core (2 su questo M3) — scelta esplicita
-     * dell'utente (2026-07-12) per un telaio fanless piu' fresco al tatto:
-     * ~7.3 tok/s invece dei ~9.5 a 4 thread.  La pressione termica OS resta
-     * a zero in entrambi i casi; e' una preferenza di comfort, non un limite
-     * del silicio.  OMP_NUM_THREADS resta l'override esplicito (es. =4 per
-     * la velocita' piena). */
+#if defined(_OPENMP)
     if (!getenv("OMP_NUM_THREADS")) {
+#ifdef __APPLE__
+        /* Default: META' dei P-core (2 su questo M3) — scelta esplicita
+         * dell'utente (2026-07-12) per un telaio fanless piu' fresco al tatto:
+         * ~7.3 tok/s invece dei ~9.5 a 4 thread.  La pressione termica OS resta
+         * a zero in entrambi i casi; e' una preferenza di comfort, non un limite
+         * del silicio.  OMP_NUM_THREADS resta l'override esplicito (es. =4 per
+         * la velocita' piena). */
         int pcores = 0; size_t pl = sizeof(pcores);
         if (!sysctlbyname("hw.perflevel0.physicalcpu", &pcores, &pl, NULL, 0) && pcores > 0) {
             int cool = pcores / 2; if (cool < 1) cool = 1;
             omp_set_num_threads(cool);
         }
+#else
+        int threads = 0;
+        // 1. Check cgroup CPU quota
+        FILE *f_cpu = fopen("/sys/fs/cgroup/cpu.max", "r");
+        if (f_cpu) {
+            char quota_str[64];
+            long long quota = -1, period = -1;
+            if (fscanf(f_cpu, "%59s %lld", quota_str, &period) == 2) {
+                if (strcmp(quota_str, "max") != 0) {
+                    quota = atoll(quota_str);
+                    if (quota > 0 && period > 0) {
+                        threads = (int)((quota + period - 1) / period);
+                    }
+                }
+            }
+            fclose(f_cpu);
+        }
+        
+        if (threads <= 0) {
+            // 2. Check P-cores on Intel hybrid Linux
+            FILE *f_pcore = fopen("/sys/devices/cpu_core/cpus", "r");
+            int pcores = 0;
+            if (f_pcore) {
+                char range[128];
+                if (fgets(range, sizeof(range), f_pcore)) {
+                    int count = 0;
+                    char *range_copy = strdup(range);
+                    if (range_copy) {
+                        char *tok = strtok(range_copy, ",");
+                        while (tok) {
+                            int start, end;
+                            if (sscanf(tok, "%d-%d", &start, &end) == 2) {
+                                count += (end - start + 1);
+                            } else if (sscanf(tok, "%d", &start) == 1) {
+                                count += 1;
+                            }
+                            tok = strtok(NULL, ",");
+                        }
+                        free(range_copy);
+                        if (count > 0) pcores = count / 2;
+                    }
+                }
+                fclose(f_pcore);
+            }
+            
+            if (pcores > 0) {
+                threads = pcores / 2;
+            } else {
+                int logical = (int)sysconf(_SC_NPROCESSORS_ONLN);
+                int smt = 0;
+                FILE *f_smt = fopen("/sys/devices/system/cpu/smt/active", "r");
+                if (f_smt) {
+                    char status[16] = {0};
+                    if (fscanf(f_smt, "%15s", status) == 1) {
+                        if (strcmp(status, "1") == 0 || strcmp(status, "active") == 0) {
+                            smt = 1;
+                        }
+                    }
+                    fclose(f_smt);
+                } else {
+                    FILE *f_sib = fopen("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list", "r");
+                    if (f_sib) {
+                        char sib[64] = {0};
+                        if (fgets(sib, sizeof(sib), f_sib)) {
+                            if (strchr(sib, ',') || strchr(sib, '-')) smt = 1;
+                        }
+                        fclose(f_sib);
+                    } else {
+#if defined(__x86_64__)
+                        smt = 1;
+#else
+                        smt = 0;
+#endif
+                    }
+                }
+                int physical = smt ? (logical / 2) : logical;
+                if (physical < 1) physical = 1;
+                threads = physical / 2;
+            }
+        }
+        if (threads < 1) threads = 1;
+        omp_set_num_threads(threads);
+#endif
     }
 #endif
     const char *snap = getenv("SNAP");
