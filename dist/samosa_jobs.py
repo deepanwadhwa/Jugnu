@@ -49,6 +49,7 @@ from pathlib import Path
 IMAGE_TOKENS = 576          # max vision tokens per rendered page
 MAX_CONTEXT = 24576         # SAMOSA_MAX_CONTEXT_TOKENS (qwen36b.c:3564)
 SYSTEM_RESERVE = 1024       # conservative reserve for system prompt overhead
+LOW_TEXT_TOKENS = 20        # a PDF page under this is treated as needs_image (§J1.2)
 MAX_FILE_BYTES_DEFAULT = 26214400  # 25 MiB
 HTTP_MAX_BODY = 4 * 1024 * 1024    # 4 MiB (samosa_http.h:20)
 RUNNER_VERSION = "j1-0.1"
@@ -600,70 +601,105 @@ def _check_domain_rule(rule, record):
 # J1.2 — Granularity planner
 # ---------------------------------------------------------------------------
 
+def _file_unit(sha, reason, warning=None):
+    u = {
+        'unit_id': sha,
+        'input_sha256': sha,
+        'granularity': 'file',
+        'plan_reason': reason,
+        'reduce_group': None,
+    }
+    if warning:
+        u['warning'] = warning
+    return u
+
+
+def _page_units(sha, pages, reason):
+    """One unit per PDF page; recombined by the reducer (reduce_group=sha)."""
+    units = []
+    for p in pages:
+        idx = p['index']
+        units.append({
+            'unit_id': f"{sha}#p{idx}",
+            'input_sha256': sha,
+            'granularity': 'page',
+            'plan_reason': reason,
+            'page_index': idx,
+            'reduce_group': sha,
+        })
+    return units
+
+
+def _page_needs_image(page):
+    """F-J4/J1.2: a page needs a rendered image if it has little/no text or a figure."""
+    return page.get('text_tokens', 0) < LOW_TEXT_TOKENS or page.get('has_raster_figure', False)
+
+
 def plan_units(input_meta, unit_mode, context_budget, tokenizer_cmd=None):
-    """Plan processing units for an input file.
+    """Plan processing units for an input file (§J1.2).
+
+    Deterministic; the PDF path consumes optional `pages` metadata
+    (list of {index, text_tokens, has_raster_figure}) from the #5 extract_meta
+    contract. Without that metadata a real PDF cannot be planned and is flagged
+    `extractor_unavailable` (the sidecar is #5, not yet built).
 
     Args:
-        input_meta: dict with input_sha256, media_type, input_path, size, text_tokens (optional)
-        unit_mode: 'auto', 'file', or 'page'
-        context_budget: available token budget
-        tokenizer_cmd: command to run tokenize --count (list)
+        input_meta: dict with input_sha256, media_type, input_path, size,
+            text_tokens (optional), pages (optional, PDF only)
+        unit_mode: 'auto' (default), 'file', or 'page'
+        context_budget: input-token ceiling = MAX_CONTEXT - max_tokens - SYSTEM_RESERVE
+        tokenizer_cmd: command to run `tokenize --count` (list)
 
-    Returns: list of unit dicts
+    Returns: list of unit dicts.
     """
     sha = input_meta['input_sha256']
     media_type = input_meta['media_type']
     path = input_meta['input_path']
 
+    # --- single image: always one unit (one image, F-J4 is satisfied) ---
     if media_type.startswith('image/'):
-        # Single image → 1 unit
-        return [{
-            'unit_id': sha,
-            'input_sha256': sha,
-            'granularity': 'file',
-            'plan_reason': 'single_image',
-            'reduce_group': None,
-        }]
+        return [_file_unit(sha, 'single_image')]
 
+    # --- text / markdown: no pages; auto chunks when over budget ---
     if media_type == 'text/plain':
-        # Count tokens
         text_tokens = input_meta.get('text_tokens')
         if text_tokens is None and tokenizer_cmd:
             text_tokens = count_tokens_file(path, tokenizer_cmd)
         if text_tokens is None:
-            # Fallback: estimate
             text_tokens = math.ceil(input_meta.get('size', 0) / 4)
-
+        if unit_mode == 'file':
+            return [_file_unit(sha, 'forced_file')]
         if text_tokens <= context_budget:
-            return [{
-                'unit_id': sha,
-                'input_sha256': sha,
-                'granularity': 'file',
-                'plan_reason': 'fits_budget',
-                'reduce_group': None,
-            }]
-        else:
-            # Split into chunks
-            return _plan_text_chunks(sha, path, text_tokens, context_budget, tokenizer_cmd)
+            return [_file_unit(sha, 'fits_budget')]
+        return _plan_text_chunks(sha, path, text_tokens, context_budget, tokenizer_cmd)
 
+    # --- PDF: needs #5 sidecar page metadata to decide granularity ---
     if media_type == 'application/pdf':
-        # PDF: return review_required since sidecar is not available
-        return [{
-            'unit_id': sha,
-            'input_sha256': sha,
-            'granularity': 'file',
-            'plan_reason': 'extractor_unavailable',
-            'reduce_group': None,
-        }]
+        pages = input_meta.get('pages')
+        if not pages:
+            # No sidecar metadata → cannot plan; J1.3 extraction flags it too.
+            return [_file_unit(sha, 'extractor_unavailable')]
 
-    # Unknown type
-    return [{
-        'unit_id': sha,
-        'input_sha256': sha,
-        'granularity': 'file',
-        'plan_reason': 'unknown_type',
-        'reduce_group': None,
-    }]
+        image_pages = sum(1 for p in pages if _page_needs_image(p))
+        total_tokens = sum(p.get('text_tokens', 0) for p in pages) + image_pages * IMAGE_TOKENS
+
+        if unit_mode == 'file':
+            # Honor the explicit choice, but warn: one inference sees only one
+            # image (F-J4), so a multi-image doc loses the rest.
+            warning = 'forced_file_multi_image' if image_pages >= 2 else None
+            return [_file_unit(sha, 'forced_file', warning)]
+        if unit_mode == 'page':
+            return _page_units(sha, pages, 'forced_page')
+
+        # auto
+        if image_pages >= 2:
+            return _page_units(sha, pages, 'multi_image_pages')  # forced by F-J4
+        if total_tokens > context_budget:
+            return _page_units(sha, pages, 'over_context')       # forced by the cap
+        return [_file_unit(sha, 'fits_budget')]
+
+    # --- unknown type ---
+    return [_file_unit(sha, 'unknown_type')]
 
 
 def _plan_text_chunks(sha, path, total_tokens, budget, tokenizer_cmd):

@@ -12,6 +12,80 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'dist'))
 import samosa_jobs
 
 
+class TestPlanner(unittest.TestCase):
+    """J1.2 — granularity planner: per-file vs per-page, forced by F-J4 / context cap."""
+
+    BUDGET = samosa_jobs.MAX_CONTEXT - 512 - samosa_jobs.SYSTEM_RESERVE  # 23040
+
+    def _pdf(self, pages):
+        return {'input_sha256': 'deadbeef', 'media_type': 'application/pdf',
+                'input_path': '/nonexistent.pdf', 'size': 0, 'pages': pages}
+
+    def test_single_image_per_file(self):
+        meta = {'input_sha256': 'aa', 'media_type': 'image/png',
+                'input_path': '/x.png', 'size': 1000}
+        units = samosa_jobs.plan_units(meta, 'auto', self.BUDGET)
+        self.assertEqual(len(units), 1)
+        self.assertEqual(units[0]['plan_reason'], 'single_image')
+
+    def test_pdf_ten_image_pages_forced_per_page(self):
+        # OWNER'S ANCHOR CASE: 10 pages each with an image -> per page (F-J4 forces it).
+        pages = [{'index': i, 'text_tokens': 5, 'has_raster_figure': True} for i in range(10)]
+        units = samosa_jobs.plan_units(self._pdf(pages), 'auto', self.BUDGET)
+        self.assertEqual(len(units), 10)
+        self.assertTrue(all(u['granularity'] == 'page' for u in units))
+        self.assertTrue(all(u['plan_reason'] == 'multi_image_pages' for u in units))
+        self.assertTrue(all(u['reduce_group'] == 'deadbeef' for u in units))
+        self.assertEqual([u['page_index'] for u in units], list(range(10)))
+
+    def test_pdf_small_text_per_file(self):
+        pages = [{'index': i, 'text_tokens': 100, 'has_raster_figure': False} for i in range(3)]
+        units = samosa_jobs.plan_units(self._pdf(pages), 'auto', self.BUDGET)
+        self.assertEqual(len(units), 1)
+        self.assertEqual(units[0]['plan_reason'], 'fits_budget')
+
+    def test_pdf_one_image_fits_per_file(self):
+        pages = [{'index': 0, 'text_tokens': 100, 'has_raster_figure': True}]
+        units = samosa_jobs.plan_units(self._pdf(pages), 'auto', self.BUDGET)
+        self.assertEqual(len(units), 1)
+        self.assertEqual(units[0]['plan_reason'], 'fits_budget')
+
+    def test_pdf_over_context_forced_per_page(self):
+        pages = [{'index': i, 'text_tokens': 1000, 'has_raster_figure': False} for i in range(40)]
+        units = samosa_jobs.plan_units(self._pdf(pages), 'auto', self.BUDGET)
+        self.assertEqual(len(units), 40)
+        self.assertTrue(all(u['plan_reason'] == 'over_context' for u in units))
+
+    def test_pdf_forced_file_warns_multi_image(self):
+        pages = [{'index': i, 'text_tokens': 5, 'has_raster_figure': True} for i in range(10)]
+        units = samosa_jobs.plan_units(self._pdf(pages), 'file', self.BUDGET)
+        self.assertEqual(len(units), 1)
+        self.assertEqual(units[0]['granularity'], 'file')
+        self.assertEqual(units[0].get('warning'), 'forced_file_multi_image')
+
+    def test_pdf_no_metadata_extractor_unavailable(self):
+        meta = {'input_sha256': 'cc', 'media_type': 'application/pdf',
+                'input_path': '/x.pdf', 'size': 1000}
+        units = samosa_jobs.plan_units(meta, 'auto', self.BUDGET)
+        self.assertEqual(units[0]['plan_reason'], 'extractor_unavailable')
+
+    def test_text_over_context_chunks(self):
+        with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
+            for i in range(2000):
+                f.write("This is line number %d with some words to fill the space.\n" % i)
+            path = f.name
+        try:
+            meta = {'input_sha256': 'bb', 'media_type': 'text/plain',
+                    'input_path': path, 'size': os.path.getsize(path), 'text_tokens': 50000}
+            units = samosa_jobs.plan_units(meta, 'auto', self.BUDGET)
+            self.assertGreater(len(units), 1)
+            self.assertTrue(all(u['granularity'] == 'chunk' for u in units))
+            self.assertTrue(all(u['plan_reason'] == 'over_context' for u in units))
+            self.assertTrue(all(u['reduce_group'] == 'bb' for u in units))
+        finally:
+            os.unlink(path)
+
+
 class TestValidateJob(unittest.TestCase):
     """J1.0 — job.json validation."""
 
