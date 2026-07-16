@@ -86,6 +86,39 @@ class TestPlanner(unittest.TestCase):
             os.unlink(path)
 
 
+class TestMergedOutput(unittest.TestCase):
+    """J1.11 — merged output honors job.output.dir (regression: E-J1 pilot B1)."""
+
+    def test_honors_output_dir_and_order(self):
+        import pathlib
+
+        class _Log:
+            events = [
+                {'type': 'item_complete', 'unit_id': 'aaa', 'input_sha256': 'aaa', 'input_path': '/z/2.txt'},
+                {'type': 'item_complete', 'unit_id': 'bbb', 'input_sha256': 'bbb', 'input_path': '/z/1.txt'},
+            ]
+
+        with tempfile.TemporaryDirectory() as td:
+            job_dir = pathlib.Path(td) / 'job'
+            items = job_dir / 'results' / 'items'
+            items.mkdir(parents=True)
+            (items / 'aaa.json').write_text('{"merchant":"A","total":1}')
+            (items / 'bbb.json').write_text('{"merchant":"B","total":2}')
+            out_dir = pathlib.Path(td) / 'user_out'
+            job = {'output': {'dir': str(out_dir), 'format': 'jsonl'},
+                   'output_schema': {'properties': {'merchant': {}, 'total': {}}}}
+
+            samosa_jobs.write_merged_output(job, str(job_dir), _Log())
+
+            # goes to the configured dir, NOT the job dir
+            self.assertTrue((out_dir / 'output.jsonl').exists())
+            self.assertFalse((job_dir / 'results' / 'output.jsonl').exists())
+            lines = (out_dir / 'output.jsonl').read_text().strip().split('\n')
+            self.assertEqual(len(lines), 2)
+            # deterministic order by input_path -> /z/1.txt (bbb) first
+            self.assertEqual(json.loads(lines[0])['input_path'], '/z/1.txt')
+
+
 class TestValidateJob(unittest.TestCase):
     """J1.0 — job.json validation."""
 

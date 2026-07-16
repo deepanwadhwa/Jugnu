@@ -1297,12 +1297,16 @@ def write_merged_output(job, job_dir, event_log):
     # Sort by input_path
     completed.sort(key=lambda r: r.get('input_path', ''))
 
+    # Honor the job's configured output.dir; fall back to the job's results/ dir.
+    out_dir = Path(job.get('output', {}).get('dir') or results_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     if fmt == 'jsonl':
-        out_path = results_dir / 'output.jsonl'
+        out_path = out_dir / 'output.jsonl'
         lines = [json.dumps(r, separators=(',', ':')) for r in completed]
         atomic_write(out_path, '\n'.join(lines) + '\n' if lines else '')
     else:
-        out_path = results_dir / 'output.csv'
+        out_path = out_dir / 'output.csv'
         if completed:
             props = list(job.get('output_schema', {}).get('properties', {}).keys())
             fieldnames = ['input_sha256', 'input_path'] + props
