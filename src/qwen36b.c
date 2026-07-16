@@ -3799,8 +3799,83 @@ static void generate_continue(Model *m, int *hist, int hist_len,
     }
     double t0 = now_s();
     float *x_cont = falloc((int64_t)n_cont * m->c.hidden);
-    for (int s = 0; s < n_cont; s++) embed_gather_row(x_cont + s * m->c.hidden, &m->embed, cont[s]);
-    float *logit = step(m, x_cont, cont, n_cont, hist_len - 1, 0, NULL, NULL, NULL);
+    
+    // Count image pads in history to find initial mrope_delta
+    int hist_image_pads = 0;
+    int in_image = 0;
+    int image_pads = 0;
+    int total_mrope_delta = 0;
+    for (int i = 0; i < hist_len - 1; i++) {
+        if (hist[i] == 248056 /* image_pad */) {
+            image_pads++;
+            in_image = 1;
+        } else {
+            if (in_image) {
+                int L = (int)sqrt(image_pads);
+                total_mrope_delta += L - image_pads;
+                image_pads = 0;
+                in_image = 0;
+            }
+        }
+    }
+    if (in_image) {
+        int L = (int)sqrt(image_pads);
+        total_mrope_delta += L - image_pads;
+    }
+    
+    int mrope_delta = total_mrope_delta;
+    int *pos_t = NULL, *pos_h = NULL, *pos_w = NULL;
+    
+    if (m->vision_pixels) {
+        float *vision_emb = vision_forward(&m->vt, m->vision_pixels, m->vision_grid_t, m->vision_grid_h, m->vision_grid_w);
+        pos_t = malloc(n_cont * sizeof(int));
+        pos_h = malloc(n_cont * sizeof(int));
+        pos_w = malloc(n_cont * sizeof(int));
+        
+        int llm_grid_t = m->vision_grid_t;
+        int llm_grid_h = m->vision_grid_h / MERGE_SIZE;
+        int llm_grid_w = m->vision_grid_w / MERGE_SIZE;
+        int num_vision_tokens = llm_grid_t * llm_grid_h * llm_grid_w;
+        
+        int vision_idx = 0;
+        int current_pos = hist_len - 1 + total_mrope_delta;
+        
+        for (int s = 0; s < n_cont; s++) {
+            if (cont[s] == 248056 /* image_pad */) {
+                if (vision_idx < num_vision_tokens) {
+                    memcpy(x_cont + (int64_t)s * m->c.hidden, vision_emb + vision_idx * m->c.hidden, m->c.hidden * sizeof(float));
+                } else {
+                    embed_gather_row(x_cont + (int64_t)s * m->c.hidden, &m->embed, cont[s]);
+                }
+                
+                int h_idx = vision_idx / llm_grid_w;
+                int w_idx = vision_idx % llm_grid_w;
+                
+                pos_t[s] = current_pos;
+                pos_h[s] = current_pos + h_idx;
+                pos_w[s] = current_pos + w_idx;
+                
+                vision_idx++;
+                if (vision_idx == num_vision_tokens) {
+                    int offset = (llm_grid_h > llm_grid_w ? llm_grid_h : llm_grid_w);
+                    mrope_delta += offset - num_vision_tokens;
+                    current_pos += offset;
+                }
+            } else {
+                embed_gather_row(x_cont + (int64_t)s * m->c.hidden, &m->embed, cont[s]);
+                pos_t[s] = current_pos;
+                pos_h[s] = current_pos;
+                pos_w[s] = current_pos;
+                current_pos++;
+            }
+        }
+        free(vision_emb);
+    } else {
+        for (int s = 0; s < n_cont; s++) embed_gather_row(x_cont + s * m->c.hidden, &m->embed, cont[s]);
+    }
+    
+    float *logit = step(m, x_cont, cont, n_cont, hist_len - 1, mrope_delta, pos_t, pos_h, pos_w);
+    if (pos_t) { free(pos_t); free(pos_h); free(pos_w); }
     double prefill_done = now_s();
     free(cont);
     int len = hist_len + n_extra;
@@ -3836,7 +3911,7 @@ static void generate_continue(Model *m, int *hist, int hist_len,
         int one = best;
         float *x_one = falloc(m->c.hidden);
         embed_gather_row(x_one, &m->embed, one);
-        logit = step(m, x_one, &one, 1, len - 1, 0, NULL, NULL, NULL);
+        logit = step(m, x_one, &one, 1, len - 1, mrope_delta, NULL, NULL, NULL);
     }
     if (stats) {
         double done = now_s();
@@ -4560,6 +4635,10 @@ static jval *serve_json_field(jval *object,const char *key,jtype type){
 }
 
 static char *serve_last_user(SamosaServeContext *ctx, jval *root, const char **system) {
+    if (ctx->model->vision_pixels) {
+        free(ctx->model->vision_pixels);
+        ctx->model->vision_pixels = NULL;
+    }
     jval *messages = serve_json_field(root, "messages", J_ARR);
     char *user = NULL; *system = NULL;
     if (!messages) return NULL;
