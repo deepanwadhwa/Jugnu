@@ -629,5 +629,118 @@ class TestCallServe(unittest.TestCase):
         self.assertEqual(err, '500')
 
 
+class TestRunReduceIntegration(unittest.TestCase):
+    """J1.9 wiring — a split text file is reduced into one document record end to
+    end through _run_job, and the reduced input is idempotent on re-run."""
+
+    def setUp(self):
+        self.server, self.port = fake_serve.start_server(0)
+        self.serve_url = f'http://127.0.0.1:{self.port}'
+        fake_serve.set_behavior(hang_seconds=0, fail_count=0, fail_counter=0,
+                                return_429=False, return_400_context_limit=False)
+        fake_serve.set_status(interactive_active=False, last_interactive_ts=None)
+        fake_serve.reset_request_count()
+
+        self.tmp = tempfile.mkdtemp()
+        self.jobs_dir = os.path.join(self.tmp, 'jobs')
+        self.inputs = os.path.join(self.tmp, 'inputs')
+        os.makedirs(self.inputs)
+        # ~120 KB text file -> size/4 ~30k tokens > 23040 budget -> chunk split
+        with open(os.path.join(self.inputs, 'big.txt'), 'w') as f:
+            for i in range(2400):
+                f.write("Receipt line %d: merchant Test Store total 42.50 USD.\n" % i)
+
+        self._env = {'SAMOSA_JOBS_DIR': self.jobs_dir, 'SAMOSA_SERVE_URL': self.serve_url}
+        self._old_env = {k: os.environ.get(k) for k in self._env}
+        os.environ.update(self._env)
+
+        # Neutralize the resource gate (exercised separately in test_gate) and the
+        # tokenizer (no engine binary offline -> force the size/4 fallback split).
+        self._orig_gate = samosa_jobs.gate_check
+        self._orig_tok = samosa_jobs.get_tokenizer_cmd
+        samosa_jobs.gate_check = lambda job, url: (True, None)
+        samosa_jobs.get_tokenizer_cmd = lambda: None
+
+    def tearDown(self):
+        samosa_jobs.gate_check = self._orig_gate
+        samosa_jobs.get_tokenizer_cmd = self._orig_tok
+        for k, v in self._old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self.server.shutdown()
+        import shutil as _sh
+        _sh.rmtree(self.tmp, ignore_errors=True)
+
+    def _job(self):
+        job = {
+            'schema_version': 1,
+            'job_id': 'reduce-int',
+            'name': 'Reduce integration',
+            'input': {'folder': self.inputs, 'types': ['text/plain'],
+                      'max_file_bytes': 26214400},
+            'instruction': 'Extract fields. Return ONLY JSON.',
+            'output_schema': {
+                'type': 'object',
+                'properties': {
+                    'merchant': {'type': ['string', 'null']},
+                    'date': {'type': ['string', 'null']},
+                    'total': {'type': ['number', 'null']},
+                    'currency': {'type': ['string', 'null'], 'maxLength': 3},
+                }
+            },
+            'resources': {'max_attempts': 2, 'run_on_battery': True, 'min_free_gb': 0},
+        }
+        validated, errors = samosa_jobs.validate_job(job)
+        self.assertEqual(errors, [])
+        return validated
+
+    def test_split_file_reduced_to_document_and_idempotent(self):
+        import pathlib
+        job = self._job()
+        job_dir = pathlib.Path(self.jobs_dir) / 'reduce-int'
+        job_dir.mkdir(parents=True, exist_ok=True)
+
+        rc = samosa_jobs._run_job(job, job_dir)
+        self.assertEqual(rc, 0)
+
+        log = samosa_jobs.EventLog(job_dir / 'events.jsonl')
+        log.load()
+
+        # The file split into >1 chunk unit, all sharing one reduce_group.
+        planned = [e for e in log.events if e['type'] == 'item_planned']
+        self.assertGreater(len(planned), 1)
+        self.assertTrue(all(e['granularity'] == 'chunk' for e in planned))
+        group_sha = planned[0]['input_sha256']
+
+        # Exactly one doc_reduced, deterministic, passed; document file written.
+        reduced = [e for e in log.events if e['type'] == 'doc_reduced']
+        self.assertEqual(len(reduced), 1)
+        self.assertEqual(reduced[0]['method'], 'deterministic')
+        self.assertEqual(reduced[0]['validation'], 'passed')
+        doc_path = job_dir / 'results' / 'documents' / f"{group_sha}.json"
+        self.assertTrue(doc_path.exists())
+        doc = json.loads(doc_path.read_text())
+        self.assertEqual(doc['merchant'], 'Test Store')
+
+        # Provenance timing (B2) is present on the unit records.
+        prov_files = list((job_dir / 'results' / 'items').glob('*.provenance.json'))
+        self.assertTrue(prov_files)
+        prov = json.loads(prov_files[0].read_text())
+        self.assertIn('wall_seconds', prov)
+        self.assertIsInstance(prov['wall_seconds'], (int, float))
+
+        # Idempotent re-run: input is processed (units terminal + doc_reduced) so
+        # no new model POSTs and no duplicate doc_reduced.
+        fake_serve.reset_request_count()
+        rc2 = samosa_jobs._run_job(job, job_dir)
+        self.assertEqual(rc2, 0)
+        self.assertEqual(fake_serve.get_request_count(), 0)
+        log.load()
+        reduced2 = [e for e in log.events if e['type'] == 'doc_reduced']
+        self.assertEqual(len(reduced2), 1)
+
+
 if __name__ == '__main__':
     unittest.main()

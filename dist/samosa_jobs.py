@@ -1026,7 +1026,11 @@ class EventLog:
         return terminal
 
     def get_processed_inputs(self, max_attempts):
-        """Get set of input_sha256 values whose all planned units are terminal."""
+        """Get set of input_sha256 whose planned units are all terminal.
+
+        A split file (>1 planned unit) also requires its `doc_reduced` event
+        (recovery step 5): without it the reduce would be skipped forever on a
+        resumed run. Single-unit inputs need no reduce."""
         # Build mapping: input_sha256 -> set of planned unit_ids
         planned = {}
         for evt in self.events:
@@ -1036,11 +1040,17 @@ class EventLog:
                 if sha and uid:
                     planned.setdefault(sha, set()).add(uid)
 
+        reduced = {evt.get('input_sha256') for evt in self.events
+                   if evt['type'] == 'doc_reduced'}
+
         terminal = self.get_terminal_units()
         processed = set()
         for sha, units in planned.items():
-            if units.issubset(terminal):
-                processed.add(sha)
+            if not units.issubset(terminal):
+                continue
+            if len(units) > 1 and sha not in reduced:
+                continue  # split file awaiting reduction
+            processed.add(sha)
         return processed
 
 
@@ -1209,6 +1219,138 @@ def reduce_units(units_results, schema, reduce_config, model_call=None):
 
     status = 'review_required' if errors or all_reasons else 'passed'
     return merged, {'status': status, 'errors': errors}, method
+
+
+def _gather_group_results(group_units, job_dir, event_log):
+    """Rebuild units_results for a reduce group from stored records + event status.
+
+    Record content comes from results/items/<unit>.json (written for every unit
+    that produced output); status/errors come from the unit's last terminal event.
+    Ordered deterministically by page/chunk index then unit_id (J1.11)."""
+    status_by_uid = {}
+    for e in event_log.events:
+        uid = e.get('unit_id')
+        if not uid:
+            continue
+        t = e['type']
+        if t == 'item_complete':
+            status_by_uid[uid] = ('passed', [])
+        elif t == 'item_review_required':
+            status_by_uid[uid] = ('review_required', list(e.get('reasons', [])))
+        elif t == 'item_failed':
+            status_by_uid[uid] = ('failed', [e.get('error', 'failed')])
+
+    items_dir = Path(job_dir) / 'results' / 'items'
+    results = []
+    for u in group_units:
+        uid = u['unit_id']
+        status, errors = status_by_uid.get(uid, ('failed', ['no_terminal_event']))
+        safe_uid = uid.replace('#', '_').replace('/', '_')
+        rec_path = items_dir / f"{safe_uid}.json"
+        record = None
+        if rec_path.exists():
+            try:
+                record = json.loads(rec_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                record = None
+        results.append({
+            'unit_id': uid,
+            'page_index': u.get('page_index'),
+            'chunk_index': u.get('chunk_index'),
+            'record': record,
+            'status': status,
+            'errors': errors,
+        })
+
+    def _order(r):
+        idx = r['page_index'] if r['page_index'] is not None else r['chunk_index']
+        return (0 if idx is not None else 1, idx if idx is not None else 0, r['unit_id'])
+
+    results.sort(key=_order)
+    return results
+
+
+def _make_reduce_model_call(job, serve_url):
+    """Return a `model_call(payload, fields) -> content|None` that asks serve to
+    merge the narrative fields of a split document (J1.9 model path)."""
+    inf = job.get('inference', {})
+
+    def model_call(payload, fields):
+        system = (
+            "You merge structured records extracted from the pages of ONE document "
+            "into a single record. Each entry has a status and its page record. "
+            "Use ONLY information present in those records; never invent a value. "
+            f"Produce ONLY these fields: {', '.join(fields)}. "
+            "Return ONLY a JSON object — no prose, no code fences."
+        )
+        user = json.dumps(payload, ensure_ascii=False)
+        body = {
+            'messages': [
+                {'role': 'system', 'content': system},
+                {'role': 'user', 'content': user},
+            ],
+            'thinking': 'off',
+            'temperature': 0,
+            'seed': inf.get('seed', 11),
+            'max_tokens': inf.get('max_tokens', 512),
+            'stream': False,
+        }
+        resp, err = call_serve(body, serve_url)
+        if err:
+            return None
+        return resp.get('choices', [{}])[0].get('message', {}).get('content', '')
+
+    return model_call
+
+
+def _reduce_completed_groups(job, job_dir, event_log, unit_by_group, serve_url):
+    """J1.9 — for each split-file reduce group whose units are all terminal and
+    which has not yet been reduced, produce one document record and emit
+    doc_reduced. Deterministic groups need no model; model groups gate first."""
+    reduce_config = job.get('reduce', {'mode': 'deterministic', 'model_fields': []})
+    schema = job['output_schema']
+    needs_model = (reduce_config.get('mode') == 'model'
+                   or bool(reduce_config.get('model_fields')))
+
+    already_reduced = {e.get('input_sha256') for e in event_log.events
+                       if e['type'] == 'doc_reduced'}
+
+    for group_sha in sorted(unit_by_group):
+        if group_sha in already_reduced:
+            continue
+        group_units = unit_by_group[group_sha]
+        terminal = event_log.get_terminal_units()
+        if not all(u['unit_id'] in terminal for u in group_units):
+            continue  # group not finished; leave for a later run
+
+        units_results = _gather_group_results(group_units, job_dir, event_log)
+
+        mc = None
+        if needs_model:
+            ok, reason = gate_check(job, serve_url)
+            while not ok:
+                event_log.append('job_paused', reason=reason)
+                print(f"[jobs] paused (reduce): {reason}. Waiting...")
+                time.sleep(30)
+                ok, reason = gate_check(job, serve_url)
+                if ok:
+                    event_log.append('job_resumed', reason=f"cleared:{reason}")
+            mc = _make_reduce_model_call(job, serve_url)
+
+        merged, validation, method = reduce_units(
+            units_results, schema, reduce_config, model_call=mc)
+
+        docs_dir = Path(job_dir) / 'results' / 'documents'
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        doc_path = docs_dir / f"{group_sha}.json"
+        atomic_write(doc_path, json.dumps(merged, indent=2))
+
+        event_log.append('doc_reduced',
+                         input_sha256=group_sha,
+                         artifact=doc_path.name,
+                         validation=validation['status'],
+                         method=method)
+        print(f"[jobs] reduced {group_sha[:12]}: {validation['status']} ({method})")
 
 
 # ---------------------------------------------------------------------------
@@ -1761,6 +1903,13 @@ def _run_job(job, job_dir):
                                  plan_reason=u['plan_reason'])
             all_units.append((u, item))
 
+    # Group split-file units for J1.9 reduction (reduce_group == input_sha256)
+    unit_by_group = {}
+    for u, _item in all_units:
+        grp = u.get('reduce_group')
+        if grp:
+            unit_by_group.setdefault(grp, []).append(u)
+
     # Filter out already-terminal units
     terminal = event_log.get_terminal_units()
     pending = [(u, item) for u, item in all_units if u['unit_id'] not in terminal]
@@ -1927,6 +2076,9 @@ def _run_job(job, job_dir):
 
             success = True
             break
+
+    # J1.9 — reduce completed split-file groups into document records
+    _reduce_completed_groups(job, job_dir, event_log, unit_by_group, serve_url)
 
     # Job complete
     event_log.append('job_complete',
