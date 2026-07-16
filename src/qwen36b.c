@@ -38,6 +38,7 @@
 #include "repetition_guard.h"
 #include "thinking_budget.h"
 #include "samosa_http.h"
+#include "vision.h"
 #define matmul_qt matmul_qt_impl
 
 static int g_direct = 0;
@@ -244,6 +245,10 @@ typedef struct {
     QT embed, lm_head;
     float *final_norm;
     Layer *L;
+    VisionTower vt;
+    float *vision_pixels;
+    int vision_grid_t, vision_grid_h, vision_grid_w;
+    int mrope_delta;
     
     // GQA cache
     float **K, **V;
@@ -2095,6 +2100,63 @@ static void ecache_service_pressure(Model *m) {
             critical ? "CRITICAL" : "WARN", (double)reclaimed / 1e6);
 }
 
+static void load_vision_linear(Model* m, const char* base, uint8_t** w, float** qs, float** b, size_t bytes, int out_dim) {
+    char name[128];
+    snprintf(name, sizeof(name), "%s.weight", base);
+    if (!st_has(&m->S, name)) return;
+    *w = malloc(bytes);
+    st_read_raw(&m->S, name, *w, 0);
+    
+    snprintf(name, sizeof(name), "%s.weight.qs", base);
+    *qs = malloc(out_dim * sizeof(float));
+    st_read_f32(&m->S, name, *qs, 0);
+    
+    snprintf(name, sizeof(name), "%s.bias", base);
+    *b = load_float_t(m, name);
+}
+
+static void load_vision_tower(Model* m) {
+    memset(&m->vt, 0, sizeof(VisionTower));
+    if (!st_has(&m->S, "model.visual.patch_embed.proj.weight")) return;
+    m->vt.is_loaded = true;
+    m->vt.patch_embed_weight = load_float_t(m, "model.visual.patch_embed.proj.weight");
+    m->vt.patch_embed_bias = load_float_t(m, "model.visual.patch_embed.proj.bias");
+    
+    if (st_has(&m->S, "model.visual.pos_embed.weight")) {
+        m->vt.pos_embed_weight = malloc(2654208);
+        st_read_raw(&m->S, "model.visual.pos_embed.weight", m->vt.pos_embed_weight, 0);
+        m->vt.pos_embed_weight_qs = malloc(2304 * sizeof(float));
+        st_read_f32(&m->S, "model.visual.pos_embed.weight.qs", m->vt.pos_embed_weight_qs, 0);
+    }
+    
+    char base[128], nm[128];
+    for (int i = 0; i < VISION_NUM_BLOCKS; i++) {
+        snprintf(nm, sizeof(nm), "model.visual.blocks.%d.norm1.weight", i); m->vt.block_norm1_weight[i] = load_float_t(m, nm);
+        snprintf(nm, sizeof(nm), "model.visual.blocks.%d.norm1.bias", i); m->vt.block_norm1_bias[i] = load_float_t(m, nm);
+        
+        snprintf(nm, sizeof(nm), "model.visual.blocks.%d.norm2.weight", i); m->vt.block_norm2_weight[i] = load_float_t(m, nm);
+        snprintf(nm, sizeof(nm), "model.visual.blocks.%d.norm2.bias", i); m->vt.block_norm2_bias[i] = load_float_t(m, nm);
+        
+        snprintf(base, sizeof(base), "model.visual.blocks.%d.attn.qkv", i);
+        load_vision_linear(m, base, &m->vt.block_attn_qkv_weight[i], &m->vt.block_attn_qkv_weight_qs[i], &m->vt.block_attn_qkv_bias[i], 3981312, VISION_HIDDEN_SIZE*3);
+        
+        snprintf(base, sizeof(base), "model.visual.blocks.%d.attn.proj", i);
+        load_vision_linear(m, base, &m->vt.block_attn_proj_weight[i], &m->vt.block_attn_proj_weight_qs[i], &m->vt.block_attn_proj_bias[i], 1327104, VISION_HIDDEN_SIZE);
+        
+        snprintf(base, sizeof(base), "model.visual.blocks.%d.mlp.linear_fc1", i);
+        load_vision_linear(m, base, &m->vt.block_mlp_fc1_weight[i], &m->vt.block_mlp_fc1_weight_qs[i], &m->vt.block_mlp_fc1_bias[i], 4958208, VISION_INTERMEDIATE_SIZE);
+        
+        snprintf(base, sizeof(base), "model.visual.blocks.%d.mlp.linear_fc2", i);
+        load_vision_linear(m, base, &m->vt.block_mlp_fc2_weight[i], &m->vt.block_mlp_fc2_weight_qs[i], &m->vt.block_mlp_fc2_bias[i], 4958208, VISION_HIDDEN_SIZE);
+    }
+    
+    m->vt.merger_norm_weight = load_float_t(m, "model.visual.merger.norm.weight");
+    m->vt.merger_norm_bias = load_float_t(m, "model.visual.merger.norm.bias");
+    
+    load_vision_linear(m, "model.visual.merger.linear_fc1", &m->vt.merger_fc1_weight, &m->vt.merger_fc1_weight_qs, &m->vt.merger_fc1_bias, 21233664, VISION_HIDDEN_SIZE*4);
+    load_vision_linear(m, "model.visual.merger.linear_fc2", &m->vt.merger_fc2_weight, &m->vt.merger_fc2_weight_qs, &m->vt.merger_fc2_bias, 9437184, VISION_OUT_DIM);
+}
+
 static void model_init(Model *m, const char *snap, const char *refine_dir,
                        int refine_mode, int refine_verify,
                        int refine_full_ranks, uint8_t refine_base_projections,
@@ -2156,6 +2218,8 @@ static void model_init(Model *m, const char *snap, const char *refine_dir,
     m->embed = qt_load(m, "model.embed_tokens.weight", c->vocab, D);
     m->lm_head = qt_load(m, "lm_head.weight", c->vocab, D);
     m->final_norm = load_float_t(m, "model.norm.weight");
+    
+    load_vision_tower(m);
     
     m->L = malloc(c->n_layers * sizeof(Layer));
     for (int i = 0; i < c->n_layers; i++) {
@@ -2308,9 +2372,15 @@ static void model_init(Model *m, const char *snap, const char *refine_dir,
     route_trace_init(m);
 }
 
-static void rope_head(float *x, int pos, float theta, int head_dim, int rotary_dim) {
+static void rope_head(float *x, int pos_t, int pos_h, int pos_w, float theta, int head_dim, int rotary_dim) {
     int h = rotary_dim / 2;
     for (int j = 0; j < h; j++) {
+        int pos = pos_t;
+        if (h == 32) {
+            if (j % 3 == 1) pos = pos_h;
+            else if (j % 3 == 2) pos = pos_w;
+        }
+        
         float inv = powf(theta, -2.0f * j / rotary_dim);
         float ang = pos * inv, cs = cosf(ang), sn = sinf(ang);
         float a = x[j], b = x[j+h];
@@ -2319,7 +2389,7 @@ static void rope_head(float *x, int pos, float theta, int head_dim, int rotary_d
     }
 }
 
-static void attention_gqa(Model *m, Layer *l, int layer, float *x, int S, int pos_base, float *out) {
+static void attention_gqa(Model *m, Layer *l, int layer, float *x, int S, int pos_base, int mrope_delta, int *pos_t_ids, int *pos_h_ids, int *pos_w_ids, float *out) {
     Cfg *c = &m->c;
     int H = c->n_heads, hd = c->head_dim;
     int G = c->n_kv_heads;
@@ -2363,12 +2433,14 @@ static void attention_gqa(Model *m, Layer *l, int layer, float *x, int S, int po
     
     int rotary_dim = (int)(hd * c->partial_rotary_factor);
     for (int s = 0; s < S; s++) {
-        int pos = pos_base + s;
+        int pt = pos_t_ids ? pos_t_ids[s] : pos_base + s + mrope_delta;
+        int ph = pos_h_ids ? pos_h_ids[s] : pos_base + s + mrope_delta;
+        int pw = pos_w_ids ? pos_w_ids[s] : pos_base + s + mrope_delta;
         for (int h = 0; h < H; h++) {
-            rope_head(q + (int64_t)s * H * hd + h * hd, pos, c->rope_theta, hd, rotary_dim);
+            rope_head(q + (int64_t)s * H * hd + h * hd, pt, ph, pw, c->rope_theta, hd, rotary_dim);
         }
         for (int g = 0; g < G; g++) {
-            rope_head(k + (int64_t)s * G * hd + g * hd, pos, c->rope_theta, hd, rotary_dim);
+            rope_head(k + (int64_t)s * G * hd + g * hd, pt, ph, pw, c->rope_theta, hd, rotary_dim);
         }
     }
     
@@ -2926,14 +2998,9 @@ static void mlp_moe(Model *m, Layer *l, int layer, float *x, int S, float *out,
     free(sg); free(su); free(shh);
 }
 
-static float *step(Model *m, const int *ids, int S, int pos_base) {
+static float *step(Model *m, float *x, const int *ids, int S, int pos_base, int mrope_delta, int *pos_t_ids, int *pos_h_ids, int *pos_w_ids) {
     Cfg *c = &m->c;
     int D = c->hidden;
-    
-    float *x = falloc((int64_t)S * D);
-    for (int s = 0; s < S; s++) {
-        embed_gather_row(x + (int64_t)s * D, &m->embed, ids[s]);
-    }
     
     float *nrm = falloc((int64_t)S * D);
     float *tmp = falloc((int64_t)S * D);
@@ -2950,7 +3017,7 @@ static float *step(Model *m, const int *ids, int S, int pos_base) {
         if (l->block_type == 0) {
             attention_deltanet(m, l, i, nrm, S, pos_base, tmp);
         } else {
-            attention_gqa(m, l, i, nrm, S, pos_base, tmp);
+            attention_gqa(m, l, i, nrm, S, pos_base, mrope_delta, pos_t_ids, pos_h_ids, pos_w_ids, tmp);
         }
         for (int64_t j = 0; j < (int64_t)S * D; j++) x[j] += tmp[j];
         
@@ -3015,7 +3082,9 @@ static void forward_all(Model *m, const int *full, int nfull, int *pred) {
     
     for (int s = 0; s < nfull; s++) {
         int token = full[s];
-        float *logit = step(m, &token, 1, s);
+        float *x = falloc(c->hidden);
+        embed_gather_row(x, &m->embed, token);
+        float *logit = step(m, x, &token, 1, s, 0, NULL, NULL, NULL);
         int best = 0; float bv = logit[0];
         for (int i = 1; i < c->vocab; i++) {
             if (logit[i] > bv) { bv = logit[i]; best = i; }
@@ -3375,7 +3444,55 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out,
     if (options && options->presence_penalty > 0.f && !options->seen)
         options->seen = calloc(((size_t)c->vocab + 7) / 8, 1);
     double gen_t0=now_s();
-    float *logit = step(m, prompt, np, 0);
+    int mrope_delta = 0;
+    int *pos_t = NULL, *pos_h = NULL, *pos_w = NULL;
+    float *x_prompt = falloc((int64_t)np * m->c.hidden);
+    
+    if (m->vision_pixels) {
+        float *vision_emb = vision_forward(&m->vt, m->vision_pixels, m->vision_grid_t, m->vision_grid_h, m->vision_grid_w);
+        pos_t = malloc(np * sizeof(int));
+        pos_h = malloc(np * sizeof(int));
+        pos_w = malloc(np * sizeof(int));
+        
+        int vision_idx = 0;
+        int llm_grid_t = m->vision_grid_t;
+        int llm_grid_h = m->vision_grid_h / MERGE_SIZE;
+        int llm_grid_w = m->vision_grid_w / MERGE_SIZE;
+        int num_vision_tokens = llm_grid_t * llm_grid_h * llm_grid_w;
+        
+        int current_pos = 0;
+        for (int s = 0; s < np; s++) {
+            if (prompt[s] == 248056 /* image_pad */) {
+                memcpy(x_prompt + (int64_t)s * m->c.hidden, vision_emb + vision_idx * m->c.hidden, m->c.hidden * sizeof(float));
+                
+                int h_idx = vision_idx / llm_grid_w;
+                int w_idx = vision_idx % llm_grid_w;
+                
+                pos_t[s] = current_pos;
+                pos_h[s] = current_pos + h_idx;
+                pos_w[s] = current_pos + w_idx;
+                
+                vision_idx++;
+                if (vision_idx == num_vision_tokens) {
+                    int offset = (llm_grid_h > llm_grid_w ? llm_grid_h : llm_grid_w);
+                    mrope_delta += offset - num_vision_tokens;
+                    current_pos += offset;
+                }
+            } else {
+                embed_gather_row(x_prompt + (int64_t)s * m->c.hidden, &m->embed, prompt[s]);
+                pos_t[s] = current_pos;
+                pos_h[s] = current_pos;
+                pos_w[s] = current_pos;
+                current_pos++;
+            }
+        }
+        free(vision_emb);
+    } else {
+        for (int s = 0; s < np; s++) embed_gather_row(x_prompt + s * m->c.hidden, &m->embed, prompt[s]);
+    }
+    
+    float *logit = step(m, x_prompt, prompt, np, 0, mrope_delta, pos_t, pos_h, pos_w);
+    if (pos_t) { free(pos_t); free(pos_h); free(pos_w); }
     double prefill_done=now_s();
     int len = np;
     int generated=0;
@@ -3409,7 +3526,9 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out,
         }
         if (s == n_new - 1) break;
         int one = best;
-        logit = step(m, &one, 1, len - 1);
+        float *x_one = falloc(m->c.hidden);
+        embed_gather_row(x_one, &m->embed, one);
+        logit = step(m, x_one, &one, 1, len - 1, mrope_delta, NULL, NULL, NULL);
     }
     if(stats) {
         double done=now_s();
@@ -3679,7 +3798,9 @@ static void generate_continue(Model *m, int *hist, int hist_len,
         hist[hist_len + i] = extra[i]; /* il transcript completo serve al re-save */
     }
     double t0 = now_s();
-    float *logit = step(m, cont, n_cont, hist_len - 1);
+    float *x_cont = falloc((int64_t)n_cont * m->c.hidden);
+    for (int s = 0; s < n_cont; s++) embed_gather_row(x_cont + s * m->c.hidden, &m->embed, cont[s]);
+    float *logit = step(m, x_cont, cont, n_cont, hist_len - 1, 0, NULL, NULL, NULL);
     double prefill_done = now_s();
     free(cont);
     int len = hist_len + n_extra;
@@ -3713,7 +3834,9 @@ static void generate_continue(Model *m, int *hist, int hist_len,
         }
         if (s == n_new - 1) break;
         int one = best;
-        logit = step(m, &one, 1, len - 1);
+        float *x_one = falloc(m->c.hidden);
+        embed_gather_row(x_one, &m->embed, one);
+        logit = step(m, x_one, &one, 1, len - 1, 0, NULL, NULL, NULL);
     }
     if (stats) {
         double done = now_s();
@@ -3968,7 +4091,9 @@ static int run_teacher_capture(Model *m, const char *tokenizer_path,
         TeacherSequence *current=&sequences[sequence];
         teacher_state_begin(m,current->count);
         for (int position=0;position<current->count-1;++position,++ordinal) {
-            float *logits=step(m,&current->ids[position],1,position);
+            float *x_req = falloc(m->c.hidden);
+            embed_gather_row(x_req, &m->embed, current->ids[position]);
+            float *logits=step(m, x_req, &current->ids[position], 1, position, 0, NULL, NULL, NULL);
             int target=current->ids[position+1]; double lse; uint32_t top5[5];
             teacher_lse_top5(logits,m->c.vocab,&lse,top5);
             int full=teacher_is_calibration(ordinal,positions,calibration);
@@ -4434,16 +4559,76 @@ static jval *serve_json_field(jval *object,const char *key,jtype type){
     jval *value=json_get(object,key); return value&&value->t==type?value:NULL;
 }
 
-static const char *serve_last_user(jval *root,const char **system){
-    jval *messages=serve_json_field(root,"messages",J_ARR); const char *user=NULL; *system=NULL;
-    if(!messages)return NULL;
-    for(int i=0;i<messages->len;i++){
-        jval *message=messages->kids[i];
-        jval *role=serve_json_field(message,"role",J_STR);
-        jval *content=serve_json_field(message,"content",J_STR);
-        if(!role||!content)continue;
-        if(!strcmp(role->str,"system") && !*system)*system=content->str;
-        else if(!strcmp(role->str,"user"))user=content->str;
+static char *serve_last_user(SamosaServeContext *ctx, jval *root, const char **system) {
+    jval *messages = serve_json_field(root, "messages", J_ARR);
+    char *user = NULL; *system = NULL;
+    if (!messages) return NULL;
+    for (int i = 0; i < messages->len; i++) {
+        jval *message = messages->kids[i];
+        jval *role = serve_json_field(message, "role", J_STR);
+        jval *content = json_get(message, "content");
+        if (!role || !content) continue;
+        if (!strcmp(role->str, "system") && !*system) {
+            if (content->t == J_STR) *system = content->str;
+        } else if (!strcmp(role->str, "user")) {
+            if (user) { free(user); user = NULL; }
+            if (content->t == J_STR) {
+                user = strdup(content->str);
+            } else if (content->t == J_ARR) {
+                // OpenAI Vision format
+                size_t user_cap = 1024, user_len = 0;
+                user = malloc(user_cap);
+                user[0] = '\0';
+                for (int j = 0; j < content->len; j++) {
+                    jval *part = content->kids[j];
+                    if (part->t != J_OBJ) continue;
+                    jval *type = serve_json_field(part, "type", J_STR);
+                    if (!type) continue;
+                    if (!strcmp(type->str, "text")) {
+                        jval *text = serve_json_field(part, "text", J_STR);
+                        if (text) {
+                            size_t tlen = strlen(text->str);
+                            if (user_len + tlen + 2 > user_cap) {
+                                user_cap = user_len + tlen + 1024;
+                                user = realloc(user, user_cap);
+                            }
+                            strcat(user, text->str);
+                            strcat(user, "\n");
+                            user_len += tlen + 1;
+                        }
+                    } else if (!strcmp(type->str, "image_url")) {
+                        jval *image_url = serve_json_field(part, "image_url", J_OBJ);
+                        if (image_url) {
+                            jval *url = serve_json_field(image_url, "url", J_STR);
+                            if (url) {
+                                if (ctx->model->vision_pixels) free(ctx->model->vision_pixels);
+                                ctx->model->vision_pixels = vision_load_base64(url->str, 
+                                    &ctx->model->vision_grid_t, 
+                                    &ctx->model->vision_grid_h, 
+                                    &ctx->model->vision_grid_w);
+                                if (ctx->model->vision_pixels) {
+                                    // Generate <|vision_start|><|image_pad|>...<|vision_end|>
+                                    int llm_h = ctx->model->vision_grid_h / MERGE_SIZE;
+                                    int llm_w = ctx->model->vision_grid_w / MERGE_SIZE;
+                                    int n_pads = ctx->model->vision_grid_t * llm_h * llm_w;
+                                    size_t inject_len = 16 + 14 * n_pads + 16 + 2;
+                                    if (user_len + inject_len > user_cap) {
+                                        user_cap = user_len + inject_len + 1024;
+                                        user = realloc(user, user_cap);
+                                    }
+                                    strcat(user, "<|vision_start|>");
+                                    for (int p = 0; p < n_pads; p++) {
+                                        strcat(user, "<|image_pad|>");
+                                    }
+                                    strcat(user, "<|vision_end|>\n");
+                                    user_len += inject_len - 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     return user;
 }
@@ -4524,7 +4709,7 @@ static int serve_send_stream_end(int fd,const GenStats *stats){
 }
 
 static int samosa_serve_chat(SamosaServeContext *ctx,int fd,jval *root){
-    const char *system=NULL,*user=serve_last_user(root,&system);
+    const char *system=NULL; char *user=serve_last_user(ctx,root,&system);
     if(!user)return samosa_http_json_error(fd,400,"invalid_messages",
         "A text user message is required.");
     jval *stream_value=json_get(root,"stream"); int stream=stream_value&&stream_value->t==J_BOOL&&stream_value->boolean;
@@ -4579,25 +4764,25 @@ static int samosa_serve_chat(SamosaServeContext *ctx,int fd,jval *root){
 
     int context_ok=serve_context_preflight(ctx,user,system,no_thinking,
                                             resume_session,max_tokens);
-    if(context_ok<0)return samosa_http_json_error(fd,409,"invalid_session",
-        "The saved conversation is invalid or incompatible with this model.");
-    if(!context_ok)return samosa_http_json_error(fd,400,"context_limit",
+    if(context_ok<0){ free(user); return samosa_http_json_error(fd,409,"invalid_session",
+        "The saved conversation is invalid or incompatible with this model."); }
+    if(!context_ok){ free(user); return samosa_http_json_error(fd,400,"context_limit",
         "This turn could exceed Samosa Chat's 24576-token total context limit. "
-        "Start a new chat, shorten the message, or request fewer output tokens.");
+        "Start a new chat, shorten the message, or request fewer output tokens."); }
 
     double wait_s=0; int admitted=serve_scheduler_acquire(&ctx->scheduler,&wait_s);
-    if(admitted==0)return samosa_http_json_error(fd,429,"queue_full","The inference queue is full.");
-    if(admitted<0)return samosa_http_json_error(fd,503,"shutting_down","Samosa is shutting down.");
+    if(admitted==0){ free(user); return samosa_http_json_error(fd,429,"queue_full","The inference queue is full."); }
+    if(admitted<0){ free(user); return samosa_http_json_error(fd,503,"shutting_down","Samosa is shutting down."); }
     /* A queued request for the same conversation may have created or replaced
      * the snapshot while this request waited. Refresh and revalidate while we
      * hold exclusive model admission, before allocation or response headers. */
     if(save_session)resume_session=!access(session_path,R_OK)?session_path:NULL;
     context_ok=serve_context_preflight(ctx,user,system,no_thinking,
                                        resume_session,max_tokens);
-    if(context_ok<0){serve_scheduler_release(&ctx->scheduler);
+    if(context_ok<0){serve_scheduler_release(&ctx->scheduler); free(user);
         return samosa_http_json_error(fd,409,"invalid_session",
             "The saved conversation header is invalid or incompatible with this model.");}
-    if(!context_ok){serve_scheduler_release(&ctx->scheduler);
+    if(!context_ok){serve_scheduler_release(&ctx->scheduler); free(user);
         return samosa_http_json_error(fd,400,"context_limit",
             "This turn could exceed Samosa Chat's 24576-token total context limit. "
             "Start a new chat, shorten the message, or request fewer output tokens.");}
@@ -4614,7 +4799,10 @@ static int samosa_serve_chat(SamosaServeContext *ctx,int fd,jval *root){
     if(sent && !result){ if(stream)serve_send_stream_end(fd,&stats); else serve_send_nonstream(fd,&sink,&stats); }
     pthread_mutex_lock(&ctx->stats_mu);ctx->last_stats=stats;ctx->has_last_stats=1;pthread_mutex_unlock(&ctx->stats_mu);
     free(sink.reasoning.data);free(sink.content.data);serve_scheduler_release(&ctx->scheduler);
-    (void)wait_s; return result?0:1;
+    (void)wait_s; 
+    free(user);
+    if (ctx->model->vision_pixels) { free(ctx->model->vision_pixels); ctx->model->vision_pixels = NULL; }
+    return result?0:1;
 }
 
 static int samosa_serve_handler(SamosaHttpServer *server,int fd,

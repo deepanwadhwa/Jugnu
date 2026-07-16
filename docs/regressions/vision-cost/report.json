@@ -1,0 +1,58 @@
+[
+  {
+    "resolution": "256x256",
+    "threads": 2,
+    "lm_tokens": 1152,
+    "vit_seconds": 0.30373096466064453,
+    "rss_delta_mb": 0.015625
+  },
+  {
+    "resolution": "512x512",
+    "threads": 2,
+    "lm_tokens": 1152,
+    "vit_seconds": 1.2409610748291016,
+    "rss_delta_mb": 4.53125
+  },
+  {
+    "resolution": "768x768",
+    "threads": 2,
+    "lm_tokens": 1152,
+    "vit_seconds": 3.4034812450408936,
+    "rss_delta_mb": 10.140625
+  },
+  {
+    "resolution": "1024x1024",
+    "threads": 2,
+    "lm_tokens": 1152,
+    "vit_seconds": 7.511595726013184,
+    "rss_delta_mb": 18.015625
+  },
+  {
+    "resolution": "256x256",
+    "threads": 4,
+    "lm_tokens": 1152,
+    "vit_seconds": 0.2675011157989502,
+    "rss_delta_mb": 0.0
+  },
+  {
+    "resolution": "512x512",
+    "threads": 4,
+    "lm_tokens": 1152,
+    "vit_seconds": 1.0792171955108643,
+    "rss_delta_mb": 0.0625
+  },
+  {
+    "resolution": "768x768",
+    "threads": 4,
+    "lm_tokens": 1152,
+    "vit_seconds": 2.9110989570617676,
+    "rss_delta_mb": 0.0
+  },
+  {
+    "resolution": "1024x1024",
+    "threads": 4,
+    "lm_tokens": 1152,
+    "vit_seconds": 6.621803045272827,
+    "rss_delta_mb": 0.046875
+  }
+]

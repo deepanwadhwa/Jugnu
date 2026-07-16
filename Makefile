@@ -21,12 +21,12 @@ endif
 NUMPY_PYTHON := $(shell python3 -c 'import numpy' >/dev/null 2>&1 && echo python3 || { [ -x ../.venv/bin/python ] && echo ../.venv/bin/python; })
 ENGINE_HEADERS := $(wildcard src/*.h)
 
-samosa-engine: src/qwen36b.c src/expert_cache.c $(ENGINE_HEADERS)
-	$(CC) -O3 -Wno-unused-function -pthread src/qwen36b.c src/expert_cache.c -o qwen36b -lm
+samosa-engine: src/qwen36b.c src/expert_cache.c src/vision.c $(ENGINE_HEADERS)
+	$(CC) -O3 -Wno-unused-function -pthread src/qwen36b.c src/expert_cache.c src/vision.c -o qwen36b -lm
 
-omp: src/qwen36b.c src/expert_cache.c $(ENGINE_HEADERS)
+omp: src/qwen36b.c src/expert_cache.c src/vision.c $(ENGINE_HEADERS)
 	$(CC) -O3 -Wno-unused-function -pthread $(OMP_CFLAGS) \
-	  src/qwen36b.c src/expert_cache.c -o qwen36b -lm $(OMP_LDFLAGS)
+	  src/qwen36b.c src/expert_cache.c src/vision.c -o qwen36b -lm $(OMP_LDFLAGS)
 
 test: tests/test_expert_cache.c tests/test_kv_cache.c tests/test_repetition_guard.c tests/test_thinking_budget.c tests/test_groupwise_q4.c tests/test_samosa_serve.c tests/test_samosa_wrapper.sh tests/test_atomic_install.sh tests/test_install_path.sh tests/test_thinking_output.py tests/test_regression_gate.py tests/test_openrouter_control.py tests/test_route_analysis.py tests/test_converter_quant.py
 	$(CC) -O1 -Isrc tests/test_expert_cache.c src/expert_cache.c -o test_expert_cache && ./test_expert_cache
