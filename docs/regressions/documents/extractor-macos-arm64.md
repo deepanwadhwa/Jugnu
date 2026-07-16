@@ -30,8 +30,8 @@ samosa-extract: PASS
 ```
 
 The test covers successful text extraction, non-regular input rejection,
-malformed input, symlink rejection, and the configurable downward-only input
-size limit.
+malformed input, symlink rejection, the configurable downward-only input-size
+limit, and successful execution under `sandbox-exec` with `(deny network*)`.
 
 The four user-provided JSS PDFs were evaluated locally but are not committed:
 

@@ -40,6 +40,11 @@ It also sets a 15-second CPU limit and a 20-second last-resort alarm. Its
 process contains no networking code. The parent watchdog is therefore the
 required memory backstop on macOS until a portable OS sandbox adapter lands.
 
+The extractor fixture is also run under macOS's `sandbox-exec` with
+`(deny network*)` when that tool is present. That verifies that the supported
+extraction path needs no network grant; production spawning must still apply
+the equivalent OS policy rather than relying on a development test.
+
 The spawning HTTP/document controller must still set and enforce its own
 wall-clock timeout, kill the process group on expiry, and preserve this JSON
 boundary. Resource limits protect the model process only because extraction is

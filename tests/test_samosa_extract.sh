@@ -15,6 +15,14 @@ printf '%s' "$out" | grep -F 'Hello PDFium' >/dev/null
 printf '%s' "$out" | grep -F '"text_layer":true' >/dev/null
 printf '%s' "$out" | grep -F '"index":1' >/dev/null
 
+# macOS's sandbox-exec checks the controller's required no-network policy. The
+# Linux sandbox adapter is a separate packaging task, so its absence is fine.
+if command -v sandbox-exec >/dev/null 2>&1; then
+  network_out=$(sandbox-exec -p '(version 1) (allow default) (deny network*)' \
+    "$EXTRACTOR" --json "$FIXTURE")
+  printf '%s' "$network_out" | grep -F '"ok":true' >/dev/null
+fi
+
 error_file=$(mktemp "${TMPDIR:-/tmp}/samosa-extract-error.XXXXXX")
 bad_file=$(mktemp "${TMPDIR:-/tmp}/samosa-extract-bad.XXXXXX")
 link_file="$bad_file.link"
