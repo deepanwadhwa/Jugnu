@@ -1,0 +1,1626 @@
+{
+  "date": "2026-07-15T20:10:15.830872",
+  "shipped_path": "/Users/deepanwadhwa/.samosa/current/model/resident.safetensors",
+  "reference_repo": "Qwen/Qwen3.6-35B-A3B",
+  "group_size": 32,
+  "per_tensor_int8": [
+    {
+      "tensor_name": "model.visual.blocks.0.attn.proj.weight",
+      "cosine_similarity": 1.0000054573950816,
+      "max_abs_relative_error": 0.9999914765357971,
+      "max_abs_error": 0.0011836974881589413
+    },
+    {
+      "tensor_name": "model.visual.blocks.0.attn.qkv.weight",
+      "cosine_similarity": 1.0013434013660691,
+      "max_abs_relative_error": 0.9999956488609314,
+      "max_abs_error": 0.002288818359375
+    },
+    {
+      "tensor_name": "model.visual.blocks.0.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.000616401611529,
+      "max_abs_relative_error": 0.9999933838844299,
+      "max_abs_error": 0.0015121819451451302
+    },
+    {
+      "tensor_name": "model.visual.blocks.0.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0007209844188114,
+      "max_abs_relative_error": 0.9999886751174927,
+      "max_abs_error": 0.0008871722966432571
+    },
+    {
+      "tensor_name": "model.visual.blocks.1.attn.proj.weight",
+      "cosine_similarity": 0.9999488926611958,
+      "max_abs_relative_error": 0.999995231628418,
+      "max_abs_error": 0.002105712890625
+    },
+    {
+      "tensor_name": "model.visual.blocks.1.attn.qkv.weight",
+      "cosine_similarity": 1.0006357336823488,
+      "max_abs_relative_error": 0.9999942183494568,
+      "max_abs_error": 0.0017512757331132889
+    },
+    {
+      "tensor_name": "model.visual.blocks.1.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0006401864930852,
+      "max_abs_relative_error": 0.9999926090240479,
+      "max_abs_error": 0.0013607963919639587
+    },
+    {
+      "tensor_name": "model.visual.blocks.1.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0005375477594458,
+      "max_abs_relative_error": 0.999994695186615,
+      "max_abs_error": 0.0018988782539963722
+    },
+    {
+      "tensor_name": "model.visual.blocks.10.attn.proj.weight",
+      "cosine_similarity": 0.9999622757248836,
+      "max_abs_relative_error": 0.9999849796295166,
+      "max_abs_error": 0.0006944546476006508
+    },
+    {
+      "tensor_name": "model.visual.blocks.10.attn.qkv.weight",
+      "cosine_similarity": 1.0003140704365916,
+      "max_abs_relative_error": 0.9999876618385315,
+      "max_abs_error": 0.0008141230791807175
+    },
+    {
+      "tensor_name": "model.visual.blocks.10.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0005288080560149,
+      "max_abs_relative_error": 0.9999920129776001,
+      "max_abs_error": 0.0012514609843492508
+    },
+    {
+      "tensor_name": "model.visual.blocks.10.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.000455360739422,
+      "max_abs_relative_error": 0.9999919533729553,
+      "max_abs_error": 0.001244372222572565
+    },
+    {
+      "tensor_name": "model.visual.blocks.11.attn.proj.weight",
+      "cosine_similarity": 0.9999554143001984,
+      "max_abs_relative_error": 0.9999778270721436,
+      "max_abs_error": 0.00045548100024461746
+    },
+    {
+      "tensor_name": "model.visual.blocks.11.attn.qkv.weight",
+      "cosine_similarity": 1.0002624350599973,
+      "max_abs_relative_error": 0.9999851584434509,
+      "max_abs_error": 0.0006836419925093651
+    },
+    {
+      "tensor_name": "model.visual.blocks.11.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.000508376212487,
+      "max_abs_relative_error": 0.9999876618385315,
+      "max_abs_error": 0.0008141230791807175
+    },
+    {
+      "tensor_name": "model.visual.blocks.11.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.000406234063528,
+      "max_abs_relative_error": 0.9999905824661255,
+      "max_abs_error": 0.00106048583984375
+    },
+    {
+      "tensor_name": "model.visual.blocks.12.attn.proj.weight",
+      "cosine_similarity": 0.9999471718361653,
+      "max_abs_relative_error": 0.999987006187439,
+      "max_abs_error": 0.0007804781198501587
+    },
+    {
+      "tensor_name": "model.visual.blocks.12.attn.qkv.weight",
+      "cosine_similarity": 1.0002759647392543,
+      "max_abs_relative_error": 0.9999876022338867,
+      "max_abs_error": 0.0008141230791807175
+    },
+    {
+      "tensor_name": "model.visual.blocks.12.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.000492521152096,
+      "max_abs_relative_error": 0.999987781047821,
+      "max_abs_error": 0.0008208509534597397
+    },
+    {
+      "tensor_name": "model.visual.blocks.12.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0003528550259988,
+      "max_abs_relative_error": 0.9999915957450867,
+      "max_abs_error": 0.001190185546875
+    },
+    {
+      "tensor_name": "model.visual.blocks.13.attn.proj.weight",
+      "cosine_similarity": 0.9999672191883818,
+      "max_abs_relative_error": 0.9999793171882629,
+      "max_abs_error": 0.0004998147487640381
+    },
+    {
+      "tensor_name": "model.visual.blocks.13.attn.qkv.weight",
+      "cosine_similarity": 1.000298132037181,
+      "max_abs_relative_error": 0.9999873638153076,
+      "max_abs_error": 0.0008028289303183556
+    },
+    {
+      "tensor_name": "model.visual.blocks.13.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0004694160834302,
+      "max_abs_relative_error": 0.9999867677688599,
+      "max_abs_error": 0.0007598157972097397
+    },
+    {
+      "tensor_name": "model.visual.blocks.13.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0003885458866237,
+      "max_abs_relative_error": 0.9999931454658508,
+      "max_abs_error": 0.0014649038203060627
+    },
+    {
+      "tensor_name": "model.visual.blocks.14.attn.proj.weight",
+      "cosine_similarity": 0.9999492723763478,
+      "max_abs_relative_error": 0.99998539686203,
+      "max_abs_error": 0.0006870059296488762
+    },
+    {
+      "tensor_name": "model.visual.blocks.14.attn.qkv.weight",
+      "cosine_similarity": 1.0002902884257125,
+      "max_abs_relative_error": 0.9999861121177673,
+      "max_abs_error": 0.0007449174299836159
+    },
+    {
+      "tensor_name": "model.visual.blocks.14.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0004560162727916,
+      "max_abs_relative_error": 0.999986469745636,
+      "max_abs_error": 0.0007449174299836159
+    },
+    {
+      "tensor_name": "model.visual.blocks.14.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0004286392693278,
+      "max_abs_relative_error": 0.9999922513961792,
+      "max_abs_error": 0.0012915902771055698
+    },
+    {
+      "tensor_name": "model.visual.blocks.15.attn.proj.weight",
+      "cosine_similarity": 0.9999519677110068,
+      "max_abs_relative_error": 0.9999828338623047,
+      "max_abs_error": 0.000583648681640625
+    },
+    {
+      "tensor_name": "model.visual.blocks.15.attn.qkv.weight",
+      "cosine_similarity": 1.000266466441505,
+      "max_abs_relative_error": 0.9999821186065674,
+      "max_abs_error": 0.0005827173590660095
+    },
+    {
+      "tensor_name": "model.visual.blocks.15.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0003970862866298,
+      "max_abs_relative_error": 0.9999855160713196,
+      "max_abs_error": 0.0007372274994850159
+    },
+    {
+      "tensor_name": "model.visual.blocks.15.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0003883885500704,
+      "max_abs_relative_error": 0.9999912977218628,
+      "max_abs_error": 0.001152699813246727
+    },
+    {
+      "tensor_name": "model.visual.blocks.16.attn.proj.weight",
+      "cosine_similarity": 0.999946043453297,
+      "max_abs_relative_error": 0.9999825954437256,
+      "max_abs_error": 0.0005834382027387619
+    },
+    {
+      "tensor_name": "model.visual.blocks.16.attn.qkv.weight",
+      "cosine_similarity": 1.0002713725544672,
+      "max_abs_relative_error": 0.9999805688858032,
+      "max_abs_error": 0.0005300929769873619
+    },
+    {
+      "tensor_name": "model.visual.blocks.16.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.000432228845305,
+      "max_abs_relative_error": 0.9999872446060181,
+      "max_abs_error": 0.0008028289303183556
+    },
+    {
+      "tensor_name": "model.visual.blocks.16.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.00041270927407,
+      "max_abs_relative_error": 0.9999852776527405,
+      "max_abs_error": 0.0006803981959819794
+    },
+    {
+      "tensor_name": "model.visual.blocks.17.attn.proj.weight",
+      "cosine_similarity": 0.9999683126588398,
+      "max_abs_relative_error": 0.9999730587005615,
+      "max_abs_error": 0.0003815898671746254
+    },
+    {
+      "tensor_name": "model.visual.blocks.17.attn.qkv.weight",
+      "cosine_similarity": 1.0002381254638204,
+      "max_abs_relative_error": 0.9999837875366211,
+      "max_abs_error": 0.0006221861112862825
+    },
+    {
+      "tensor_name": "model.visual.blocks.17.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0004637438411081,
+      "max_abs_relative_error": 0.9999850988388062,
+      "max_abs_error": 0.0006910909432917833
+    },
+    {
+      "tensor_name": "model.visual.blocks.17.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0004695624293312,
+      "max_abs_relative_error": 0.9999938011169434,
+      "max_abs_error": 0.0016176719218492508
+    },
+    {
+      "tensor_name": "model.visual.blocks.18.attn.proj.weight",
+      "cosine_similarity": 0.999969413818826,
+      "max_abs_relative_error": 0.9999811053276062,
+      "max_abs_error": 0.0005305707454681396
+    },
+    {
+      "tensor_name": "model.visual.blocks.18.attn.qkv.weight",
+      "cosine_similarity": 1.0002765086617134,
+      "max_abs_relative_error": 0.9999830722808838,
+      "max_abs_error": 0.0005988171324133873
+    },
+    {
+      "tensor_name": "model.visual.blocks.18.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0004464998958376,
+      "max_abs_relative_error": 0.9999831914901733,
+      "max_abs_error": 0.0005950927734375
+    },
+    {
+      "tensor_name": "model.visual.blocks.18.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0004575822862039,
+      "max_abs_relative_error": 0.9999901056289673,
+      "max_abs_error": 0.00101470947265625
+    },
+    {
+      "tensor_name": "model.visual.blocks.19.attn.proj.weight",
+      "cosine_similarity": 0.9999511926558234,
+      "max_abs_relative_error": 0.9999759197235107,
+      "max_abs_error": 0.00042442261474207044
+    },
+    {
+      "tensor_name": "model.visual.blocks.19.attn.qkv.weight",
+      "cosine_similarity": 1.0002512442460159,
+      "max_abs_relative_error": 0.9999828338623047,
+      "max_abs_error": 0.0005918487440794706
+    },
+    {
+      "tensor_name": "model.visual.blocks.19.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0004845407646503,
+      "max_abs_relative_error": 0.9999834895133972,
+      "max_abs_error": 0.0006137154996395111
+    },
+    {
+      "tensor_name": "model.visual.blocks.19.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.000473982642958,
+      "max_abs_relative_error": 0.9999884963035583,
+      "max_abs_error": 0.000875818426720798
+    },
+    {
+      "tensor_name": "model.visual.blocks.2.attn.proj.weight",
+      "cosine_similarity": 0.9999387467770723,
+      "max_abs_relative_error": 0.9999911189079285,
+      "max_abs_error": 0.001129150390625
+    },
+    {
+      "tensor_name": "model.visual.blocks.2.attn.qkv.weight",
+      "cosine_similarity": 1.0006482114194892,
+      "max_abs_relative_error": 0.9999905824661255,
+      "max_abs_error": 0.00106048583984375
+    },
+    {
+      "tensor_name": "model.visual.blocks.2.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0005889090559865,
+      "max_abs_relative_error": 0.9999907612800598,
+      "max_abs_error": 0.0010887803509831429
+    },
+    {
+      "tensor_name": "model.visual.blocks.2.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0005725951795654,
+      "max_abs_relative_error": 0.9999979734420776,
+      "max_abs_error": 0.0048828125
+    },
+    {
+      "tensor_name": "model.visual.blocks.20.attn.proj.weight",
+      "cosine_similarity": 0.999963940481386,
+      "max_abs_relative_error": 0.9999791979789734,
+      "max_abs_error": 0.00048634386621415615
+    },
+    {
+      "tensor_name": "model.visual.blocks.20.attn.qkv.weight",
+      "cosine_similarity": 1.0002517165677602,
+      "max_abs_relative_error": 0.9999811053276062,
+      "max_abs_error": 0.000530242919921875
+    },
+    {
+      "tensor_name": "model.visual.blocks.20.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.000502169515559,
+      "max_abs_relative_error": 0.999988853931427,
+      "max_abs_error": 0.0009109620004892349
+    },
+    {
+      "tensor_name": "model.visual.blocks.20.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0004547802761954,
+      "max_abs_relative_error": 0.9999864101409912,
+      "max_abs_error": 0.0007372274994850159
+    },
+    {
+      "tensor_name": "model.visual.blocks.21.attn.proj.weight",
+      "cosine_similarity": 0.9999440563680193,
+      "max_abs_relative_error": 0.999978244304657,
+      "max_abs_error": 0.00046305032446980476
+    },
+    {
+      "tensor_name": "model.visual.blocks.21.attn.qkv.weight",
+      "cosine_similarity": 1.0002693318466966,
+      "max_abs_relative_error": 0.9999870657920837,
+      "max_abs_error": 0.0007754350081086159
+    },
+    {
+      "tensor_name": "model.visual.blocks.21.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0005192222512962,
+      "max_abs_relative_error": 0.9999822378158569,
+      "max_abs_error": 0.0005645751953125
+    },
+    {
+      "tensor_name": "model.visual.blocks.21.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0005068680296125,
+      "max_abs_relative_error": 0.9999781250953674,
+      "max_abs_error": 0.0004611578769981861
+    },
+    {
+      "tensor_name": "model.visual.blocks.22.attn.proj.weight",
+      "cosine_similarity": 0.9999585827803046,
+      "max_abs_relative_error": 0.9999794363975525,
+      "max_abs_error": 0.0004998147487640381
+    },
+    {
+      "tensor_name": "model.visual.blocks.22.attn.qkv.weight",
+      "cosine_similarity": 1.000268499904009,
+      "max_abs_relative_error": 0.9999858736991882,
+      "max_abs_error": 0.0007285771425813437
+    },
+    {
+      "tensor_name": "model.visual.blocks.22.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.000515653853254,
+      "max_abs_relative_error": 0.9999839067459106,
+      "max_abs_error": 0.0006221861112862825
+    },
+    {
+      "tensor_name": "model.visual.blocks.22.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0004560365059632,
+      "max_abs_relative_error": 0.9999833703041077,
+      "max_abs_error": 0.0006228461861610413
+    },
+    {
+      "tensor_name": "model.visual.blocks.23.attn.proj.weight",
+      "cosine_similarity": 0.9999591651633543,
+      "max_abs_relative_error": 0.9999808669090271,
+      "max_abs_error": 0.0005416264757514
+    },
+    {
+      "tensor_name": "model.visual.blocks.23.attn.qkv.weight",
+      "cosine_similarity": 1.000270252181954,
+      "max_abs_relative_error": 0.9999880194664001,
+      "max_abs_error": 0.0008488452294841409
+    },
+    {
+      "tensor_name": "model.visual.blocks.23.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0005165668464255,
+      "max_abs_relative_error": 0.9999837875366211,
+      "max_abs_error": 0.0006218850612640381
+    },
+    {
+      "tensor_name": "model.visual.blocks.23.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0004827611136067,
+      "max_abs_relative_error": 0.9999855756759644,
+      "max_abs_error": 0.0006944546476006508
+    },
+    {
+      "tensor_name": "model.visual.blocks.24.attn.proj.weight",
+      "cosine_similarity": 0.9999663261840309,
+      "max_abs_relative_error": 0.9999855160713196,
+      "max_abs_error": 0.0007497221231460571
+    },
+    {
+      "tensor_name": "model.visual.blocks.24.attn.qkv.weight",
+      "cosine_similarity": 1.0002137639137145,
+      "max_abs_relative_error": 0.9999861717224121,
+      "max_abs_error": 0.0007516443729400635
+    },
+    {
+      "tensor_name": "model.visual.blocks.24.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0005496038772068,
+      "max_abs_relative_error": 0.9999814033508301,
+      "max_abs_error": 0.000537872314453125
+    },
+    {
+      "tensor_name": "model.visual.blocks.24.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.000526197878991,
+      "max_abs_relative_error": 0.9999845623970032,
+      "max_abs_error": 0.0006644180975854397
+    },
+    {
+      "tensor_name": "model.visual.blocks.25.attn.proj.weight",
+      "cosine_similarity": 0.999946847310806,
+      "max_abs_relative_error": 0.9999879598617554,
+      "max_abs_error": 0.0008496865630149841
+    },
+    {
+      "tensor_name": "model.visual.blocks.25.attn.qkv.weight",
+      "cosine_similarity": 1.0003235030216215,
+      "max_abs_relative_error": 0.9999869465827942,
+      "max_abs_error": 0.0007797600701451302
+    },
+    {
+      "tensor_name": "model.visual.blocks.25.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0005295717099478,
+      "max_abs_relative_error": 0.9999848008155823,
+      "max_abs_error": 0.0006680227816104889
+    },
+    {
+      "tensor_name": "model.visual.blocks.25.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0005239910158878,
+      "max_abs_relative_error": 0.9999902844429016,
+      "max_abs_error": 0.00102996826171875
+    },
+    {
+      "tensor_name": "model.visual.blocks.26.attn.proj.weight",
+      "cosine_similarity": 0.9999664990504948,
+      "max_abs_relative_error": 0.9999935030937195,
+      "max_abs_error": 0.0015897974371910095
+    },
+    {
+      "tensor_name": "model.visual.blocks.26.attn.qkv.weight",
+      "cosine_similarity": 1.0001670587008238,
+      "max_abs_relative_error": 0.9999825954437256,
+      "max_abs_error": 0.000588245689868927
+    },
+    {
+      "tensor_name": "model.visual.blocks.26.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0005366606443573,
+      "max_abs_relative_error": 0.9999901056289673,
+      "max_abs_error": 0.0010611414909362793
+    },
+    {
+      "tensor_name": "model.visual.blocks.26.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0005497300106605,
+      "max_abs_relative_error": 0.9999982714653015,
+      "max_abs_error": 0.005690217018127441
+    },
+    {
+      "tensor_name": "model.visual.blocks.3.attn.proj.weight",
+      "cosine_similarity": 0.9999560201209761,
+      "max_abs_relative_error": 0.9999879598617554,
+      "max_abs_error": 0.0008409455185756087
+    },
+    {
+      "tensor_name": "model.visual.blocks.3.attn.qkv.weight",
+      "cosine_similarity": 1.0005986855854898,
+      "max_abs_relative_error": 0.9999881386756897,
+      "max_abs_error": 0.0008525698212906718
+    },
+    {
+      "tensor_name": "model.visual.blocks.3.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0004835692834475,
+      "max_abs_relative_error": 0.9999921321868896,
+      "max_abs_error": 0.0012915902771055698
+    },
+    {
+      "tensor_name": "model.visual.blocks.3.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0007144907649959,
+      "max_abs_relative_error": 0.9999944567680359,
+      "max_abs_error": 0.0018058835994452238
+    },
+    {
+      "tensor_name": "model.visual.blocks.4.attn.proj.weight",
+      "cosine_similarity": 0.999964095135203,
+      "max_abs_relative_error": 0.9999839067459106,
+      "max_abs_error": 0.0006290944293141365
+    },
+    {
+      "tensor_name": "model.visual.blocks.4.attn.qkv.weight",
+      "cosine_similarity": 1.0006434849922856,
+      "max_abs_relative_error": 0.9999917149543762,
+      "max_abs_error": 0.001212893519550562
+    },
+    {
+      "tensor_name": "model.visual.blocks.4.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0004861484902856,
+      "max_abs_relative_error": 0.9999929666519165,
+      "max_abs_error": 0.0014203889295458794
+    },
+    {
+      "tensor_name": "model.visual.blocks.4.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0006716532394173,
+      "max_abs_relative_error": 0.9999924302101135,
+      "max_abs_error": 0.0013221080880612135
+    },
+    {
+      "tensor_name": "model.visual.blocks.5.attn.proj.weight",
+      "cosine_similarity": 0.9999472234625677,
+      "max_abs_relative_error": 0.9999868273735046,
+      "max_abs_error": 0.0007612556219100952
+    },
+    {
+      "tensor_name": "model.visual.blocks.5.attn.qkv.weight",
+      "cosine_similarity": 1.0005333599596091,
+      "max_abs_relative_error": 0.9999868869781494,
+      "max_abs_error": 0.0007684659212827682
+    },
+    {
+      "tensor_name": "model.visual.blocks.5.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0005150331692447,
+      "max_abs_relative_error": 0.9999895691871643,
+      "max_abs_error": 0.0009844321757555008
+    },
+    {
+      "tensor_name": "model.visual.blocks.5.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0006048813408888,
+      "max_abs_relative_error": 0.9999916553497314,
+      "max_abs_error": 0.00119781494140625
+    },
+    {
+      "tensor_name": "model.visual.blocks.6.attn.proj.weight",
+      "cosine_similarity": 0.9999591108577752,
+      "max_abs_relative_error": 0.9999849796295166,
+      "max_abs_error": 0.0006761923432350159
+    },
+    {
+      "tensor_name": "model.visual.blocks.6.attn.qkv.weight",
+      "cosine_similarity": 1.0005020038263988,
+      "max_abs_relative_error": 0.9999902248382568,
+      "max_abs_error": 0.0010275058448314667
+    },
+    {
+      "tensor_name": "model.visual.blocks.6.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0004976124284437,
+      "max_abs_relative_error": 0.9999939799308777,
+      "max_abs_error": 0.0016570803709328175
+    },
+    {
+      "tensor_name": "model.visual.blocks.6.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.000494090496313,
+      "max_abs_relative_error": 0.9999939203262329,
+      "max_abs_error": 0.0016431433614343405
+    },
+    {
+      "tensor_name": "model.visual.blocks.7.attn.proj.weight",
+      "cosine_similarity": 0.9999539210834592,
+      "max_abs_relative_error": 0.9999846816062927,
+      "max_abs_error": 0.000738188624382019
+    },
+    {
+      "tensor_name": "model.visual.blocks.7.attn.qkv.weight",
+      "cosine_similarity": 1.0004377123083725,
+      "max_abs_relative_error": 0.9999884963035583,
+      "max_abs_error": 0.0008874427294358611
+    },
+    {
+      "tensor_name": "model.visual.blocks.7.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0004801438737412,
+      "max_abs_relative_error": 0.9999904036521912,
+      "max_abs_error": 0.0010601859539747238
+    },
+    {
+      "tensor_name": "model.visual.blocks.7.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0003890365501038,
+      "max_abs_relative_error": 0.999989926815033,
+      "max_abs_error": 0.0009918212890625
+    },
+    {
+      "tensor_name": "model.visual.blocks.8.attn.proj.weight",
+      "cosine_similarity": 0.9999392342495316,
+      "max_abs_relative_error": 0.9999904036521912,
+      "max_abs_error": 0.0011140108108520508
+    },
+    {
+      "tensor_name": "model.visual.blocks.8.attn.qkv.weight",
+      "cosine_similarity": 1.0004373139775762,
+      "max_abs_relative_error": 0.9999861717224121,
+      "max_abs_error": 0.0007365066558122635
+    },
+    {
+      "tensor_name": "model.visual.blocks.8.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0004888709921178,
+      "max_abs_relative_error": 0.9999896287918091,
+      "max_abs_error": 0.0009775236248970032
+    },
+    {
+      "tensor_name": "model.visual.blocks.8.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.0003854839827746,
+      "max_abs_relative_error": 0.9999911785125732,
+      "max_abs_error": 0.00113677978515625
+    },
+    {
+      "tensor_name": "model.visual.blocks.9.attn.proj.weight",
+      "cosine_similarity": 0.9999720387571851,
+      "max_abs_relative_error": 0.9999799728393555,
+      "max_abs_error": 0.000499725341796875
+    },
+    {
+      "tensor_name": "model.visual.blocks.9.attn.qkv.weight",
+      "cosine_similarity": 1.0004648185434293,
+      "max_abs_relative_error": 0.9999867677688599,
+      "max_abs_error": 0.0007684659212827682
+    },
+    {
+      "tensor_name": "model.visual.blocks.9.mlp.linear_fc1.weight",
+      "cosine_similarity": 1.0005429367607677,
+      "max_abs_relative_error": 0.9999921321868896,
+      "max_abs_error": 0.0013687163591384888
+    },
+    {
+      "tensor_name": "model.visual.blocks.9.mlp.linear_fc2.weight",
+      "cosine_similarity": 1.000468338342195,
+      "max_abs_relative_error": 0.9999958872795105,
+      "max_abs_error": 0.0024279505014419556
+    },
+    {
+      "tensor_name": "model.visual.merger.linear_fc1.weight",
+      "cosine_similarity": 1.0063506943058766,
+      "max_abs_relative_error": 0.9999871253967285,
+      "max_abs_error": 0.0007797600701451302
+    },
+    {
+      "tensor_name": "model.visual.merger.linear_fc2.weight",
+      "cosine_similarity": 1.0013451766550845,
+      "max_abs_relative_error": 0.9999897480010986,
+      "max_abs_error": 0.0009784847497940063
+    },
+    {
+      "tensor_name": "model.visual.pos_embed.weight",
+      "cosine_similarity": 1.0002737870299903,
+      "max_abs_relative_error": 0.9999996423721313,
+      "max_abs_error": 0.025775104761123657
+    }
+  ],
+  "per_tensor_q4": [
+    {
+      "tensor_name": "model.visual.blocks.0.attn.proj.weight",
+      "cosine_similarity": 0.9947733671266389,
+      "max_abs_relative_error": 0.999999463558197,
+      "max_abs_error": 0.020647317171096802
+    },
+    {
+      "tensor_name": "model.visual.blocks.0.attn.qkv.weight",
+      "cosine_similarity": 0.991779293324887,
+      "max_abs_relative_error": 0.9999997019767761,
+      "max_abs_error": 0.035400390625
+    },
+    {
+      "tensor_name": "model.visual.blocks.0.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.99371135188539,
+      "max_abs_relative_error": 0.9999995827674866,
+      "max_abs_error": 0.0228794626891613
+    },
+    {
+      "tensor_name": "model.visual.blocks.0.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.1.attn.proj.weight",
+      "cosine_similarity": 0.9946497820666684,
+      "max_abs_relative_error": 0.9999997019767761,
+      "max_abs_error": 0.036865234375
+    },
+    {
+      "tensor_name": "model.visual.blocks.1.attn.qkv.weight",
+      "cosine_similarity": 0.9939454533081489,
+      "max_abs_relative_error": 0.9999997019767761,
+      "max_abs_error": 0.03076171875
+    },
+    {
+      "tensor_name": "model.visual.blocks.1.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9939034403217658,
+      "max_abs_relative_error": 0.9999996423721313,
+      "max_abs_error": 0.0244838185608387
+    },
+    {
+      "tensor_name": "model.visual.blocks.1.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.10.attn.proj.weight",
+      "cosine_similarity": 0.9951050839723847,
+      "max_abs_relative_error": 0.9999991655349731,
+      "max_abs_error": 0.01239013671875
+    },
+    {
+      "tensor_name": "model.visual.blocks.10.attn.qkv.weight",
+      "cosine_similarity": 0.9950188567044792,
+      "max_abs_relative_error": 0.9999992847442627,
+      "max_abs_error": 0.0147705078125
+    },
+    {
+      "tensor_name": "model.visual.blocks.10.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9951165898053184,
+      "max_abs_relative_error": 0.9999994039535522,
+      "max_abs_error": 0.0163748599588871
+    },
+    {
+      "tensor_name": "model.visual.blocks.10.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.11.attn.proj.weight",
+      "cosine_similarity": 0.9951569602986322,
+      "max_abs_relative_error": 0.9999987483024597,
+      "max_abs_error": 0.0078125
+    },
+    {
+      "tensor_name": "model.visual.blocks.11.attn.qkv.weight",
+      "cosine_similarity": 0.9950552381453127,
+      "max_abs_relative_error": 0.9999991655349731,
+      "max_abs_error": 0.0123116634786129
+    },
+    {
+      "tensor_name": "model.visual.blocks.11.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9951424860402212,
+      "max_abs_relative_error": 0.9999992847442627,
+      "max_abs_error": 0.0145263671875
+    },
+    {
+      "tensor_name": "model.visual.blocks.11.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.12.attn.proj.weight",
+      "cosine_similarity": 0.995172575647558,
+      "max_abs_relative_error": 0.9999992251396179,
+      "max_abs_error": 0.01416015625
+    },
+    {
+      "tensor_name": "model.visual.blocks.12.attn.qkv.weight",
+      "cosine_similarity": 0.9951331898321121,
+      "max_abs_relative_error": 0.9999992847442627,
+      "max_abs_error": 0.01470947265625
+    },
+    {
+      "tensor_name": "model.visual.blocks.12.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9951264653086276,
+      "max_abs_relative_error": 0.9999992847442627,
+      "max_abs_error": 0.01410784013569355
+    },
+    {
+      "tensor_name": "model.visual.blocks.12.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.13.attn.proj.weight",
+      "cosine_similarity": 0.995169000049035,
+      "max_abs_relative_error": 0.9999987483024597,
+      "max_abs_error": 0.0086844302713871
+    },
+    {
+      "tensor_name": "model.visual.blocks.13.attn.qkv.weight",
+      "cosine_similarity": 0.9952080964693454,
+      "max_abs_relative_error": 0.9999992847442627,
+      "max_abs_error": 0.01397705078125
+    },
+    {
+      "tensor_name": "model.visual.blocks.13.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9951415220057376,
+      "max_abs_relative_error": 0.9999992251396179,
+      "max_abs_error": 0.01334054209291935
+    },
+    {
+      "tensor_name": "model.visual.blocks.13.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.14.attn.proj.weight",
+      "cosine_similarity": 0.9951674744680212,
+      "max_abs_relative_error": 0.9999991059303284,
+      "max_abs_error": 0.01213727705180645
+    },
+    {
+      "tensor_name": "model.visual.blocks.14.attn.qkv.weight",
+      "cosine_similarity": 0.9952008408543256,
+      "max_abs_relative_error": 0.9999992251396179,
+      "max_abs_error": 0.0133056640625
+    },
+    {
+      "tensor_name": "model.visual.blocks.14.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9952051059628737,
+      "max_abs_relative_error": 0.9999992251396179,
+      "max_abs_error": 0.01348876953125
+    },
+    {
+      "tensor_name": "model.visual.blocks.14.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.15.attn.proj.weight",
+      "cosine_similarity": 0.9951966704241224,
+      "max_abs_relative_error": 0.9999989867210388,
+      "max_abs_error": 0.010009765625
+    },
+    {
+      "tensor_name": "model.visual.blocks.15.attn.qkv.weight",
+      "cosine_similarity": 0.9952318743019899,
+      "max_abs_relative_error": 0.9999989867210388,
+      "max_abs_error": 0.01031494140625
+    },
+    {
+      "tensor_name": "model.visual.blocks.15.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9952880524839871,
+      "max_abs_relative_error": 0.9999992251396179,
+      "max_abs_error": 0.01293073408305645
+    },
+    {
+      "tensor_name": "model.visual.blocks.15.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.16.attn.proj.weight",
+      "cosine_similarity": 0.9951904927832989,
+      "max_abs_relative_error": 0.9999989867210388,
+      "max_abs_error": 0.01025390625
+    },
+    {
+      "tensor_name": "model.visual.blocks.16.attn.qkv.weight",
+      "cosine_similarity": 0.9952192851319086,
+      "max_abs_relative_error": 0.9999988675117493,
+      "max_abs_error": 0.00948660634458065
+    },
+    {
+      "tensor_name": "model.visual.blocks.16.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9951709463057173,
+      "max_abs_relative_error": 0.9999992847442627,
+      "max_abs_error": 0.0145438052713871
+    },
+    {
+      "tensor_name": "model.visual.blocks.16.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.17.attn.proj.weight",
+      "cosine_similarity": 0.9952175740220921,
+      "max_abs_relative_error": 0.9999985098838806,
+      "max_abs_error": 0.006905693560838699
+    },
+    {
+      "tensor_name": "model.visual.blocks.17.attn.qkv.weight",
+      "cosine_similarity": 0.9952207508555949,
+      "max_abs_relative_error": 0.9999991059303284,
+      "max_abs_error": 0.01116943359375
+    },
+    {
+      "tensor_name": "model.visual.blocks.17.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9950898014359199,
+      "max_abs_relative_error": 0.9999991059303284,
+      "max_abs_error": 0.01241629384458065
+    },
+    {
+      "tensor_name": "model.visual.blocks.17.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.18.attn.proj.weight",
+      "cosine_similarity": 0.9951989238988913,
+      "max_abs_relative_error": 0.9999988675117493,
+      "max_abs_error": 0.00942557118833065
+    },
+    {
+      "tensor_name": "model.visual.blocks.18.attn.qkv.weight",
+      "cosine_similarity": 0.9952664189611771,
+      "max_abs_relative_error": 0.9999990463256836,
+      "max_abs_error": 0.01071603037416935
+    },
+    {
+      "tensor_name": "model.visual.blocks.18.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9950743133484246,
+      "max_abs_relative_error": 0.9999989867210388,
+      "max_abs_error": 0.0103585384786129
+    },
+    {
+      "tensor_name": "model.visual.blocks.18.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.19.attn.proj.weight",
+      "cosine_similarity": 0.9952222503611619,
+      "max_abs_relative_error": 0.9999985098838806,
+      "max_abs_error": 0.007664271630346775
+    },
+    {
+      "tensor_name": "model.visual.blocks.19.attn.qkv.weight",
+      "cosine_similarity": 0.9952377773729595,
+      "max_abs_relative_error": 0.9999990463256836,
+      "max_abs_error": 0.0107421875
+    },
+    {
+      "tensor_name": "model.visual.blocks.19.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9949505785244648,
+      "max_abs_relative_error": 0.9999991059303284,
+      "max_abs_error": 0.0111083984375
+    },
+    {
+      "tensor_name": "model.visual.blocks.19.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.2.attn.proj.weight",
+      "cosine_similarity": 0.9949648626005134,
+      "max_abs_relative_error": 0.9999995231628418,
+      "max_abs_error": 0.0199497789144516
+    },
+    {
+      "tensor_name": "model.visual.blocks.2.attn.qkv.weight",
+      "cosine_similarity": 0.9944893925955368,
+      "max_abs_relative_error": 0.999999463558197,
+      "max_abs_error": 0.017333984375
+    },
+    {
+      "tensor_name": "model.visual.blocks.2.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9945870784744544,
+      "max_abs_relative_error": 0.9999995231628418,
+      "max_abs_error": 0.01904296875
+    },
+    {
+      "tensor_name": "model.visual.blocks.2.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.20.attn.proj.weight",
+      "cosine_similarity": 0.9952387621625451,
+      "max_abs_relative_error": 0.9999987483024597,
+      "max_abs_error": 0.008719310164451599
+    },
+    {
+      "tensor_name": "model.visual.blocks.20.attn.qkv.weight",
+      "cosine_similarity": 0.9952125179913043,
+      "max_abs_relative_error": 0.999998927116394,
+      "max_abs_error": 0.00960867665708065
+    },
+    {
+      "tensor_name": "model.visual.blocks.20.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9947631380981415,
+      "max_abs_relative_error": 0.9999993443489075,
+      "max_abs_error": 0.0158517025411129
+    },
+    {
+      "tensor_name": "model.visual.blocks.20.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.21.attn.proj.weight",
+      "cosine_similarity": 0.9952296573291015,
+      "max_abs_relative_error": 0.9999987483024597,
+      "max_abs_error": 0.00776018388569355
+    },
+    {
+      "tensor_name": "model.visual.blocks.21.attn.qkv.weight",
+      "cosine_similarity": 0.9952307444295212,
+      "max_abs_relative_error": 0.9999991655349731,
+      "max_abs_error": 0.0129220150411129
+    },
+    {
+      "tensor_name": "model.visual.blocks.21.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9946790263868489,
+      "max_abs_relative_error": 0.9999988079071045,
+      "max_abs_error": 0.01007080078125
+    },
+    {
+      "tensor_name": "model.visual.blocks.21.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.22.attn.proj.weight",
+      "cosine_similarity": 0.9952341508690207,
+      "max_abs_relative_error": 0.9999988079071045,
+      "max_abs_error": 0.008928574621677399
+    },
+    {
+      "tensor_name": "model.visual.blocks.22.attn.qkv.weight",
+      "cosine_similarity": 0.995199848979719,
+      "max_abs_relative_error": 0.9999992251396179,
+      "max_abs_error": 0.0128173828125
+    },
+    {
+      "tensor_name": "model.visual.blocks.22.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.994719458073926,
+      "max_abs_relative_error": 0.9999990463256836,
+      "max_abs_error": 0.01104736328125
+    },
+    {
+      "tensor_name": "model.visual.blocks.22.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.23.attn.proj.weight",
+      "cosine_similarity": 0.9952142758884744,
+      "max_abs_relative_error": 0.9999988079071045,
+      "max_abs_error": 0.009695872664451599
+    },
+    {
+      "tensor_name": "model.visual.blocks.23.attn.qkv.weight",
+      "cosine_similarity": 0.9951141521497929,
+      "max_abs_relative_error": 0.9999993443489075,
+      "max_abs_error": 0.0152587890625
+    },
+    {
+      "tensor_name": "model.visual.blocks.23.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9947440661621556,
+      "max_abs_relative_error": 0.9999989867210388,
+      "max_abs_error": 0.0110648013651371
+    },
+    {
+      "tensor_name": "model.visual.blocks.23.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.24.attn.proj.weight",
+      "cosine_similarity": 0.995241067896205,
+      "max_abs_relative_error": 0.9999990463256836,
+      "max_abs_error": 0.0129743292927742
+    },
+    {
+      "tensor_name": "model.visual.blocks.24.attn.qkv.weight",
+      "cosine_similarity": 0.9951392135624658,
+      "max_abs_relative_error": 0.9999992251396179,
+      "max_abs_error": 0.0135498046875
+    },
+    {
+      "tensor_name": "model.visual.blocks.24.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9947984418273709,
+      "max_abs_relative_error": 0.999998927116394,
+      "max_abs_error": 0.009765625
+    },
+    {
+      "tensor_name": "model.visual.blocks.24.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.25.attn.proj.weight",
+      "cosine_similarity": 0.9952156412636548,
+      "max_abs_relative_error": 0.9999992251396179,
+      "max_abs_error": 0.01546805165708065
+    },
+    {
+      "tensor_name": "model.visual.blocks.25.attn.qkv.weight",
+      "cosine_similarity": 0.9950765624457638,
+      "max_abs_relative_error": 0.9999992251396179,
+      "max_abs_error": 0.013671875
+    },
+    {
+      "tensor_name": "model.visual.blocks.25.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9949644495779183,
+      "max_abs_relative_error": 0.9999991059303284,
+      "max_abs_error": 0.0115966796875
+    },
+    {
+      "tensor_name": "model.visual.blocks.25.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.26.attn.proj.weight",
+      "cosine_similarity": 0.9950590982577988,
+      "max_abs_relative_error": 0.9999996423721313,
+      "max_abs_error": 0.0281110480427742
+    },
+    {
+      "tensor_name": "model.visual.blocks.26.attn.qkv.weight",
+      "cosine_similarity": 0.9950579005047325,
+      "max_abs_relative_error": 0.9999989867210388,
+      "max_abs_error": 0.010498046875
+    },
+    {
+      "tensor_name": "model.visual.blocks.26.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9950355803559752,
+      "max_abs_relative_error": 0.9999995231628418,
+      "max_abs_error": 0.0185546875
+    },
+    {
+      "tensor_name": "model.visual.blocks.26.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.3.attn.proj.weight",
+      "cosine_similarity": 0.9951024337087766,
+      "max_abs_relative_error": 0.9999992847442627,
+      "max_abs_error": 0.0146484375
+    },
+    {
+      "tensor_name": "model.visual.blocks.3.attn.qkv.weight",
+      "cosine_similarity": 0.9946195417338682,
+      "max_abs_relative_error": 0.9999992847442627,
+      "max_abs_error": 0.0147705078125
+    },
+    {
+      "tensor_name": "model.visual.blocks.3.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9948389746366627,
+      "max_abs_relative_error": 0.9999995231628418,
+      "max_abs_error": 0.0185546875
+    },
+    {
+      "tensor_name": "model.visual.blocks.3.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.4.attn.proj.weight",
+      "cosine_similarity": 0.995017420216133,
+      "max_abs_relative_error": 0.9999991059303284,
+      "max_abs_error": 0.01141357421875
+    },
+    {
+      "tensor_name": "model.visual.blocks.4.attn.qkv.weight",
+      "cosine_similarity": 0.9946990324249189,
+      "max_abs_relative_error": 0.9999995827674866,
+      "max_abs_error": 0.0218505859375
+    },
+    {
+      "tensor_name": "model.visual.blocks.4.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9948480737786736,
+      "max_abs_relative_error": 0.9999995827674866,
+      "max_abs_error": 0.0240304134786129
+    },
+    {
+      "tensor_name": "model.visual.blocks.4.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.5.attn.proj.weight",
+      "cosine_similarity": 0.9951301153735472,
+      "max_abs_relative_error": 0.9999991059303284,
+      "max_abs_error": 0.013811387121677399
+    },
+    {
+      "tensor_name": "model.visual.blocks.5.attn.qkv.weight",
+      "cosine_similarity": 0.9948114866949196,
+      "max_abs_relative_error": 0.9999992251396179,
+      "max_abs_error": 0.01374162919819355
+    },
+    {
+      "tensor_name": "model.visual.blocks.5.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9949667510700418,
+      "max_abs_relative_error": 0.999999463558197,
+      "max_abs_error": 0.0176827572286129
+    },
+    {
+      "tensor_name": "model.visual.blocks.5.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.6.attn.proj.weight",
+      "cosine_similarity": 0.9951615949183571,
+      "max_abs_relative_error": 0.9999991059303284,
+      "max_abs_error": 0.0118408203125
+    },
+    {
+      "tensor_name": "model.visual.blocks.6.attn.qkv.weight",
+      "cosine_similarity": 0.9948198545923449,
+      "max_abs_relative_error": 0.9999993443489075,
+      "max_abs_error": 0.0172991082072258
+    },
+    {
+      "tensor_name": "model.visual.blocks.6.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.994974421007141,
+      "max_abs_relative_error": 0.9999995231628418,
+      "max_abs_error": 0.0277622789144516
+    },
+    {
+      "tensor_name": "model.visual.blocks.6.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.7.attn.proj.weight",
+      "cosine_similarity": 0.995152162518399,
+      "max_abs_relative_error": 0.9999990463256836,
+      "max_abs_error": 0.0125558041036129
+    },
+    {
+      "tensor_name": "model.visual.blocks.7.attn.qkv.weight",
+      "cosine_similarity": 0.994904797309436,
+      "max_abs_relative_error": 0.9999992847442627,
+      "max_abs_error": 0.0159912109375
+    },
+    {
+      "tensor_name": "model.visual.blocks.7.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9949922121456535,
+      "max_abs_relative_error": 0.9999995231628418,
+      "max_abs_error": 0.0191650390625
+    },
+    {
+      "tensor_name": "model.visual.blocks.7.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.8.attn.proj.weight",
+      "cosine_similarity": 0.995147133383144,
+      "max_abs_relative_error": 0.9999994039535522,
+      "max_abs_error": 0.0199497751891613
+    },
+    {
+      "tensor_name": "model.visual.blocks.8.attn.qkv.weight",
+      "cosine_similarity": 0.9948426519365482,
+      "max_abs_relative_error": 0.9999992251396179,
+      "max_abs_error": 0.01318359375
+    },
+    {
+      "tensor_name": "model.visual.blocks.8.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9950244761461438,
+      "max_abs_relative_error": 0.999999463558197,
+      "max_abs_error": 0.0169677734375
+    },
+    {
+      "tensor_name": "model.visual.blocks.8.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.blocks.9.attn.proj.weight",
+      "cosine_similarity": 0.995194104248215,
+      "max_abs_relative_error": 0.9999987483024597,
+      "max_abs_error": 0.0090506412088871
+    },
+    {
+      "tensor_name": "model.visual.blocks.9.attn.qkv.weight",
+      "cosine_similarity": 0.995061289025353,
+      "max_abs_relative_error": 0.9999992251396179,
+      "max_abs_error": 0.01361083984375
+    },
+    {
+      "tensor_name": "model.visual.blocks.9.mlp.linear_fc1.weight",
+      "cosine_similarity": 0.9956496765711124,
+      "max_abs_relative_error": 0.9999995827674866,
+      "max_abs_error": 0.024135038256645203
+    },
+    {
+      "tensor_name": "model.visual.blocks.9.mlp.linear_fc2.weight",
+      "cosine_similarity": NaN,
+      "max_abs_relative_error": NaN,
+      "max_abs_error": NaN
+    },
+    {
+      "tensor_name": "model.visual.merger.linear_fc1.weight",
+      "cosine_similarity": 1.0017735686554152,
+      "max_abs_relative_error": 0.9999992251396179,
+      "max_abs_error": 0.013427734375
+    },
+    {
+      "tensor_name": "model.visual.merger.linear_fc2.weight",
+      "cosine_similarity": 0.9951580076586225,
+      "max_abs_relative_error": 0.999999463558197,
+      "max_abs_error": 0.017578125
+    },
+    {
+      "tensor_name": "model.visual.pos_embed.weight",
+      "cosine_similarity": 0.9876276029134605,
+      "max_abs_relative_error": 1.0,
+      "max_abs_error": 0.447265625
+    }
+  ],
+  "forward_pass_int8": [
+    {
+      "image_index": 0,
+      "description": "sky gradient with ground and tree shapes",
+      "cosine_similarity": 0.9970552765002554,
+      "max_abs_error": 5387.98779296875,
+      "mean_abs_error": 1.2359915971755981
+    },
+    {
+      "image_index": 1,
+      "description": "sunset-like horizontal gradient",
+      "cosine_similarity": 0.9968412920391322,
+      "max_abs_error": 4550.07568359375,
+      "mean_abs_error": 1.1909854412078857
+    },
+    {
+      "image_index": 2,
+      "description": "noisy natural texture with grain",
+      "cosine_similarity": 0.9983844668428365,
+      "max_abs_error": 2336.274169921875,
+      "mean_abs_error": 0.891059398651123
+    },
+    {
+      "image_index": 3,
+      "description": "high-contrast building facade with windows",
+      "cosine_similarity": 0.9978978662392698,
+      "max_abs_error": 4634.630859375,
+      "mean_abs_error": 0.8329493999481201
+    },
+    {
+      "image_index": 4,
+      "description": "circular gradient (lens flare)",
+      "cosine_similarity": 0.9977223398907975,
+      "max_abs_error": 4837.87451171875,
+      "mean_abs_error": 0.8905844688415527
+    },
+    {
+      "image_index": 5,
+      "description": "color bar test pattern",
+      "cosine_similarity": 0.9971596589857589,
+      "max_abs_error": 4343.55224609375,
+      "mean_abs_error": 1.028366208076477
+    },
+    {
+      "image_index": 6,
+      "description": "text document screenshot",
+      "cosine_similarity": 0.9992312387335927,
+      "max_abs_error": 10077.0517578125,
+      "mean_abs_error": 0.8730289340019226
+    },
+    {
+      "image_index": 7,
+      "description": "UI settings panel mockup",
+      "cosine_similarity": 0.9994260622720617,
+      "max_abs_error": 3571.45703125,
+      "mean_abs_error": 0.7981530427932739
+    },
+    {
+      "image_index": 8,
+      "description": "code editor screenshot (dark theme)",
+      "cosine_similarity": 0.99820460902825,
+      "max_abs_error": 9306.3896484375,
+      "mean_abs_error": 1.2711108922958374
+    },
+    {
+      "image_index": 9,
+      "description": "terminal output screenshot",
+      "cosine_similarity": 0.9985046504336483,
+      "max_abs_error": 3999.8681640625,
+      "mean_abs_error": 1.2851241827011108
+    },
+    {
+      "image_index": 10,
+      "description": "bar chart of performance metrics",
+      "cosine_similarity": 0.9993746179217184,
+      "max_abs_error": 2256.9306640625,
+      "mean_abs_error": 0.7034068703651428
+    },
+    {
+      "image_index": 11,
+      "description": "line chart of cosine similarity by layer",
+      "cosine_similarity": 0.9977923812188858,
+      "max_abs_error": 5529.54150390625,
+      "mean_abs_error": 1.2724632024765015
+    },
+    {
+      "image_index": 12,
+      "description": "pie chart of model composition",
+      "cosine_similarity": 0.9981190299961764,
+      "max_abs_error": 5826.1171875,
+      "mean_abs_error": 0.7771247029304504
+    },
+    {
+      "image_index": 13,
+      "description": "scatter plot of tensor statistics",
+      "cosine_similarity": 0.9992703297984369,
+      "max_abs_error": 2298.17822265625,
+      "mean_abs_error": 0.5472100377082825
+    },
+    {
+      "image_index": 14,
+      "description": "tiny 64x64 image with cross pattern",
+      "cosine_similarity": 0.9978233705496685,
+      "max_abs_error": 2502.44189453125,
+      "mean_abs_error": 1.0109055042266846
+    },
+    {
+      "image_index": 15,
+      "description": "1024x768 fine mosaic pattern",
+      "cosine_similarity": 1.0007163225877256,
+      "max_abs_error": 1828.9169921875,
+      "mean_abs_error": 0.44030797481536865
+    },
+    {
+      "image_index": 16,
+      "description": "horizontal grayscale gradient",
+      "cosine_similarity": 0.9969263835286672,
+      "max_abs_error": 2768.0224609375,
+      "mean_abs_error": 1.2855216264724731
+    },
+    {
+      "image_index": 17,
+      "description": "32px checkerboard pattern",
+      "cosine_similarity": 0.9944221919933345,
+      "max_abs_error": 3191.787353515625,
+      "mean_abs_error": 1.03623628616333
+    },
+    {
+      "image_index": 18,
+      "description": "wide panoramic gradient (4:1 aspect)",
+      "cosine_similarity": 0.9955762001122078,
+      "max_abs_error": 3810.47509765625,
+      "mean_abs_error": 1.3321826457977295
+    },
+    {
+      "image_index": 19,
+      "description": "pure random noise (high entropy stress test)",
+      "cosine_similarity": 0.9990377041583475,
+      "max_abs_error": 2167.88671875,
+      "mean_abs_error": 0.6894493699073792
+    }
+  ],
+  "forward_pass_q4": [
+    {
+      "image_index": 0,
+      "description": "sky gradient with ground and tree shapes",
+      "cosine_similarity": 0.932469554802263,
+      "max_abs_error": 10540.3623046875,
+      "mean_abs_error": 6.384801387786865
+    },
+    {
+      "image_index": 1,
+      "description": "sunset-like horizontal gradient",
+      "cosine_similarity": 0.9521983879613212,
+      "max_abs_error": 11575.7626953125,
+      "mean_abs_error": 5.152307033538818
+    },
+    {
+      "image_index": 2,
+      "description": "noisy natural texture with grain",
+      "cosine_similarity": 0.9645686082364949,
+      "max_abs_error": 7265.89453125,
+      "mean_abs_error": 4.052534580230713
+    },
+    {
+      "image_index": 3,
+      "description": "high-contrast building facade with windows",
+      "cosine_similarity": 0.947108511191891,
+      "max_abs_error": 11042.71484375,
+      "mean_abs_error": 4.791585445404053
+    },
+    {
+      "image_index": 4,
+      "description": "circular gradient (lens flare)",
+      "cosine_similarity": 0.9435257353248016,
+      "max_abs_error": 8954.2890625,
+      "mean_abs_error": 4.963184356689453
+    },
+    {
+      "image_index": 5,
+      "description": "color bar test pattern",
+      "cosine_similarity": 0.9463831780818452,
+      "max_abs_error": 9664.232421875,
+      "mean_abs_error": 4.759931564331055
+    },
+    {
+      "image_index": 6,
+      "description": "text document screenshot",
+      "cosine_similarity": 0.981473048485699,
+      "max_abs_error": 14219.75390625,
+      "mean_abs_error": 4.045169353485107
+    },
+    {
+      "image_index": 7,
+      "description": "UI settings panel mockup",
+      "cosine_similarity": 0.9774187043671497,
+      "max_abs_error": 12703.884765625,
+      "mean_abs_error": 4.082578182220459
+    },
+    {
+      "image_index": 8,
+      "description": "code editor screenshot (dark theme)",
+      "cosine_similarity": 0.9647278770457963,
+      "max_abs_error": 13424.0419921875,
+      "mean_abs_error": 6.044283390045166
+    },
+    {
+      "image_index": 9,
+      "description": "terminal output screenshot",
+      "cosine_similarity": 0.9670998018327631,
+      "max_abs_error": 12623.0341796875,
+      "mean_abs_error": 5.844799518585205
+    },
+    {
+      "image_index": 10,
+      "description": "bar chart of performance metrics",
+      "cosine_similarity": 0.9785287474540884,
+      "max_abs_error": 9936.5234375,
+      "mean_abs_error": 3.4178707599639893
+    },
+    {
+      "image_index": 11,
+      "description": "line chart of cosine similarity by layer",
+      "cosine_similarity": 0.9559155655647296,
+      "max_abs_error": 12245.65234375,
+      "mean_abs_error": 6.326550483703613
+    },
+    {
+      "image_index": 12,
+      "description": "pie chart of model composition",
+      "cosine_similarity": 0.966372468426623,
+      "max_abs_error": 11850.634765625,
+      "mean_abs_error": 3.833329677581787
+    },
+    {
+      "image_index": 13,
+      "description": "scatter plot of tensor statistics",
+      "cosine_similarity": 0.943862361452267,
+      "max_abs_error": 11889.810546875,
+      "mean_abs_error": 4.1836676597595215
+    },
+    {
+      "image_index": 14,
+      "description": "tiny 64x64 image with cross pattern",
+      "cosine_similarity": 0.9600390466824922,
+      "max_abs_error": 6127.0087890625,
+      "mean_abs_error": 4.788334369659424
+    },
+    {
+      "image_index": 15,
+      "description": "1024x768 fine mosaic pattern",
+      "cosine_similarity": 0.9811351309925098,
+      "max_abs_error": 6799.35400390625,
+      "mean_abs_error": 3.1888554096221924
+    },
+    {
+      "image_index": 16,
+      "description": "horizontal grayscale gradient",
+      "cosine_similarity": 0.9453509756975182,
+      "max_abs_error": 7737.912109375,
+      "mean_abs_error": 5.593785762786865
+    },
+    {
+      "image_index": 17,
+      "description": "32px checkerboard pattern",
+      "cosine_similarity": 0.8847591840384631,
+      "max_abs_error": 9681.1064453125,
+      "mean_abs_error": 5.16473388671875
+    },
+    {
+      "image_index": 18,
+      "description": "wide panoramic gradient (4:1 aspect)",
+      "cosine_similarity": 0.941299971844186,
+      "max_abs_error": 10077.5224609375,
+      "mean_abs_error": 5.5204267501831055
+    },
+    {
+      "image_index": 19,
+      "description": "pure random noise (high entropy stress test)",
+      "cosine_similarity": 0.9788684281303113,
+      "max_abs_error": 4820.6640625,
+      "mean_abs_error": 2.8890671730041504
+    }
+  ]
+}
