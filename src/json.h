@@ -51,8 +51,10 @@ static char *j_parse_str_raw(jparser *p) {
     p->s++;
     const char *start = p->s;
     /* trova la fine gestendo gli escape, poi copia decodificando i casi base */
-    char tmp[1 << 16]; int n = 0;
-    #define J_PUT(ch) do{ if (n < (int)sizeof(tmp)-1) tmp[n++] = (char)(ch); }while(0)
+    int cap = 1024;
+    char *tmp = malloc(cap);
+    int n = 0;
+    #define J_PUT(ch) do{ if (n >= cap - 1) { cap *= 2; tmp = realloc(tmp, cap); } tmp[n++] = (char)(ch); }while(0)
     while (*p->s && *p->s != '"') {
         char c = *p->s++;
         if (c == '\\' && *p->s) {
@@ -83,7 +85,9 @@ static char *j_parse_str_raw(jparser *p) {
     #undef J_PUT
     if (*p->s == '"') p->s++;
     (void)start;
-    return j_dup(p, tmp, n);
+    char *result = j_dup(p, tmp, n);
+    free(tmp);
+    return result;
 }
 
 static jval *j_parse_val(jparser *p) {
