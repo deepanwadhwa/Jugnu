@@ -164,21 +164,38 @@
 
     .composer-wrap { flex: 0 0 auto; padding: 9px max(18px, calc((100% - 860px) / 2)) 8px; background: linear-gradient(transparent, var(--paper) 24%); }
     .composer {
-      display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 10px;
-      padding: 10px 10px 10px 16px; border: 1px solid var(--line); border-radius: var(--radius);
+      display: grid; grid-template-columns: auto 1fr auto; align-items: end; gap: 10px;
+      padding: 10px 10px 10px 10px; border: 1px solid var(--line); border-radius: var(--radius);
       background: var(--panel); box-shadow: var(--shadow); backdrop-filter: blur(20px);
     }
-    textarea { width: 100%; min-height: 28px; max-height: 180px; resize: none; border: 0; outline: 0; padding: 5px 0; color: var(--ink); background: transparent; line-height: 1.45; }
+    textarea { width: 100%; min-height: 28px; max-height: 180px; resize: none; border: 0; outline: 0; padding: 5px 0; color: var(--ink); background: transparent; line-height: 1.45; margin-left: 4px; }
     textarea::placeholder { color: var(--muted); }
+    .attach-btn { width: 42px; height: 42px; border: 0; border-radius: 14px; background: transparent; color: var(--muted); font-size: 20px; font-weight: 300; cursor: pointer; transition: color .15s ease, background .15s ease; display: grid; place-items: center; }
+    .attach-btn:hover { color: var(--ink); background: color-mix(in srgb, var(--paper-2) 60%, transparent); }
     .send, .stop { width: 42px; height: 42px; display: grid; place-items: center; color: white; background: var(--brand); font-weight: 800; }
     .send:disabled { opacity: .35; cursor: default; transform: none; }
     .stop { display: none; background: var(--danger); }
     .generating .send { display: none; } .generating .stop { display: grid; }
+    
+    .image-preview-wrap { display: none; position: absolute; bottom: calc(100% + 12px); left: 18px; padding: 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); backdrop-filter: blur(12px); z-index: 10; }
+    .image-preview-wrap.show { display: block; }
+    .image-preview { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; }
+    .remove-image { position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; border-radius: 99px; border: 1px solid var(--line); background: var(--paper); color: var(--ink); font-size: 11px; cursor: pointer; display: grid; place-items: center; box-shadow: 0 2px 5px rgba(0,0,0,.15); }
     .composer-hint { padding-top: 8px; text-align: center; color: var(--muted); font-size: 10px; }
 
     .telemetry { flex: 0 0 auto; display: flex; justify-content: center; flex-wrap: wrap; gap: 8px 17px; min-height: 28px; padding: 2px 20px 8px; color: var(--muted); font-size: 10px; }
     .telemetry span { white-space: nowrap; }
     .telemetry strong { color: var(--ink); font-weight: 650; }
+    
+    .user-attached-image {
+      max-width: 200px;
+      max-height: 200px;
+      object-fit: contain;
+      border-radius: 10px;
+      display: block;
+      margin-top: 8px;
+      border: 1px solid var(--line);
+    }
 
     .settings {
       position: fixed; inset: 0 0 0 auto; width: min(390px, 100%); z-index: 30;
@@ -240,11 +257,19 @@
       <button class="jump-latest" id="jumpLatest" type="button" hidden>↓ Latest</button>
 
       <div class="composer-wrap">
-        <form class="composer" id="composer">
-          <textarea id="prompt" rows="1" placeholder="Message your local model…" aria-label="Message"></textarea>
-          <button class="send" id="send" type="submit" aria-label="Send">↑</button>
-          <button class="stop" id="stop" type="button" aria-label="Stop generation">■</button>
-        </form>
+        <div style="position: relative;">
+          <div class="image-preview-wrap" id="imagePreviewWrap">
+            <img src="" class="image-preview" id="imagePreview" alt="">
+            <button type="button" class="remove-image" id="removeImage" aria-label="Remove image">✕</button>
+          </div>
+          <form class="composer" id="composer">
+            <input type="file" id="imageInput" accept="image/*" style="display: none;">
+            <button class="attach-btn" id="attachBtn" type="button" aria-label="Attach image">＋</button>
+            <textarea id="prompt" rows="1" placeholder="Message your local model…" aria-label="Message"></textarea>
+            <button class="send" id="send" type="submit" aria-label="Send">↑</button>
+            <button class="stop" id="stop" type="button" aria-label="Stop generation">■</button>
+          </form>
+        </div>
         <div class="composer-hint">Enter to send · Shift+Enter for a new line · responses stay on this Mac</div>
       </div>
 
@@ -287,7 +312,9 @@
         composer: $("composer"), send: $("send"), stop: $("stop"), name: $("conversationName"),
         status: $("modelStatus"), dot: $("statusDot"), settings: $("settings"), scrim: $("scrim"),
         thinking: $("thinking"), maxTokens: $("maxTokens"), seed: $("seed"), mode: $("modeValue"),
-        speed: $("speedValue"), rss: $("rssValue"), closure: $("closureValue"), jump: $("jumpLatest")
+        speed: $("speedValue"), rss: $("rssValue"), closure: $("closureValue"), jump: $("jumpLatest"),
+        imageInput: $("imageInput"), attachBtn: $("attachBtn"), removeImage: $("removeImage"),
+        imagePreviewWrap: $("imagePreviewWrap"), imagePreview: $("imagePreview")
       };
       const STORAGE_KEY = "samosa-chat-v1";
       let state = loadState();
@@ -295,6 +322,7 @@
       let generating = false;
       let activeAssistant = null;
       let followOutput = true;
+      let currentImageBase64 = null;
 
       function makeId() {
         const raw = self.crypto && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
@@ -374,7 +402,17 @@
           row.querySelector(".thinking-body").textContent = msg.reasoning || "";
           row.querySelector(".response").innerHTML = markdown(msg.content || "");
           if (msg.error) { const e=row.querySelector(".error-note"); e.hidden=false; e.textContent=msg.error; }
-        } else row.innerHTML = `<div class="bubble"></div>`, row.querySelector(".bubble").textContent = msg.content;
+        } else {
+          row.innerHTML = `<div class="bubble"></div>`;
+          const bubble = row.querySelector(".bubble");
+          bubble.textContent = msg.content;
+          if (msg.image) {
+            const img = document.createElement("img");
+            img.src = msg.image;
+            img.className = "user-attached-image";
+            bubble.appendChild(img);
+          }
+        }
         els.messages.appendChild(row); return row;
       }
       function renderList() {
@@ -395,12 +433,17 @@
 
       async function sendPrompt(text) {
         if (generating || !text.trim()) return;
-        const chat=ensureChat(), user={id:makeId(),role:"user",content:text.trim()}, assistant={id:makeId(),role:"assistant",content:"",reasoning:"",streaming:true};
+        const chat=ensureChat(), user={id:makeId(),role:"user",content:text.trim(),image:currentImageBase64}, assistant={id:makeId(),role:"assistant",content:"",reasoning:"",streaming:true};
         chat.messages.push(user,assistant); chat.updated=Date.now(); if (chat.messages.length===2) chat.title=titleFor(user.content);
-        els.prompt.value=""; resizePrompt(); saveState(); renderList(); els.name.textContent=chat.title;
+        
+        let payloadContent = [{ type: "text", text: user.content }];
+        if (user.image) payloadContent.push({ type: "image_url", image_url: { url: user.image } });
+        
+        els.prompt.value=""; removeAttachedImage(); resizePrompt(); saveState(); renderList(); els.name.textContent=chat.title;
         if (chat.messages.length===2) renderMessages(); else { appendMessageNode(user); appendMessageNode(assistant); }
         activeAssistant=assistant; followOutput=true; els.jump.hidden=true; setGenerating(true); scrollBottom(true,true); els.closure.textContent="Generating";
-        const payload={model:"qwen3.6-35b-a3b",messages:[{role:"user",content:user.content}],conversation_id:chat.id,stream:true,thinking:els.thinking.value,max_tokens:Number(els.maxTokens.value)};
+        
+        const payload={model:"qwen3.6-35b-a3b",messages:[{role:"user",content:payloadContent}],conversation_id:chat.id,stream:true,thinking:els.thinking.value,max_tokens:Number(els.maxTokens.value)};
         const seed=els.seed.value.trim(); if (seed) payload.seed=Number(seed);
         try {
           const response=await fetch("/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
@@ -451,6 +494,27 @@
       }
       function openSettings() { els.settings.classList.add("open"); els.settings.setAttribute("aria-hidden","false"); els.scrim.classList.add("show"); }
       function closePanels() { els.settings.classList.remove("open"); els.settings.setAttribute("aria-hidden","true"); els.sidebar.classList.remove("open"); els.scrim.classList.remove("show"); saveState(); }
+      
+      function removeAttachedImage() {
+        currentImageBase64 = null;
+        els.imageInput.value = "";
+        els.imagePreview.src = "";
+        els.imagePreviewWrap.classList.remove("show");
+      }
+
+      els.attachBtn.onclick = () => { if (!generating) els.imageInput.click(); };
+      els.removeImage.onclick = removeAttachedImage;
+      els.imageInput.onchange = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          currentImageBase64 = e.target.result;
+          els.imagePreview.src = currentImageBase64;
+          els.imagePreviewWrap.classList.add("show");
+        };
+        reader.readAsDataURL(file);
+      };
 
       $("newChat").onclick=newChat; $("menuButton").onclick=()=>{els.sidebar.classList.add("open");els.scrim.classList.add("show")};
       $("settingsButton").onclick=openSettings; $("closeSettings").onclick=closePanels; els.scrim.onclick=closePanels; els.stop.onclick=cancel;
