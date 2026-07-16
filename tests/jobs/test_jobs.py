@@ -1,0 +1,356 @@
+#!/usr/bin/env python3
+"""Tests for samosa_jobs.py — J1.0 (validate), J1.1 (discovery), J1.5 (output validation)."""
+
+import json
+import os
+import sys
+import tempfile
+import unittest
+
+# Add dist/ to path so we can import samosa_jobs
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'dist'))
+import samosa_jobs
+
+
+class TestValidateJob(unittest.TestCase):
+    """J1.0 — job.json validation."""
+
+    def _valid_job(self, **overrides):
+        job = {
+            'schema_version': 1,
+            'job_id': 'test-job-01',
+            'name': 'Test Job',
+            'input': {'folder': '/tmp/test-inputs', 'types': ['image/jpeg']},
+            'instruction': 'Extract fields.',
+            'output_schema': {
+                'type': 'object',
+                'required': ['total'],
+                'properties': {
+                    'total': {'type': ['number', 'null']},
+                }
+            },
+        }
+        job.update(overrides)
+        return job
+
+    def test_valid_job(self):
+        job, errors = samosa_jobs.validate_job(self._valid_job())
+        self.assertEqual(errors, [])
+        self.assertIsNotNone(job)
+
+    def test_missing_job_id(self):
+        j = self._valid_job()
+        del j['job_id']
+        _, errors = samosa_jobs.validate_job(j)
+        self.assertTrue(any('job_id' in e for e in errors))
+
+    def test_bad_job_id(self):
+        _, errors = samosa_jobs.validate_job(self._valid_job(job_id='BAD ID!'))
+        self.assertTrue(any('job_id' in e for e in errors))
+
+    def test_relative_path(self):
+        _, errors = samosa_jobs.validate_job(self._valid_job(
+            input={'folder': 'relative/path'}))
+        self.assertTrue(any('absolute' in e for e in errors))
+
+    def test_unknown_unit(self):
+        _, errors = samosa_jobs.validate_job(self._valid_job(unit='chunk'))
+        self.assertTrue(any('unit' in e for e in errors))
+
+    def test_max_tokens_over_8192(self):
+        _, errors = samosa_jobs.validate_job(self._valid_job(
+            inference={'max_tokens': 9000}))
+        self.assertTrue(any('max_tokens' in e for e in errors))
+
+    def test_unknown_schema_keyword(self):
+        """A typo like maxLenght must be rejected."""
+        _, errors = samosa_jobs.validate_job(self._valid_job(
+            output_schema={
+                'type': 'object',
+                'properties': {
+                    'currency': {'type': 'string', 'maxLenght': 3}
+                }
+            }))
+        self.assertTrue(any('maxLenght' in e for e in errors))
+
+    def test_nested_schema_type(self):
+        """Nested object/array types are rejected."""
+        _, errors = samosa_jobs.validate_job(self._valid_job(
+            output_schema={
+                'type': 'object',
+                'properties': {
+                    'items': {'type': 'object'}
+                }
+            }))
+        self.assertTrue(any('nested' in e for e in errors))
+
+
+class TestOutputValidation(unittest.TestCase):
+    """J1.5 — output validation."""
+
+    SCHEMA = {
+        'type': 'object',
+        'required': ['merchant', 'date', 'total', 'currency'],
+        'properties': {
+            'merchant': {'type': ['string', 'null']},
+            'date': {'type': ['string', 'null']},
+            'subtotal': {'type': ['number', 'null']},
+            'tax': {'type': ['number', 'null']},
+            'total': {'type': ['number', 'null']},
+            'currency': {'type': ['string', 'null'], 'maxLength': 3},
+        }
+    }
+
+    def test_valid_output(self):
+        content = '{"merchant":"Store","date":"2026-01-01","total":42.5,"currency":"USD"}'
+        result = samosa_jobs.validate_output(content, self.SCHEMA)
+        self.assertEqual(result['status'], 'passed')
+        self.assertEqual(result['errors'], [])
+
+    def test_missing_required(self):
+        content = '{"merchant":"Store","date":"2026-01-01","currency":"USD"}'
+        result = samosa_jobs.validate_output(content, self.SCHEMA)
+        self.assertEqual(result['status'], 'review_required')
+        self.assertIn('missing_required_field:total', result['errors'])
+
+    def test_type_mismatch_string_for_number(self):
+        content = '{"merchant":"Store","date":"2026-01-01","total":"x","currency":"USD"}'
+        result = samosa_jobs.validate_output(content, self.SCHEMA)
+        self.assertIn('type_mismatch:total', result['errors'])
+
+    def test_bool_is_not_number(self):
+        """total:true must fail type check for number."""
+        content = '{"merchant":"Store","date":"2026-01-01","total":true,"currency":"USD"}'
+        result = samosa_jobs.validate_output(content, self.SCHEMA)
+        self.assertIn('type_mismatch:total', result['errors'])
+
+    def test_maxlength_violation(self):
+        content = '{"merchant":"Store","date":"2026-01-01","total":10,"currency":"USDD"}'
+        result = samosa_jobs.validate_output(content, self.SCHEMA)
+        self.assertIn('constraint:currency', result['errors'])
+
+    def test_domain_rule_pass(self):
+        content = '{"merchant":"S","date":"D","subtotal":10,"tax":2,"total":12,"currency":"USD"}'
+        result = samosa_jobs.validate_output(content, self.SCHEMA,
+                                              domain_rules=['subtotal + tax ~= total'])
+        self.assertEqual(result['status'], 'passed')
+
+    def test_domain_rule_fail(self):
+        content = '{"merchant":"S","date":"D","subtotal":10,"tax":2,"total":99,"currency":"USD"}'
+        result = samosa_jobs.validate_output(content, self.SCHEMA,
+                                              domain_rules=['subtotal + tax ~= total'])
+        self.assertTrue(any('domain:' in e for e in result['errors']))
+
+    def test_trailing_prose(self):
+        content = '{"merchant":"S","date":"D","total":10,"currency":"USD"} thanks'
+        result = samosa_jobs.validate_output(content, self.SCHEMA)
+        self.assertEqual(result['status'], 'passed')
+        self.assertIn('trailing_prose', result['warnings'])
+
+    def test_braces_in_strings(self):
+        """Braces inside strings must not break the scanner."""
+        content = '{"merchant":"use {braces}","date":"D","total":10,"currency":"USD"} thanks'
+        result = samosa_jobs.validate_output(content, self.SCHEMA)
+        self.assertEqual(result['status'], 'passed')
+        self.assertEqual(result['record']['merchant'], 'use {braces}')
+
+    def test_unparseable(self):
+        content = '"sorry I cannot do that"'
+        result = samosa_jobs.validate_output(content, self.SCHEMA)
+        self.assertEqual(result['status'], 'review_required')
+        self.assertIn('unparseable', result['errors'])
+
+    def test_enum_json_typed(self):
+        """Enum comparison must be JSON-typed: True must not match 1."""
+        schema = {
+            'type': 'object',
+            'required': ['status'],
+            'properties': {
+                'status': {'type': 'integer', 'enum': [0, 1, 2]},
+            }
+        }
+        content = '{"status":true}'
+        result = samosa_jobs.validate_output(content, schema)
+        # true is bool, not integer, so type_mismatch
+        self.assertIn('type_mismatch:status', result['errors'])
+
+
+class TestDiscovery(unittest.TestCase):
+    """J1.1 — input discovery."""
+
+    def test_basic_discovery(self):
+        with tempfile.TemporaryDirectory() as d:
+            # Create test files
+            (img_path := os.path.join(d, 'test.jpg'))
+            with open(img_path, 'wb') as f:
+                f.write(b'\xff\xd8\xff\xe0' + b'\x00' * 100)
+
+            (txt_path := os.path.join(d, 'test.txt'))
+            with open(txt_path, 'w') as f:
+                f.write('Hello world')
+
+            config = {'folder': d, 'types': ['image/jpeg', 'text/plain'],
+                      'max_file_bytes': 26214400}
+            items, skipped = samosa_jobs.discover_inputs(config)
+            self.assertEqual(len(items), 2)
+            types = {it['media_type'] for it in items}
+            self.assertIn('image/jpeg', types)
+            self.assertIn('text/plain', types)
+
+    def test_duplicate_excluded(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, 'a.txt'), 'w') as f:
+                f.write('Same content')
+            with open(os.path.join(d, 'b.txt'), 'w') as f:
+                f.write('Same content')
+
+            config = {'folder': d, 'types': ['text/plain'],
+                      'max_file_bytes': 26214400}
+            items, skipped = samosa_jobs.discover_inputs(config)
+            self.assertEqual(len(items), 1)
+            self.assertEqual(len(skipped), 1)
+            self.assertIn('duplicate', skipped[0][1])
+
+    def test_binary_excluded(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, 'blob.bin'), 'wb') as f:
+                f.write(bytes(range(256)) * 4)
+
+            config = {'folder': d, 'types': ['text/plain'],
+                      'max_file_bytes': 26214400}
+            items, skipped = samosa_jobs.discover_inputs(config)
+            self.assertEqual(len(items), 0)
+            self.assertTrue(any('unsupported' in s[1] for s in skipped))
+
+    def test_oversize_excluded(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, 'big.txt'), 'w') as f:
+                f.write('x' * 1000)
+
+            config = {'folder': d, 'types': ['text/plain'],
+                      'max_file_bytes': 100}
+            items, skipped = samosa_jobs.discover_inputs(config)
+            self.assertEqual(len(items), 0)
+            self.assertTrue(any('exceeds' in s[1] for s in skipped))
+
+    def test_mislabeled_extension(self):
+        """A .jpg file that is actually text should be detected as text/plain."""
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, 'not_image.jpg'), 'w') as f:
+                f.write('This is plain text')
+
+            config = {'folder': d, 'types': ['text/plain'],
+                      'max_file_bytes': 26214400}
+            items, skipped = samosa_jobs.discover_inputs(config)
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]['media_type'], 'text/plain')
+
+
+class TestEventLog(unittest.TestCase):
+    """J1.7 — event log."""
+
+    def test_append_and_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            log_path = os.path.join(d, 'events.jsonl')
+            log = samosa_jobs.EventLog(log_path)
+            log.append('job_created', job_id='test')
+            log.append('item_discovered', input_sha256='abc')
+
+            log2 = samosa_jobs.EventLog(log_path)
+            log2.load()
+            self.assertEqual(len(log2.events), 2)
+            self.assertEqual(log2.events[0]['type'], 'job_created')
+            self.assertEqual(log2.seq, 2)
+
+    def test_torn_write_ignored(self):
+        with tempfile.TemporaryDirectory() as d:
+            log_path = os.path.join(d, 'events.jsonl')
+            log = samosa_jobs.EventLog(log_path)
+            log.append('job_created', job_id='test')
+
+            # Append a torn line
+            with open(log_path, 'a') as f:
+                f.write('{"seq":2,"type":"item_disc\n')
+
+            log2 = samosa_jobs.EventLog(log_path)
+            log2.load()
+            self.assertEqual(len(log2.events), 1)
+
+    def test_terminal_units(self):
+        with tempfile.TemporaryDirectory() as d:
+            log_path = os.path.join(d, 'events.jsonl')
+            log = samosa_jobs.EventLog(log_path)
+            log.append('item_complete', unit_id='u1')
+            log.append('item_review_required', unit_id='u2')
+            log.append('item_running', unit_id='u3')
+
+            terminal = log.get_terminal_units()
+            self.assertIn('u1', terminal)
+            self.assertIn('u2', terminal)
+            self.assertNotIn('u3', terminal)
+
+
+class TestJobLock(unittest.TestCase):
+    """J1.7 — process lock."""
+
+    def test_lock_exclusive(self):
+        with tempfile.TemporaryDirectory() as d:
+            lock_path = os.path.join(d, 'job.lock')
+            lock1 = samosa_jobs.JobLock(lock_path)
+            self.assertTrue(lock1.acquire())
+
+            lock2 = samosa_jobs.JobLock(lock_path)
+            self.assertFalse(lock2.acquire())
+
+            lock1.release()
+            lock3 = samosa_jobs.JobLock(lock_path)
+            self.assertTrue(lock3.acquire())
+            lock3.release()
+
+
+class TestReduce(unittest.TestCase):
+    """J1.9 — page reduction."""
+
+    SCHEMA = {
+        'type': 'object',
+        'properties': {
+            'name': {'type': ['string', 'null']},
+            'dob': {'type': ['string', 'null']},
+            'total': {'type': ['number', 'null']},
+        }
+    }
+
+    def test_deterministic_merge(self):
+        units = [
+            {'record': {'name': 'Alice', 'dob': None, 'total': None}, 'status': 'passed', 'errors': []},
+            {'record': {'name': None, 'dob': '1990-01-01', 'total': None}, 'status': 'passed', 'errors': []},
+        ]
+        merged, validation, method = samosa_jobs.reduce_units(
+            units, self.SCHEMA, {'mode': 'deterministic', 'model_fields': []})
+        self.assertEqual(method, 'deterministic')
+        self.assertEqual(merged['name'], 'Alice')
+        self.assertEqual(merged['dob'], '1990-01-01')
+
+    def test_conflict(self):
+        units = [
+            {'record': {'name': 'Alice', 'dob': None, 'total': 10}, 'status': 'passed', 'errors': []},
+            {'record': {'name': 'Bob', 'dob': None, 'total': 20}, 'status': 'passed', 'errors': []},
+        ]
+        merged, validation, method = samosa_jobs.reduce_units(
+            units, self.SCHEMA, {'mode': 'deterministic', 'model_fields': []})
+        self.assertIsNone(merged['name'])  # Conflict
+        self.assertTrue(any('reduce_conflict:name' in e for e in validation['errors']))
+
+    def test_unparseable_page(self):
+        units = [
+            {'record': {'name': 'Alice'}, 'status': 'passed', 'errors': []},
+            {'record': None, 'status': 'review_required', 'errors': ['unparseable'], 'unit_id': 'u2'},
+        ]
+        merged, validation, method = samosa_jobs.reduce_units(
+            units, self.SCHEMA, {'mode': 'deterministic', 'model_fields': []})
+        self.assertEqual(validation['status'], 'review_required')
+        self.assertTrue(any('missing_pages' in e for e in validation['errors']))
+
+
+if __name__ == '__main__':
+    unittest.main()

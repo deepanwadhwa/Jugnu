@@ -1,0 +1,1950 @@
+#!/usr/bin/env python3
+"""Samosa Jobs — batch, scheduled, local multimodal work.
+
+One-shot runner for structured document/image extraction.  Processes a folder
+of inputs against a user-defined schema, producing validated JSON results with
+crash-durable state, idempotent re-runs, and machine-safety enforcement.
+
+Usage:
+    samosa jobs validate <job.json>
+    samosa jobs arm <job.json>
+    samosa jobs preview <job.json> [--file <path>]
+    samosa jobs run <job.json>
+    samosa jobs status <job.json>
+    samosa jobs view <job.json>
+    samosa jobs suggest-schema <job.json|--instruction "...">
+    samosa jobs delete <job.json>
+    samosa jobs archive <job.json>
+
+Requires Python 3 standard library only.
+"""
+
+import base64
+import copy
+import csv
+import fcntl
+import hashlib
+import html
+import io
+import json
+import math
+import os
+import platform
+import re
+import shutil
+import signal
+import struct
+import subprocess
+import sys
+import textwrap
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Constants — pinned from the engine (TASKS_JOBS.md §J1.2)
+# ---------------------------------------------------------------------------
+IMAGE_TOKENS = 576          # max vision tokens per rendered page
+MAX_CONTEXT = 24576         # SAMOSA_MAX_CONTEXT_TOKENS (qwen36b.c:3564)
+SYSTEM_RESERVE = 1024       # conservative reserve for system prompt overhead
+MAX_FILE_BYTES_DEFAULT = 26214400  # 25 MiB
+HTTP_MAX_BODY = 4 * 1024 * 1024    # 4 MiB (samosa_http.h:20)
+RUNNER_VERSION = "j1-0.1"
+SERVE_URL_DEFAULT = "http://127.0.0.1:8642"
+
+# Magic bytes for file type detection
+MAGIC_JPEG = b'\xff\xd8\xff'
+MAGIC_PNG = b'\x89PNG'
+MAGIC_PDF = b'%PDF'
+
+# job_id regex
+JOB_ID_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,63}$')
+
+# Supported schema keywords (§output_schema)
+VALID_TOP_KEYWORDS = {'type', 'required', 'properties'}
+VALID_FIELD_KEYWORDS = {'type', 'enum', 'minimum', 'maximum', 'maxLength'}
+VALID_TYPES = {'string', 'number', 'integer', 'boolean', 'null'}
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+def rfc3339_now():
+    """Return current UTC timestamp in RFC3339 format."""
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+def sha256_file(path):
+    """Compute SHA-256 hex digest of a file."""
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(1 << 20), b''):
+            h.update(block)
+    return h.hexdigest()
+
+def sha256_bytes(data):
+    """Compute SHA-256 hex digest of bytes."""
+    return hashlib.sha256(data).hexdigest()
+
+def fsync_file(path):
+    """fsync a file by path."""
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+def fsync_dir(path):
+    """fsync a directory to ensure rename durability."""
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+def atomic_write(dest, data, mode=0o600):
+    """Write data atomically: write .partial, fsync, rename, fsync dir."""
+    dest = Path(dest)
+    partial = dest.with_suffix(dest.suffix + '.partial')
+    with open(partial, 'w') as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(str(partial), mode)
+    os.rename(str(partial), str(dest))
+    fsync_dir(str(dest.parent))
+
+def html_escape(s):
+    """HTML-escape a string for safe interpolation."""
+    return html.escape(str(s), quote=True)
+
+
+# ---------------------------------------------------------------------------
+# J1.0 — Job definition loader / validator
+# ---------------------------------------------------------------------------
+
+def validate_output_schema(schema):
+    """Validate the output_schema subset. Returns list of error strings."""
+    errors = []
+    if not isinstance(schema, dict):
+        return ["output_schema must be a JSON object"]
+    # Check top-level keywords
+    for k in schema:
+        if k not in VALID_TOP_KEYWORDS:
+            errors.append(f"output_schema: unknown top-level keyword '{k}'")
+    if schema.get('type') != 'object':
+        errors.append("output_schema.type must be 'object'")
+    req = schema.get('required')
+    if req is not None and not isinstance(req, list):
+        errors.append("output_schema.required must be an array")
+    props = schema.get('properties')
+    if props is not None:
+        if not isinstance(props, dict):
+            errors.append("output_schema.properties must be an object")
+        else:
+            for fname, frule in props.items():
+                if not isinstance(frule, dict):
+                    errors.append(f"output_schema.properties.{fname} must be an object")
+                    continue
+                for fk in frule:
+                    if fk not in VALID_FIELD_KEYWORDS:
+                        errors.append(f"output_schema.properties.{fname}: unknown keyword '{fk}'")
+                # Validate type
+                ftype = frule.get('type')
+                if ftype is not None:
+                    types = [ftype] if isinstance(ftype, str) else ftype
+                    if not isinstance(types, list):
+                        errors.append(f"output_schema.properties.{fname}.type must be a string or array")
+                    else:
+                        for t in types:
+                            if t not in VALID_TYPES:
+                                errors.append(f"output_schema.properties.{fname}: unsupported type '{t}'")
+                # Validate enum
+                fenum = frule.get('enum')
+                if fenum is not None and not isinstance(fenum, list):
+                    errors.append(f"output_schema.properties.{fname}.enum must be an array")
+                # Validate numeric constraints
+                for nk in ('minimum', 'maximum', 'maxLength'):
+                    nv = frule.get(nk)
+                    if nv is not None and not isinstance(nv, (int, float)):
+                        errors.append(f"output_schema.properties.{fname}.{nk} must be a number")
+                # Reject nested objects/arrays in type
+                if ftype is not None:
+                    types = [ftype] if isinstance(ftype, str) else ftype
+                    if isinstance(types, list):
+                        for t in types:
+                            if t in ('object', 'array'):
+                                errors.append(f"output_schema.properties.{fname}: nested type '{t}' not supported")
+    return errors
+
+
+def validate_job(job):
+    """Validate a parsed job.json. Returns (normalized_job, errors)."""
+    errors = []
+
+    # Required top-level fields
+    for key in ('job_id', 'input', 'instruction', 'output_schema'):
+        if key not in job:
+            errors.append(f"missing required field: {key}")
+    if errors:
+        return None, errors
+
+    # job_id
+    jid = job.get('job_id', '')
+    if not JOB_ID_RE.match(jid):
+        errors.append(f"job_id: must match {JOB_ID_RE.pattern}")
+
+    # schema_version
+    sv = job.get('schema_version', 1)
+    if sv != 1:
+        errors.append(f"schema_version: must be 1, got {sv}")
+
+    # input
+    inp = job.get('input', {})
+    if not isinstance(inp, dict):
+        errors.append("input must be an object")
+    else:
+        folder = inp.get('folder')
+        if not folder:
+            errors.append("input.folder is required")
+        elif not os.path.isabs(folder):
+            errors.append("input.folder must be an absolute path")
+        mfb = inp.get('max_file_bytes', MAX_FILE_BYTES_DEFAULT)
+        if not isinstance(mfb, (int, float)) or mfb <= 0:
+            errors.append("input.max_file_bytes must be a positive number")
+
+    # unit
+    unit = job.get('unit', 'auto')
+    if unit not in ('auto', 'file', 'page'):
+        errors.append(f"unit: must be auto, file, or page; got '{unit}'")
+
+    # instruction
+    instr = job.get('instruction', '')
+    if not isinstance(instr, str) or not instr.strip():
+        errors.append("instruction must be a non-empty string")
+
+    # output_schema
+    schema_errors = validate_output_schema(job.get('output_schema', {}))
+    errors.extend(schema_errors)
+
+    # inference
+    inf = job.get('inference', {})
+    if not isinstance(inf, dict):
+        errors.append("inference must be an object")
+    else:
+        mt = inf.get('max_tokens', 512)
+        if not isinstance(mt, int) or mt < 1 or mt > 8192:
+            errors.append("inference.max_tokens must be an integer in 1..8192")
+
+    # output
+    out = job.get('output', {})
+    if isinstance(out, dict):
+        fmt = out.get('format', 'jsonl')
+        if fmt not in ('jsonl', 'csv'):
+            errors.append(f"output.format must be jsonl or csv; got '{fmt}'")
+        outdir = out.get('dir')
+        if outdir and not os.path.isabs(outdir):
+            errors.append("output.dir must be an absolute path")
+
+    # resources
+    res = job.get('resources', {})
+    if isinstance(res, dict):
+        ma = res.get('max_attempts', 3)
+        if not isinstance(ma, int) or ma < 1:
+            errors.append("resources.max_attempts must be a positive integer")
+
+    # Normalize
+    normalized = copy.deepcopy(job)
+    normalized.setdefault('schema_version', 1)
+    normalized.setdefault('unit', 'auto')
+    normalized.setdefault('name', jid)
+    normalized.setdefault('created_at', rfc3339_now())
+    normalized.setdefault('reduce', {'mode': 'deterministic', 'model_fields': []})
+    normalized.setdefault('inference', {})
+    normalized['inference'].setdefault('thinking', 'off')
+    normalized['inference'].setdefault('seed', 11)
+    normalized['inference'].setdefault('temperature', 0)
+    normalized['inference'].setdefault('max_tokens', 512)
+    normalized['inference'].setdefault('timeout_s', None)
+    normalized.setdefault('output', {})
+    normalized['output'].setdefault('format', 'jsonl')
+    normalized.setdefault('resources', {})
+    normalized['resources'].setdefault('max_attempts', 3)
+    normalized['resources'].setdefault('run_on_battery', False)
+    normalized['resources'].setdefault('pause_when_user_active', True)
+    normalized['resources'].setdefault('min_free_gb', 5)
+    normalized.setdefault('validation', {})
+
+    return normalized, errors
+
+
+def load_and_validate_job(path):
+    """Load a job.json file and validate it. Returns (job, errors)."""
+    try:
+        with open(path) as f:
+            job = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        return None, [f"cannot load job file: {e}"]
+    if not isinstance(job, dict):
+        return None, ["job.json must be a JSON object"]
+    return validate_job(job)
+
+
+# ---------------------------------------------------------------------------
+# J1.1 — Input discovery (TOCTOU-safe, magic-byte typing)
+# ---------------------------------------------------------------------------
+
+def detect_media_type(header_bytes):
+    """Detect media type from the first bytes of a file."""
+    if header_bytes[:3] == MAGIC_JPEG:
+        return 'image/jpeg'
+    if header_bytes[:4] == MAGIC_PNG:
+        return 'image/png'
+    if header_bytes[:4] == MAGIC_PDF:
+        return 'application/pdf'
+    return None
+
+
+def is_valid_utf8_text(data):
+    """Check if data is valid UTF-8 and contains no problematic control characters."""
+    try:
+        text = data.decode('utf-8', errors='strict')
+    except UnicodeDecodeError:
+        return False
+    # Reject if it contains control chars other than \t, \n, \r
+    for ch in text:
+        cp = ord(ch)
+        if cp < 32 and cp not in (9, 10, 13):
+            return False
+    return True
+
+
+def discover_inputs(input_config, allowed_types=None):
+    """Discover input files. Returns list of {input_path, input_sha256, media_type, size}
+    and a list of skip reasons."""
+    folder = input_config['folder']
+    recursive = input_config.get('recursive', False)
+    max_bytes = input_config.get('max_file_bytes', MAX_FILE_BYTES_DEFAULT)
+    type_filter = set(input_config.get('types', [
+        'image/jpeg', 'image/png', 'text/plain', 'application/pdf'
+    ]))
+
+    items = []
+    skipped = []
+    seen_hashes = set()
+
+    if recursive:
+        walker = sorted(Path(folder).rglob('*'))
+    else:
+        walker = sorted(Path(folder).iterdir())
+
+    for entry in walker:
+        path = str(entry)
+        # Open with O_NOFOLLOW to reject symlinks
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError as e:
+            skipped.append((path, f"cannot open (O_NOFOLLOW): {e}"))
+            continue
+
+        try:
+            st = os.fstat(fd)
+            # Must be a regular file
+            if not stat_is_regular(st):
+                skipped.append((path, "not a regular file"))
+                continue
+            # Size check
+            if st.st_size > max_bytes:
+                skipped.append((path, f"exceeds max_file_bytes ({st.st_size} > {max_bytes})"))
+                continue
+            if st.st_size == 0:
+                skipped.append((path, "empty file"))
+                continue
+
+            # Read and hash
+            data = b''
+            while True:
+                chunk = os.read(fd, 1 << 20)
+                if not chunk:
+                    break
+                data += chunk
+
+            # Re-fstat to detect changes during read
+            st2 = os.fstat(fd)
+            if st2.st_size != st.st_size or st2.st_mtime != st.st_mtime:
+                skipped.append((path, "file changed during read"))
+                continue
+        finally:
+            os.close(fd)
+
+        file_hash = sha256_bytes(data)
+        if file_hash in seen_hashes:
+            skipped.append((path, f"duplicate content (same SHA-256 as earlier file)"))
+            continue
+        seen_hashes.add(file_hash)
+
+        # Detect type by magic bytes
+        media_type = detect_media_type(data[:8])
+        if media_type is None:
+            if is_valid_utf8_text(data):
+                media_type = 'text/plain'
+            else:
+                skipped.append((path, "unsupported: not a recognized image/PDF and not valid UTF-8 text"))
+                continue
+
+        if media_type not in type_filter:
+            skipped.append((path, f"type {media_type} not in allowed types"))
+            continue
+
+        items.append({
+            'input_path': path,
+            'input_sha256': file_hash,
+            'media_type': media_type,
+            'size': len(data),
+        })
+
+    return items, skipped
+
+
+def stat_is_regular(st):
+    """Check if a stat result represents a regular file."""
+    import stat as stat_mod
+    return stat_mod.S_ISREG(st.st_mode)
+
+
+# ---------------------------------------------------------------------------
+# J1.5 — Output validation
+# ---------------------------------------------------------------------------
+
+def find_json_object(text):
+    """Find the first complete JSON object in text using a string-aware scanner.
+    Returns (parsed_obj, has_trailing) or (None, False) if no object found."""
+    # Find first '{'
+    start = text.find('{')
+    if start < 0:
+        return None, False
+
+    depth = 0
+    in_string = False
+    escape_next = False
+    end = -1
+
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if in_string:
+            if ch == '\\':
+                escape_next = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+
+    if end < 0:
+        return None, False
+
+    obj_str = text[start:end + 1]
+    try:
+        obj = json.loads(obj_str)
+    except json.JSONDecodeError:
+        return None, False
+
+    trailing = text[end + 1:].strip()
+    return obj, len(trailing) > 0
+
+
+def validate_output(content_str, schema, domain_rules=None):
+    """Validate model output against the schema.
+    Returns {status, errors, warnings, record}."""
+    errors = []
+    warnings = []
+    record = None
+
+    # Parse
+    try:
+        record = json.loads(content_str)
+    except (json.JSONDecodeError, TypeError):
+        # Try to recover a JSON object
+        if isinstance(content_str, str):
+            obj, has_trailing = find_json_object(content_str)
+            if obj is not None:
+                record = obj
+                if has_trailing:
+                    warnings.append("trailing_prose")
+            else:
+                errors.append("unparseable")
+        else:
+            errors.append("unparseable")
+
+    if record is None:
+        return {'status': 'review_required', 'errors': errors, 'warnings': warnings, 'record': None}
+
+    if not isinstance(record, dict):
+        errors.append("unparseable")
+        return {'status': 'review_required', 'errors': errors, 'warnings': warnings, 'record': None}
+
+    # Schema validation
+    required = schema.get('required', [])
+    properties = schema.get('properties', {})
+
+    for rk in required:
+        if rk not in record:
+            errors.append(f"missing_required_field:{rk}")
+
+    for fname, frule in properties.items():
+        if fname not in record:
+            continue
+        val = record[fname]
+        # Type check
+        ftype = frule.get('type')
+        if ftype is not None:
+            types = [ftype] if isinstance(ftype, str) else ftype
+            if not _check_json_type(val, types):
+                errors.append(f"type_mismatch:{fname}")
+                continue
+        # Enum check
+        fenum = frule.get('enum')
+        if fenum is not None:
+            if not _check_enum(val, fenum):
+                errors.append(f"constraint:{fname}")
+        # Bounds
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            fmin = frule.get('minimum')
+            if fmin is not None and val < fmin:
+                errors.append(f"constraint:{fname}")
+            fmax = frule.get('maximum')
+            if fmax is not None and val > fmax:
+                errors.append(f"constraint:{fname}")
+        # maxLength
+        if isinstance(val, str):
+            ml = frule.get('maxLength')
+            if ml is not None and len(val) > ml:
+                errors.append(f"constraint:{fname}")
+
+    # Domain rules
+    if domain_rules:
+        for rule in domain_rules:
+            dr_err = _check_domain_rule(rule, record)
+            if dr_err:
+                errors.append(f"domain:{rule}")
+
+    status = 'review_required' if errors else 'passed'
+    return {'status': status, 'errors': errors, 'warnings': warnings, 'record': record}
+
+
+def _check_json_type(val, types):
+    """Check if val matches one of the JSON types. bool is NOT number/integer."""
+    for t in types:
+        if t == 'null' and val is None:
+            return True
+        if t == 'string' and isinstance(val, str):
+            return True
+        if t == 'boolean' and isinstance(val, bool):
+            return True
+        if t == 'integer' and isinstance(val, int) and not isinstance(val, bool):
+            return True
+        if t == 'number' and isinstance(val, (int, float)) and not isinstance(val, bool):
+            return True
+    return False
+
+
+def _check_enum(val, enum_values):
+    """Check if val equals one of the enum values by JSON type.
+    True != 1, False != 0 in JSON-typed comparison."""
+    for ev in enum_values:
+        if type(val) == type(ev) and val == ev:
+            return True
+        # Allow int/float cross-comparison for numbers (but not bool)
+        if (isinstance(val, (int, float)) and not isinstance(val, bool) and
+            isinstance(ev, (int, float)) and not isinstance(ev, bool) and
+            val == ev):
+            return True
+    return False
+
+
+def _check_domain_rule(rule, record):
+    """Check a domain rule like 'subtotal + tax ~= total'.
+    Returns True if the rule fails."""
+    # Parse "a + b ~= c"
+    m = re.match(r'(\w+)\s*\+\s*(\w+)\s*~=\s*(\w+)', rule)
+    if not m:
+        return False  # Unknown rule format, skip
+    a_name, b_name, c_name = m.group(1), m.group(2), m.group(3)
+    a_val = record.get(a_name)
+    b_val = record.get(b_name)
+    c_val = record.get(c_name)
+    # All three must be numbers
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+               for v in (a_val, b_val, c_val) if v is not None):
+        return False  # Can't check, not an error
+    if a_val is None or b_val is None or c_val is None:
+        return False  # Missing values, not a domain error
+    tolerance = 0.01 * max(1, abs(c_val))
+    if abs(a_val + b_val - c_val) > tolerance:
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# J1.2 — Granularity planner
+# ---------------------------------------------------------------------------
+
+def plan_units(input_meta, unit_mode, context_budget, tokenizer_cmd=None):
+    """Plan processing units for an input file.
+
+    Args:
+        input_meta: dict with input_sha256, media_type, input_path, size, text_tokens (optional)
+        unit_mode: 'auto', 'file', or 'page'
+        context_budget: available token budget
+        tokenizer_cmd: command to run tokenize --count (list)
+
+    Returns: list of unit dicts
+    """
+    sha = input_meta['input_sha256']
+    media_type = input_meta['media_type']
+    path = input_meta['input_path']
+
+    if media_type.startswith('image/'):
+        # Single image → 1 unit
+        return [{
+            'unit_id': sha,
+            'input_sha256': sha,
+            'granularity': 'file',
+            'plan_reason': 'single_image',
+            'reduce_group': None,
+        }]
+
+    if media_type == 'text/plain':
+        # Count tokens
+        text_tokens = input_meta.get('text_tokens')
+        if text_tokens is None and tokenizer_cmd:
+            text_tokens = count_tokens_file(path, tokenizer_cmd)
+        if text_tokens is None:
+            # Fallback: estimate
+            text_tokens = math.ceil(input_meta.get('size', 0) / 4)
+
+        if text_tokens <= context_budget:
+            return [{
+                'unit_id': sha,
+                'input_sha256': sha,
+                'granularity': 'file',
+                'plan_reason': 'fits_budget',
+                'reduce_group': None,
+            }]
+        else:
+            # Split into chunks
+            return _plan_text_chunks(sha, path, text_tokens, context_budget, tokenizer_cmd)
+
+    if media_type == 'application/pdf':
+        # PDF: return review_required since sidecar is not available
+        return [{
+            'unit_id': sha,
+            'input_sha256': sha,
+            'granularity': 'file',
+            'plan_reason': 'extractor_unavailable',
+            'reduce_group': None,
+        }]
+
+    # Unknown type
+    return [{
+        'unit_id': sha,
+        'input_sha256': sha,
+        'granularity': 'file',
+        'plan_reason': 'unknown_type',
+        'reduce_group': None,
+    }]
+
+
+def _plan_text_chunks(sha, path, total_tokens, budget, tokenizer_cmd):
+    """Split a text file into chunk units on paragraph/line boundaries."""
+    with open(path, 'r', errors='replace') as f:
+        lines = f.readlines()
+
+    if not lines:
+        return [{
+            'unit_id': sha,
+            'input_sha256': sha,
+            'granularity': 'file',
+            'plan_reason': 'fits_budget',
+            'reduce_group': None,
+        }]
+
+    # Simple split: divide into roughly equal chunks by line count
+    overlap_tokens = 64
+    chars_per_token = max(1, sum(len(l) for l in lines) / max(1, total_tokens))
+    chunk_chars = int(budget * chars_per_token * 0.9)  # 90% to leave margin
+    overlap_chars = int(overlap_tokens * chars_per_token)
+
+    units = []
+    chunk_idx = 0
+    pos = 0
+    total_chars = sum(len(l) for l in lines)
+
+    line_offsets = []
+    offset = 0
+    for l in lines:
+        line_offsets.append(offset)
+        offset += len(l)
+
+    while pos < total_chars:
+        end = min(pos + chunk_chars, total_chars)
+        # Find line boundary
+        best_line = 0
+        for i, lo in enumerate(line_offsets):
+            if lo <= end:
+                best_line = i
+            else:
+                break
+
+        unit_id = f"{sha}#c{chunk_idx}"
+        units.append({
+            'unit_id': unit_id,
+            'input_sha256': sha,
+            'granularity': 'chunk',
+            'plan_reason': 'over_context',
+            'chunk_index': chunk_idx,
+            'reduce_group': sha,
+        })
+        chunk_idx += 1
+
+        # Advance past end, with overlap
+        next_pos = line_offsets[best_line] + len(lines[best_line])
+        if next_pos <= pos:
+            next_pos = end  # Prevent infinite loop
+        pos = max(next_pos - overlap_chars, pos + 1)
+
+    return units
+
+
+def count_tokens_file(path, tokenizer_cmd):
+    """Count tokens in a file using the tokenizer command."""
+    try:
+        result = subprocess.run(
+            tokenizer_cmd + [path],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            return int(result.stdout.strip())
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# J1.3 — Extraction dispatch
+# ---------------------------------------------------------------------------
+
+def extract_unit(unit, input_meta):
+    """Extract content for a processing unit.
+    Returns {text, image_data_uri, error}."""
+    media_type = input_meta['media_type']
+    path = input_meta['input_path']
+
+    if unit.get('plan_reason') == 'extractor_unavailable':
+        return {'error': 'extractor_unavailable:application/pdf'}
+
+    if media_type.startswith('image/'):
+        # Read image, encode as base64 data URI
+        try:
+            with open(path, 'rb') as f:
+                data = f.read()
+            mime = media_type
+            b64 = base64.b64encode(data).decode('ascii')
+            return {'image_data_uri': f'data:{mime};base64,{b64}'}
+        except OSError as e:
+            return {'error': f'read_failed:{e}'}
+
+    if media_type == 'text/plain':
+        try:
+            with open(path, 'r', errors='replace') as f:
+                text = f.read()
+            # If this is a chunk, extract the relevant portion
+            chunk_idx = unit.get('chunk_index')
+            if chunk_idx is not None:
+                # For now, return full text — the model call will handle context
+                pass
+            return {'text': text}
+        except OSError as e:
+            return {'error': f'read_failed:{e}'}
+
+    return {'error': f'unsupported_type:{media_type}'}
+
+
+# ---------------------------------------------------------------------------
+# J1.4 — Model call
+# ---------------------------------------------------------------------------
+
+def build_request_body(job, extraction, unit):
+    """Build the serve request body for a unit."""
+    schema_str = json.dumps(job['output_schema'], indent=None)
+    system_prompt = (
+        f"{job['instruction']}\n\n"
+        f"Output JSON Schema:\n{schema_str}\n\n"
+        f"Return ONLY a JSON object matching the schema above. "
+        f"No prose, no markdown fences, no explanation."
+    )
+
+    user_content = []
+    if extraction.get('text'):
+        user_content.append({'type': 'text', 'text': extraction['text']})
+    if extraction.get('image_data_uri'):
+        user_content.append({
+            'type': 'image_url',
+            'image_url': {'url': extraction['image_data_uri']}
+        })
+
+    if not user_content:
+        return None
+
+    inf = job.get('inference', {})
+    body = {
+        'model': 'qwen3.6-35b-a3b',
+        'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_content if len(user_content) > 1
+             else user_content[0].get('text') or user_content},
+        ],
+        'thinking': inf.get('thinking', 'off'),
+        'seed': inf.get('seed', 11),
+        'temperature': inf.get('temperature', 0),
+        'max_tokens': inf.get('max_tokens', 512),
+        'stream': False,
+    }
+    return body
+
+
+def call_serve(body, serve_url, timeout=None, is_background=True):
+    """POST to samosa serve. Returns (response_dict, error_str)."""
+    data = json.dumps(body).encode('utf-8')
+
+    # Check body size (F-J5)
+    if len(data) > HTTP_MAX_BODY:
+        return None, 'image_too_large'
+
+    headers = {
+        'Content-Type': 'application/json',
+    }
+    if is_background:
+        headers['X-Samosa-Priority'] = 'background'
+
+    url = f"{serve_url}/v1/chat/completions"
+    req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+
+    try:
+        if timeout:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+        else:
+            resp = urllib.request.urlopen(req)
+        resp_data = resp.read()
+        return json.loads(resp_data), None
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode('utf-8', errors='replace')
+        try:
+            err_json = json.loads(body_text)
+            code = err_json.get('error', {}).get('code', str(e.code))
+        except json.JSONDecodeError:
+            code = str(e.code)
+        return None, code
+    except urllib.error.URLError as e:
+        return None, f'connection_error:{e.reason}'
+    except Exception as e:
+        return None, f'request_error:{e}'
+
+
+def get_serve_status(serve_url):
+    """GET /internal/v1/status. Returns dict or None."""
+    url = f"{serve_url}/internal/v1/status"
+    try:
+        resp = urllib.request.urlopen(url, timeout=5)
+        return json.loads(resp.read())
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# J1.6 — Atomic artifact + provenance write
+# ---------------------------------------------------------------------------
+
+def write_result_and_provenance(job_dir, unit_id, result, provenance):
+    """Atomically write result and provenance files."""
+    items_dir = Path(job_dir) / 'results' / 'items'
+    items_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_uid = unit_id.replace('#', '_').replace('/', '_')
+    result_path = items_dir / f"{safe_uid}.json"
+    prov_path = items_dir / f"{safe_uid}.provenance.json"
+
+    atomic_write(result_path, json.dumps(result, indent=2))
+    atomic_write(prov_path, json.dumps(provenance, indent=2))
+
+    return str(result_path), str(prov_path)
+
+
+# ---------------------------------------------------------------------------
+# J1.7 — Event log + recovery + process lock
+# ---------------------------------------------------------------------------
+
+class EventLog:
+    """Append-only JSONL event log with monotonic sequence numbers."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.seq = 0
+        self.events = []
+
+    def load(self):
+        """Load existing events, ignoring a torn final line."""
+        self.events = []
+        self.seq = 0
+        if not self.path.exists():
+            return
+        with open(self.path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    evt = json.loads(line)
+                    self.events.append(evt)
+                    s = evt.get('seq', 0)
+                    if s > self.seq:
+                        self.seq = s
+                except json.JSONDecodeError:
+                    # Torn write — ignore the last non-JSON line
+                    pass
+
+    def append(self, event_type, **fields):
+        """Append an event to the log."""
+        self.seq += 1
+        event = {
+            'seq': self.seq,
+            'ts': rfc3339_now(),
+            'type': event_type,
+            **fields,
+        }
+        self.events.append(event)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path, 'a') as f:
+            f.write(json.dumps(event, separators=(',', ':')) + '\n')
+            f.flush()
+            os.fsync(f.fileno())
+        return event
+
+    def get_unit_state(self, unit_id):
+        """Get the last event type for a unit_id."""
+        last = None
+        for evt in self.events:
+            if evt.get('unit_id') == unit_id:
+                last = evt
+        return last
+
+    def get_terminal_units(self):
+        """Get set of unit_ids that have reached a terminal state."""
+        terminal = set()
+        terminal_types = {'item_complete', 'item_review_required', 'item_failed'}
+        for evt in self.events:
+            uid = evt.get('unit_id')
+            if uid and evt['type'] in terminal_types:
+                terminal.add(uid)
+        return terminal
+
+    def get_processed_inputs(self, max_attempts):
+        """Get set of input_sha256 values whose all planned units are terminal."""
+        # Build mapping: input_sha256 -> set of planned unit_ids
+        planned = {}
+        for evt in self.events:
+            if evt['type'] == 'item_planned':
+                sha = evt.get('input_sha256')
+                uid = evt.get('unit_id')
+                if sha and uid:
+                    planned.setdefault(sha, set()).add(uid)
+
+        terminal = self.get_terminal_units()
+        processed = set()
+        for sha, units in planned.items():
+            if units.issubset(terminal):
+                processed.add(sha)
+        return processed
+
+
+class JobLock:
+    """Advisory flock on job.lock."""
+
+    def __init__(self, lock_path):
+        self.lock_path = Path(lock_path)
+        self.fd = None
+
+    def acquire(self):
+        """Acquire the lock. Returns True on success, False if held."""
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self.fd = open(self.lock_path, 'w')
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.fd.write(str(os.getpid()))
+            self.fd.flush()
+            return True
+        except (IOError, OSError):
+            self.fd.close()
+            self.fd = None
+            return False
+
+    def release(self):
+        if self.fd:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+                self.fd.close()
+            except (IOError, OSError):
+                pass
+            self.fd = None
+
+
+# ---------------------------------------------------------------------------
+# J1.9 — Page reduction
+# ---------------------------------------------------------------------------
+
+def reduce_units(units_results, schema, reduce_config):
+    """Merge split-file page/chunk units into a single document record.
+    Returns (merged_record, validation, method)."""
+    mode = reduce_config.get('mode', 'deterministic')
+    model_fields = reduce_config.get('model_fields', [])
+    properties = schema.get('properties', {})
+
+    if mode == 'deterministic' and not model_fields:
+        # Pure deterministic merge
+        merged = {}
+        errors = []
+        for fname in properties:
+            values = []
+            for ur in units_results:
+                rec = ur.get('record')
+                if rec and fname in rec and rec[fname] is not None:
+                    values.append(rec[fname])
+            if not values:
+                merged[fname] = None
+            elif len(set(json.dumps(v, sort_keys=True) for v in values)) == 1:
+                merged[fname] = values[0]
+            else:
+                merged[fname] = None
+                errors.append(f"reduce_conflict:{fname}")
+
+        # Check for failed/unparseable pages
+        missing_pages = []
+        for ur in units_results:
+            if ur.get('status') in ('review_required',) and 'unparseable' in ur.get('errors', []):
+                missing_pages.append(ur.get('unit_id', '?'))
+            elif ur.get('status') == 'failed':
+                missing_pages.append(ur.get('unit_id', '?'))
+
+        if missing_pages:
+            errors.append(f"missing_pages:{','.join(missing_pages)}")
+
+        # Carry page-level review reasons
+        all_reasons = []
+        for ur in units_results:
+            all_reasons.extend(ur.get('errors', []))
+
+        status = 'review_required' if errors or all_reasons else 'passed'
+        validation = {'status': status, 'errors': errors}
+        return merged, validation, 'deterministic'
+
+    # Model reduce would go here (J1.9 extended)
+    return None, {'status': 'review_required', 'errors': ['reduce_mode_unsupported']}, mode
+
+
+# ---------------------------------------------------------------------------
+# J1.12 — Static Jobs view
+# ---------------------------------------------------------------------------
+
+def render_view_html(job, events, job_dir):
+    """Render results/view.html — fully escaped, self-contained."""
+    items_dir = Path(job_dir) / 'results' / 'items'
+
+    # Gather unit states
+    units = {}
+    for evt in events:
+        uid = evt.get('unit_id')
+        if uid:
+            units[uid] = evt
+
+    # Count stats
+    total = len(units)
+    passed = sum(1 for u in units.values() if u['type'] == 'item_complete')
+    review = sum(1 for u in units.values() if u['type'] == 'item_review_required')
+    failed = sum(1 for u in units.values() if u['type'] == 'item_failed')
+
+    # Compute times
+    timestamps = [evt.get('ts', '') for evt in events if evt.get('ts')]
+    wall_time = ''
+    if len(timestamps) >= 2:
+        wall_time = f"{timestamps[0]} → {timestamps[-1]}"
+
+    job_name = html_escape(job.get('name', job.get('job_id', 'unknown')))
+
+    rows_html = []
+    # Sort by unit_id for deterministic order
+    for uid in sorted(units.keys()):
+        evt = units[uid]
+        state = evt['type'].replace('item_', '')
+        input_path = html_escape(evt.get('input_path', evt.get('input_sha256', '')))
+        granularity = html_escape(evt.get('granularity', ''))
+        reasons = ''
+        if 'reasons' in evt:
+            reasons = html_escape(', '.join(evt['reasons']))
+        elif 'error' in evt:
+            reasons = html_escape(str(evt['error']))
+        rows_html.append(
+            f'<tr><td>{html_escape(uid)}</td><td>{input_path}</td>'
+            f'<td>{granularity}</td><td>{html_escape(state)}</td>'
+            f'<td>{reasons}</td></tr>'
+        )
+
+    view_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Samosa Jobs — {job_name}</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 2em; background: #f5f5f5; color: #333; }}
+h1 {{ font-size: 1.4em; }}
+.summary {{ background: #fff; padding: 1em; border-radius: 8px; margin-bottom: 1em; box-shadow: 0 1px 3px rgba(0,0,0,.1); }}
+table {{ border-collapse: collapse; width: 100%; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.1); }}
+th, td {{ text-align: left; padding: 0.5em 1em; border-bottom: 1px solid #eee; font-size: 0.9em; }}
+th {{ background: #fafafa; font-weight: 600; }}
+.review {{ color: #d97706; font-weight: 600; }}
+.failed {{ color: #dc2626; }}
+.passed {{ color: #16a34a; }}
+</style></head>
+<body>
+<h1>Samosa Jobs — {job_name}</h1>
+<div class="summary">
+<p><strong>Total:</strong> {total} &nbsp; <span class="passed">Passed: {passed}</span> &nbsp;
+<span class="review">Review: {review}</span> &nbsp; <span class="failed">Failed: {failed}</span></p>
+<p><strong>Wall time:</strong> {html_escape(wall_time)}</p>
+</div>
+<table>
+<tr><th>Unit ID</th><th>Input</th><th>Granularity</th><th>State</th><th>Details</th></tr>
+{''.join(rows_html)}
+</table>
+</body></html>"""
+
+    view_path = Path(job_dir) / 'results' / 'view.html'
+    view_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(view_path, view_html)
+    return str(view_path)
+
+
+# ---------------------------------------------------------------------------
+# J1.13 — Resource gate + chat interlock
+# ---------------------------------------------------------------------------
+
+def gate_check(job, serve_url):
+    """Check if it is safe to proceed. Returns (ok, reason) where ok=True means proceed."""
+    resources = job.get('resources', {})
+
+    # 1. Chat interlock
+    status = get_serve_status(serve_url)
+    if status:
+        if status.get('interactive_active'):
+            return False, 'interactive_chat'
+        # Check cool-down (60s)
+        last_ts = status.get('last_interactive_ts')
+        if last_ts and last_ts != 'null' and isinstance(last_ts, str):
+            try:
+                last_dt = datetime.fromisoformat(last_ts.replace('Z', '+00:00'))
+                elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                if elapsed < 60:
+                    return False, 'interactive_chat'
+            except (ValueError, TypeError):
+                pass
+
+    # 2. Free storage
+    min_free_gb = resources.get('min_free_gb', 5)
+    try:
+        st = os.statvfs('/')
+        free_gb = (st.f_bavail * st.f_frsize) / (1024 ** 3)
+        if free_gb < min_free_gb:
+            return False, 'low_disk'
+    except OSError:
+        pass
+
+    # 3. Power policy
+    if not resources.get('run_on_battery', False):
+        if _on_battery():
+            return False, 'on_battery'
+
+    # 4. Memory pressure (macOS)
+    if platform.system() == 'Darwin':
+        pressure = _macos_memory_pressure()
+        if pressure and pressure >= 2:  # WARN or CRITICAL
+            return False, 'memory_pressure'
+
+    return True, None
+
+
+def _on_battery():
+    """Check if running on battery (macOS)."""
+    if platform.system() == 'Darwin':
+        try:
+            result = subprocess.run(
+                ['pmset', '-g', 'batt'], capture_output=True, text=True, timeout=5
+            )
+            if 'Battery Power' in result.stdout:
+                return True
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+    elif platform.system() == 'Linux':
+        try:
+            for ps in Path('/sys/class/power_supply').iterdir():
+                type_file = ps / 'type'
+                if type_file.exists() and type_file.read_text().strip() == 'Mains':
+                    online_file = ps / 'online'
+                    if online_file.exists() and online_file.read_text().strip() == '1':
+                        return False
+                    return True
+        except OSError:
+            pass
+    return False
+
+
+def _macos_memory_pressure():
+    """Read macOS memory pressure level. Returns 0=normal, 1=warn, 2+=critical."""
+    try:
+        result = subprocess.run(
+            ['memory_pressure'], capture_output=True, text=True, timeout=5
+        )
+        if 'CRITICAL' in result.stdout:
+            return 3
+        if 'WARN' in result.stdout:
+            return 2
+    except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+        pass
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# J1.11 — Merged output
+# ---------------------------------------------------------------------------
+
+def write_merged_output(job, job_dir, event_log):
+    """Write results/output.jsonl or output.csv."""
+    fmt = job.get('output', {}).get('format', 'jsonl')
+    items_dir = Path(job_dir) / 'results' / 'items'
+    results_dir = Path(job_dir) / 'results'
+
+    # Collect completed unit results, ordered by input_path
+    completed = []
+    for evt in event_log.events:
+        if evt['type'] == 'item_complete':
+            uid = evt.get('unit_id', '')
+            safe_uid = uid.replace('#', '_').replace('/', '_')
+            result_file = items_dir / f"{safe_uid}.json"
+            if result_file.exists():
+                try:
+                    record = json.loads(result_file.read_text())
+                    completed.append({
+                        'input_sha256': evt.get('input_sha256', ''),
+                        'input_path': evt.get('input_path', ''),
+                        **record,
+                    })
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+    # Sort by input_path
+    completed.sort(key=lambda r: r.get('input_path', ''))
+
+    if fmt == 'jsonl':
+        out_path = results_dir / 'output.jsonl'
+        lines = [json.dumps(r, separators=(',', ':')) for r in completed]
+        atomic_write(out_path, '\n'.join(lines) + '\n' if lines else '')
+    else:
+        out_path = results_dir / 'output.csv'
+        if completed:
+            props = list(job.get('output_schema', {}).get('properties', {}).keys())
+            fieldnames = ['input_sha256', 'input_path'] + props
+            buf = io.StringIO()
+            writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction='ignore')
+            writer.writeheader()
+            for r in completed:
+                writer.writerow(r)
+            atomic_write(out_path, buf.getvalue())
+        else:
+            atomic_write(out_path, '')
+
+
+# ---------------------------------------------------------------------------
+# Main runner — orchestrates J1.0 through J1.13
+# ---------------------------------------------------------------------------
+
+def get_jobs_root():
+    """Get the jobs root directory."""
+    env = os.environ.get('SAMOSA_JOBS_DIR')
+    if env:
+        return Path(env)
+    home = os.environ.get('HOME', '.')
+    return Path(home) / '.samosa' / 'jobs'
+
+
+def get_serve_url():
+    return os.environ.get('SAMOSA_SERVE_URL', SERVE_URL_DEFAULT)
+
+
+def get_tokenizer_cmd():
+    """Get the tokenizer command for token counting."""
+    engine = os.environ.get('SAMOSA_ENGINE', 'qwen36b')
+    tokenizer = os.environ.get('TOKENIZER')
+    cmd = [engine, 'tokenize', '--count']
+    if tokenizer:
+        cmd.extend(['--tokenizer', tokenizer])
+    return cmd
+
+
+def cmd_validate(args):
+    """samosa jobs validate <job.json>"""
+    if len(args) < 1:
+        print("Usage: samosa jobs validate <job.json>", file=sys.stderr)
+        return 2
+    job, errors = load_and_validate_job(args[0])
+    if errors:
+        for e in errors:
+            print(f"error: {e}", file=sys.stderr)
+        return 2
+    print(json.dumps(job, indent=2))
+    return 0
+
+
+def cmd_arm(args):
+    """samosa jobs arm <job.json> — freeze the definition into the job dir."""
+    if len(args) < 1:
+        print("Usage: samosa jobs arm <job.json>", file=sys.stderr)
+        return 2
+
+    job, errors = load_and_validate_job(args[0])
+    if errors:
+        for e in errors:
+            print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    job_id = job['job_id']
+    jobs_root = get_jobs_root()
+    job_dir = jobs_root / job_id
+    frozen_path = job_dir / 'job.json'
+
+    if frozen_path.exists():
+        existing = json.loads(frozen_path.read_text())
+        existing_hash = sha256_bytes(json.dumps(existing, sort_keys=True).encode())
+        new_hash = sha256_bytes(json.dumps(job, sort_keys=True).encode())
+        if existing_hash != new_hash:
+            print(f"error: job {job_id} already armed with different content; "
+                  f"use a new job_id or 'clone'", file=sys.stderr)
+            return 4
+
+    job_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(str(job_dir), 0o700)
+    atomic_write(frozen_path, json.dumps(job, indent=2))
+    print(f"armed: {job_dir}")
+    return 0
+
+
+def cmd_status(args):
+    """samosa jobs status <job.json> — print job progress."""
+    if len(args) < 1:
+        print("Usage: samosa jobs status <job.json>", file=sys.stderr)
+        return 2
+
+    job, errors = load_and_validate_job(args[0])
+    if errors:
+        for e in errors:
+            print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    job_id = job['job_id']
+    job_dir = get_jobs_root() / job_id
+    log_path = job_dir / 'events.jsonl'
+
+    if not log_path.exists():
+        print(f"job {job_id}: not started")
+        return 0
+
+    event_log = EventLog(log_path)
+    event_log.load()
+
+    # Count states
+    states = {}
+    for evt in event_log.events:
+        uid = evt.get('unit_id')
+        if uid:
+            states[uid] = evt['type']
+
+    counts = {}
+    for state in states.values():
+        counts[state] = counts.get(state, 0) + 1
+
+    total = len(states)
+    print(f"job {job_id}: {total} units")
+    for state, count in sorted(counts.items()):
+        print(f"  {state}: {count}")
+
+    return 0
+
+
+def cmd_preview(args):
+    """samosa jobs preview <job.json> [--file <path>]"""
+    if len(args) < 1:
+        print("Usage: samosa jobs preview <job.json> [--file <path>]", file=sys.stderr)
+        return 2
+
+    preview_file = None
+    job_path = args[0]
+    i = 1
+    while i < len(args):
+        if args[i] == '--file' and i + 1 < len(args):
+            preview_file = args[i + 1]
+            i += 2
+        else:
+            print(f"Unknown argument: {args[i]}", file=sys.stderr)
+            return 2
+
+    job, errors = load_and_validate_job(job_path)
+    if errors:
+        for e in errors:
+            print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    job_id = job['job_id']
+    job_dir = get_jobs_root() / job_id
+    preview_dir = job_dir / 'preview'
+    preview_dir.mkdir(parents=True, exist_ok=True)
+
+    # Discover or use specified file
+    if preview_file:
+        with open(preview_file, 'rb') as f:
+            data = f.read()
+        file_hash = sha256_bytes(data)
+        media_type = detect_media_type(data[:8])
+        if media_type is None:
+            if is_valid_utf8_text(data):
+                media_type = 'text/plain'
+            else:
+                print("error: unsupported file type", file=sys.stderr)
+                return 2
+        input_meta = {
+            'input_path': preview_file,
+            'input_sha256': file_hash,
+            'media_type': media_type,
+            'size': len(data),
+        }
+    else:
+        items, skipped = discover_inputs(job['input'])
+        if not items:
+            print("error: no input files found", file=sys.stderr)
+            return 2
+        input_meta = items[0]
+
+    # Plan
+    inf = job.get('inference', {})
+    budget = MAX_CONTEXT - inf.get('max_tokens', 512) - SYSTEM_RESERVE
+    units = plan_units(input_meta, job.get('unit', 'auto'), budget)
+    unit = units[0]  # Preview: first unit only
+
+    # Extract
+    extraction = extract_unit(unit, input_meta)
+    if extraction.get('error'):
+        result = {'error': extraction['error']}
+        atomic_write(preview_dir / 'result.json', json.dumps(result, indent=2))
+        print(json.dumps(result, indent=2))
+        return 0
+
+    # Model call
+    serve_url = get_serve_url()
+    body = build_request_body(job, extraction, unit)
+    if body is None:
+        print("error: could not build request body", file=sys.stderr)
+        return 2
+
+    resp, err = call_serve(body, serve_url, timeout=300)
+    if err:
+        print(f"error: serve call failed: {err}", file=sys.stderr)
+        return 2
+
+    content = resp.get('choices', [{}])[0].get('message', {}).get('content', '')
+    validation = validate_output(content, job['output_schema'],
+                                  job.get('validation', {}).get('domain_rules'))
+
+    result = validation.get('record', {})
+    prov = {
+        'unit_id': unit['unit_id'],
+        'input_sha256': input_meta['input_sha256'],
+        'input_path': input_meta['input_path'],
+        'media_type': input_meta['media_type'],
+        'validation': validation['status'],
+        'runner_version': RUNNER_VERSION,
+    }
+
+    atomic_write(preview_dir / 'result.json', json.dumps(result, indent=2))
+    atomic_write(preview_dir / 'provenance.json', json.dumps(prov, indent=2))
+
+    print(json.dumps({'result': result, 'validation': validation}, indent=2))
+    return 0
+
+
+def cmd_run(args):
+    """samosa jobs run <job.json> — main execution flow."""
+    if len(args) < 1:
+        print("Usage: samosa jobs run <job.json>", file=sys.stderr)
+        return 2
+
+    # Validate and arm
+    job, errors = load_and_validate_job(args[0])
+    if errors:
+        for e in errors:
+            print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    job_id = job['job_id']
+    jobs_root = get_jobs_root()
+    job_dir = jobs_root / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(str(job_dir), 0o700)
+
+    # Arm (freeze job definition)
+    frozen_path = job_dir / 'job.json'
+    if frozen_path.exists():
+        existing = json.loads(frozen_path.read_text())
+        existing_hash = sha256_bytes(json.dumps(existing, sort_keys=True).encode())
+        new_hash = sha256_bytes(json.dumps(job, sort_keys=True).encode())
+        if existing_hash != new_hash:
+            print(f"error: job {job_id} already armed with different content; "
+                  f"use a new job_id or 'clone'", file=sys.stderr)
+            return 4
+    else:
+        atomic_write(frozen_path, json.dumps(job, indent=2))
+
+    # Acquire lock
+    lock = JobLock(job_dir / 'job.lock')
+    if not lock.acquire():
+        print(f"error: job {job_id} is already being run by another process", file=sys.stderr)
+        return 3
+
+    try:
+        return _run_job(job, job_dir)
+    finally:
+        lock.release()
+
+
+def _run_job(job, job_dir):
+    """Execute the job pipeline."""
+    serve_url = get_serve_url()
+    event_log = EventLog(job_dir / 'events.jsonl')
+    event_log.load()
+
+    job_id = job['job_id']
+    max_attempts = job.get('resources', {}).get('max_attempts', 3)
+
+    # Emit job_created if first run
+    if not any(e['type'] == 'job_created' for e in event_log.events):
+        job_hash = sha256_bytes(json.dumps(job, sort_keys=True).encode())
+        event_log.append('job_created', job_id=job_id, job_sha256=job_hash)
+
+    # Discover inputs
+    print(f"[jobs] discovering inputs in {job['input']['folder']}...")
+    items, skipped = discover_inputs(job['input'])
+    for path, reason in skipped:
+        print(f"  skip: {path}: {reason}", file=sys.stderr)
+
+    # Get processed set for idempotency
+    processed = event_log.get_processed_inputs(max_attempts)
+    new_items = [it for it in items if it['input_sha256'] not in processed]
+    print(f"[jobs] {len(items)} inputs found, {len(new_items)} new, {len(processed)} already processed")
+
+    if not new_items:
+        print("[jobs] nothing to do")
+        return 0
+
+    # Emit item_discovered for new items
+    for item in new_items:
+        already_discovered = any(
+            e['type'] == 'item_discovered' and e.get('input_sha256') == item['input_sha256']
+            for e in event_log.events
+        )
+        if not already_discovered:
+            event_log.append('item_discovered',
+                             input_sha256=item['input_sha256'],
+                             input_path=item['input_path'],
+                             media_type=item['media_type'])
+
+    # Plan units
+    inf = job.get('inference', {})
+    budget = MAX_CONTEXT - inf.get('max_tokens', 512) - SYSTEM_RESERVE
+    tokenizer_cmd = get_tokenizer_cmd()
+
+    all_units = []
+    for item in new_items:
+        units = plan_units(item, job.get('unit', 'auto'), budget, tokenizer_cmd)
+        for u in units:
+            already_planned = any(
+                e['type'] == 'item_planned' and e.get('unit_id') == u['unit_id']
+                for e in event_log.events
+            )
+            if not already_planned:
+                event_log.append('item_planned',
+                                 unit_id=u['unit_id'],
+                                 input_sha256=u['input_sha256'],
+                                 granularity=u['granularity'],
+                                 plan_reason=u['plan_reason'])
+            all_units.append((u, item))
+
+    # Filter out already-terminal units
+    terminal = event_log.get_terminal_units()
+    pending = [(u, item) for u, item in all_units if u['unit_id'] not in terminal]
+
+    print(f"[jobs] {len(all_units)} units planned, {len(pending)} pending")
+
+    # Process units
+    processed_count = 0
+    review_count = 0
+    failed_count = 0
+
+    for unit, item in pending:
+        uid = unit['unit_id']
+
+        # Gate check before each unit
+        ok, reason = gate_check(job, serve_url)
+        while not ok:
+            event_log.append('job_paused', reason=reason)
+            print(f"[jobs] paused: {reason}. Waiting...")
+            time.sleep(30)
+            ok, reason = gate_check(job, serve_url)
+            if ok:
+                event_log.append('job_resumed', reason=f"cleared:{reason}")
+
+        # Handle extractor_unavailable
+        if unit.get('plan_reason') == 'extractor_unavailable':
+            event_log.append('item_review_required',
+                             unit_id=uid,
+                             input_sha256=item['input_sha256'],
+                             input_path=item['input_path'],
+                             reasons=['extractor_unavailable:application/pdf'])
+            review_count += 1
+            continue
+
+        # Extract
+        extraction = extract_unit(unit, item)
+        if extraction.get('error'):
+            event_log.append('item_review_required',
+                             unit_id=uid,
+                             input_sha256=item['input_sha256'],
+                             input_path=item['input_path'],
+                             reasons=[extraction['error']])
+            review_count += 1
+            continue
+
+        event_log.append('item_ingested', unit_id=uid)
+
+        # Model call with retry
+        attempt = 0
+        success = False
+        while attempt < max_attempts:
+            attempt += 1
+            event_log.append('item_running', unit_id=uid, attempt=attempt)
+
+            body = build_request_body(job, extraction, unit)
+            if body is None:
+                event_log.append('item_failed', unit_id=uid, attempt=attempt,
+                                 error='could_not_build_request')
+                failed_count += 1
+                break
+
+            # Check body size
+            encoded = json.dumps(body).encode()
+            if len(encoded) > HTTP_MAX_BODY:
+                event_log.append('item_review_required',
+                                 unit_id=uid,
+                                 input_sha256=item['input_sha256'],
+                                 input_path=item['input_path'],
+                                 reasons=['image_too_large'])
+                review_count += 1
+                success = True  # Terminal, don't retry
+                break
+
+            # Derive timeout
+            timeout = inf.get('timeout_s')
+            if timeout is None:
+                est_tokens = item.get('size', 0) // 4 + inf.get('max_tokens', 512)
+                timeout = max(120, 30 + est_tokens * 0.5)  # Conservative
+
+            resp, err = call_serve(body, serve_url, timeout=timeout)
+
+            if err == 'context_limit':
+                # Split and re-enqueue — for now, mark as review
+                event_log.append('item_review_required',
+                                 unit_id=uid,
+                                 input_sha256=item['input_sha256'],
+                                 input_path=item['input_path'],
+                                 reasons=['context_limit_irreducible'])
+                review_count += 1
+                success = True
+                break
+            elif err == 'queue_full':
+                # Back-off, don't count against attempts
+                time.sleep(2 ** min(attempt, 5))
+                attempt -= 1  # Don't count this attempt
+                continue
+            elif err:
+                if attempt < max_attempts:
+                    event_log.append('item_retry_wait', unit_id=uid,
+                                     attempt=attempt, error=err)
+                    # Poll status until inference_busy is false
+                    for _ in range(30):
+                        st = get_serve_status(serve_url)
+                        if st and not st.get('inference_busy'):
+                            break
+                        time.sleep(2)
+                    time.sleep(1)  # Small additional delay
+                    continue
+                else:
+                    event_log.append('item_failed', unit_id=uid,
+                                     attempt=attempt, error=err)
+                    failed_count += 1
+                    break
+
+            # Success — validate output
+            content = resp.get('choices', [{}])[0].get('message', {}).get('content', '')
+            usage = resp.get('usage', {})
+            validation = validate_output(content, job['output_schema'],
+                                          job.get('validation', {}).get('domain_rules'))
+
+            record = validation.get('record', {})
+            prov = {
+                'unit_id': uid,
+                'input_sha256': item['input_sha256'],
+                'input_path': item['input_path'],
+                'granularity': unit['granularity'],
+                'media_type': item['media_type'],
+                'schema_version': 1,
+                'seed': inf.get('seed', 11),
+                'attempt': attempt,
+                'input_tokens': usage.get('prompt_tokens'),
+                'output_tokens': usage.get('completion_tokens'),
+                'validation': validation['status'],
+                'runner_version': RUNNER_VERSION,
+            }
+
+            # Atomic write
+            write_result_and_provenance(str(job_dir), uid, record, prov)
+
+            if validation['status'] == 'passed':
+                event_log.append('item_complete', unit_id=uid,
+                                 input_sha256=item['input_sha256'],
+                                 input_path=item['input_path'],
+                                 artifact=uid,
+                                 validation=validation['status'])
+                processed_count += 1
+            else:
+                # Copy to review/
+                review_dir = Path(job_dir) / 'results' / 'review'
+                review_dir.mkdir(parents=True, exist_ok=True)
+                safe_uid = uid.replace('#', '_').replace('/', '_')
+                shutil.copy2(
+                    str(Path(job_dir) / 'results' / 'items' / f"{safe_uid}.json"),
+                    str(review_dir / f"{safe_uid}.json")
+                )
+                event_log.append('item_review_required', unit_id=uid,
+                                 input_sha256=item['input_sha256'],
+                                 input_path=item['input_path'],
+                                 reasons=validation['errors'])
+                review_count += 1
+
+            success = True
+            break
+
+    # Job complete
+    event_log.append('job_complete',
+                     processed=processed_count,
+                     review=review_count,
+                     failed=failed_count)
+
+    # Write merged output
+    write_merged_output(job, str(job_dir), event_log)
+
+    # Render view
+    render_view_html(job, event_log.events, str(job_dir))
+
+    print(f"[jobs] complete: {processed_count} passed, {review_count} review, {failed_count} failed")
+    return 0
+
+
+def cmd_view(args):
+    """samosa jobs view <job.json>"""
+    if len(args) < 1:
+        print("Usage: samosa jobs view <job.json>", file=sys.stderr)
+        return 2
+
+    job, errors = load_and_validate_job(args[0])
+    if errors:
+        for e in errors:
+            print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    job_dir = get_jobs_root() / job['job_id']
+    log_path = job_dir / 'events.jsonl'
+    if not log_path.exists():
+        print(f"error: no events found for job {job['job_id']}", file=sys.stderr)
+        return 2
+
+    event_log = EventLog(log_path)
+    event_log.load()
+
+    view_path = render_view_html(job, event_log.events, str(job_dir))
+    print(f"view: {view_path}")
+    return 0
+
+
+def cmd_delete(args):
+    """samosa jobs delete <job.json>"""
+    if len(args) < 1:
+        print("Usage: samosa jobs delete <job.json>", file=sys.stderr)
+        return 2
+
+    job, errors = load_and_validate_job(args[0])
+    if errors:
+        for e in errors:
+            print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    job_dir = get_jobs_root() / job['job_id']
+    if job_dir.exists():
+        shutil.rmtree(str(job_dir))
+        print(f"deleted: {job_dir}")
+    else:
+        print(f"job directory not found: {job_dir}")
+    return 0
+
+
+def cmd_archive(args):
+    """samosa jobs archive <job.json>"""
+    if len(args) < 1:
+        print("Usage: samosa jobs archive <job.json>", file=sys.stderr)
+        return 2
+
+    job, errors = load_and_validate_job(args[0])
+    if errors:
+        for e in errors:
+            print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    job_dir = get_jobs_root() / job['job_id']
+    if not job_dir.exists():
+        print(f"job directory not found: {job_dir}", file=sys.stderr)
+        return 2
+
+    archive_dir = get_jobs_root() / '.archive'
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    dest = archive_dir / job['job_id']
+    if dest.exists():
+        shutil.rmtree(str(dest))
+    shutil.move(str(job_dir), str(dest))
+    print(f"archived: {dest}")
+    return 0
+
+
+def cmd_suggest_schema(args):
+    """samosa jobs suggest-schema <job.json|--instruction "...">"""
+    instruction = None
+    job = None
+
+    if len(args) >= 2 and args[0] == '--instruction':
+        instruction = args[1]
+    elif len(args) >= 1:
+        job, errors = load_and_validate_job(args[0])
+        if errors:
+            for e in errors:
+                print(f"error: {e}", file=sys.stderr)
+            return 2
+        instruction = job.get('instruction', '')
+    else:
+        print("Usage: samosa jobs suggest-schema <job.json|--instruction '...'>", file=sys.stderr)
+        return 2
+
+    serve_url = get_serve_url()
+    body = {
+        'model': 'qwen3.6-35b-a3b',
+        'messages': [
+            {'role': 'system', 'content':
+                'You are a JSON schema designer. Given a data extraction instruction, '
+                'propose a JSON Schema (type: object) with appropriate required fields '
+                'and property types. Use only: string, number, integer, boolean, null. '
+                'Return ONLY the JSON schema object, no prose.'},
+            {'role': 'user', 'content': instruction},
+        ],
+        'thinking': 'off',
+        'temperature': 0,
+        'max_tokens': 1024,
+        'stream': False,
+    }
+
+    resp, err = call_serve(body, serve_url, timeout=120)
+    if err:
+        print(f"error: serve call failed: {err}", file=sys.stderr)
+        return 2
+
+    content = resp.get('choices', [{}])[0].get('message', {}).get('content', '')
+    # Try to parse the schema
+    try:
+        schema = json.loads(content)
+    except json.JSONDecodeError:
+        obj, _ = find_json_object(content)
+        schema = obj
+
+    if schema:
+        if job:
+            out_path = get_jobs_root() / job['job_id'] / 'suggested_schema.json'
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write(out_path, json.dumps(schema, indent=2))
+            print(f"schema written to: {out_path}")
+        print(json.dumps(schema, indent=2))
+    else:
+        print("error: could not parse schema from model output", file=sys.stderr)
+        print(content)
+        return 2
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+COMMANDS = {
+    'validate': cmd_validate,
+    'arm': cmd_arm,
+    'preview': cmd_preview,
+    'run': cmd_run,
+    'status': cmd_status,
+    'view': cmd_view,
+    'delete': cmd_delete,
+    'archive': cmd_archive,
+    'suggest-schema': cmd_suggest_schema,
+}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
+        cmds = ', '.join(COMMANDS.keys())
+        print(f"Usage: samosa jobs <command> [args...]", file=sys.stderr)
+        print(f"Commands: {cmds}", file=sys.stderr)
+        return 1
+    cmd = COMMANDS[sys.argv[1]]
+    return cmd(sys.argv[2:])
+
+
+if __name__ == '__main__':
+    sys.exit(main())
