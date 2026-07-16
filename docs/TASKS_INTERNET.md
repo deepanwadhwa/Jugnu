@@ -1,5 +1,16 @@
 # Issue #4 — Internet search
 
+> **Refolded under Samosa Jobs (2026-07-16).** The internet work now lives inside
+> [TASKS_JOBS.md](TASKS_JOBS.md) as a **scheduled, public-web job input source**,
+> not an interactive browse-mid-chat capability. **Everything verified here still
+> holds and is reused unchanged** — the SSRF-hardened fetcher and block list, the
+> E-I2 SSRF suite, the E-I3 extractor and JS-page detection, the
+> `SAMOSA_OFFLINE=1` kill switch. What changes is framing: fetching is
+> user-defined and scheduled (public pages only, no login, user supplies the
+> URLs), and model-initiated tool calls (A3.3) stay parked behind E-I1 because
+> jobs do not need them. Read this card for the verified security groundwork;
+> read [TASKS_JOBS.md](TASKS_JOBS.md) for how it is now used.
+
 **Read [APP_TASKS.md](APP_TASKS.md) Phase A3 first.** A plan already exists
 (A3.1 URL ingestion, A3.2 web search, A3.3 model-initiated tool calls). This
 document does not replace it. It adds what was verified on 2026-07-15, corrects

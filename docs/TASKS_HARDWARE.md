@@ -41,6 +41,10 @@ documentation implies.
 - **Real tradeoff, needs a policy:** H3 (threads vs heat). Currently a hardcoded
   guess from one fanless M3.
 - **A false tradeoff to delete:** H1 (SSD endurance).
+- **Left on the table, now first-class:** H5 (host-capability profile). A big
+  machine should run bigger *without the user knowing the flags* — RAM via the
+  page cache, cores via `--fast`/threads — but never by growing the LRU, and
+  never claimed beyond what a tier was measured to do.
 
 ---
 
@@ -460,6 +464,123 @@ test); the README's requirements match what was measured.
 
 ---
 
+## H5 — Host-capability profile: run to the machine, honestly  ~2–3 days (design)  **Cross-cutting; consolidates H2/H3/H4 detection**
+
+**Status: open, design. New 2026-07-16, from the owner:**
+
+> *"Samosa should be intelligent about where it's running. Someone with 64 GB
+> should use relatively more and be faster than someone with 16 GB. Why hardcode
+> two threads — a 128 GB box could run 12 and still have plenty left."*
+
+Right instinct, and today Samosa does the opposite: every resource decision is
+either a **hardcoded guess from the one fanless 16 GB M3 Air** (the 2-thread
+default) or an **opt-in flag the user has to know** (`--fast`, `OMP_NUM_THREADS`,
+`EBUDGET_AUTO`, `DIRECT`). Nothing asks *"what machine is this?"* and sizes the
+run to it. Capability is left on the table on big machines; the burden is on the
+user to discover the flags. H5 adds the missing layer: one `host_profile()`
+resolved at startup that the other levers read.
+
+### What "use more resources" does — and does not — mean (honesty first)
+
+The answer is already in this card's Verified ground truth:
+
+- **RAM → faster automatically, via the OS page cache — not the engine LRU.**
+  Decode reads are buffered ([qwen36b.c:1841](../src/qwen36b.c#L1841); `g_direct`
+  defaults 0 at [:2101](../src/qwen36b.c#L2101)), so on 64 GB the 20.9 GB expert
+  file largely caches and the SSD goes quiet after warmup — for free, once E-H2
+  confirms it. H5 routes "use my RAM" **to the page cache**. It must **not** grow
+  the engine's cache: measured **41 % slower**
+  ([qwen36b.c:2251-2254](../src/qwen36b.c#L2251-L2254)), a standing non-goal.
+- **Cores → more threads — bounded by thermal reality (H3) and the cgroup quota.**
+  A win on a cooled desktop; on a fanless laptop it is exactly what the 2-thread
+  default protects against.
+- **SIMD → already host-adaptive once H2 lands** (`cpuid` dispatch). H5 surfaces
+  the selected path in the profile.
+- **Storage class (H4) sets a floor, not a throttle** — HDD refused, SATA warned,
+  NVMe expected.
+
+So "a 128 GB box runs 12 threads" is only half right: the *threads* come from
+cores + cooling (H3); the *speed from RAM* comes from the page cache (H5 → cache),
+**not** from spending 128 GB on a bigger LRU.
+
+### The genuinely new decision: should the *default* scale, or only `--fast`?
+
+Today the conservative 2-thread default is universal, and "changing the macOS
+default" is a non-goal **because it encodes the owner's comfort preference on a
+fanless chassis**. But that reason is chassis-specific: a Mac Studio, or a
+plugged-in Linux tower with a real cooler, has no fanless-comfort reason to cap
+at 2.
+
+H5's proposal: the default becomes a **function of a detected capability tier**,
+with one hard rule — **the reference fanless M3 Air tier reproduces today's
+behavior byte-for-byte** (the owner's preference preserved exactly, verified by
+same-seed output and tok/s within noise). A machine demonstrably *not* that class
+may default higher — but only for a tier that has been **measured** (E-H5).
+Unknown/ambiguous class → the conservative profile, and say so. That is the
+opposite of a hardcoded universal 2, without overriding the one preference that
+is real.
+
+### Design: `host_profile()`, resolved once, logged
+
+Consolidate the detection currently duplicated across H2/H3/H4 into one struct + a
+`[host]` line:
+
+```
+[host] tier=desktop-cooled ram=64GB pcores=12 smt=on ac=yes storage=nvme isa=avx2 thermal=visible container=no
+```
+
+Fields: `ram_gb`; `phys_perf_cores` (**fix the non-SMT bug once, here** — H3's
+`logical/2` assumption that hands a 16-core non-SMT ARM server 4 threads — and let
+H3/H4 share the corrected value); `smt`; `on_ac`; `storage_class` (H4);
+`container` (`/.dockerenv`, `/proc/self/cgroup`); `cpu_isa` (H2);
+`thermal_visibility` (bare-metal vs container-blind, H3). These resolve to a
+**named tier from a small closed set** (`reference-fanless`, `desktop-cooled`,
+`container-blind`, `constrained`, `unknown`) that parameterizes the default thread
+count, the `--fast` ceiling, whether thermal adaptation is trusted, and the H4
+gate messaging. **A small set of measured tiers, not a continuous optimizer** —
+per-CPU autotuning stays a non-goal, for the same unboundedness reason.
+
+Every downstream consumer reads the profile instead of re-detecting: H2 (already
+automatic), H3 (its default derives from the tier; `reference-fanless` == today),
+H4 (the gate messages off the same storage/ISA facts), and Samosa Jobs' resource
+gate ([TASKS_JOBS.md](TASKS_JOBS.md) HR-6/J1.13, which today derives its thread
+budget ad hoc — H5 is the shared source it should read).
+
+### Honesty rules (non-negotiable)
+
+- `reference-fanless` == today, exactly. Anything else is a bug.
+- **No tier above the measured floor gets a throughput claim** until E-H5/E-H2/
+  E-H3 measure it on that class. "Adapts upward" is sayable; "fast on 64 GB" is
+  not, until measured.
+- Unknown/ambiguous host → conservative, logged reason.
+- Container → thermally blind (H3) → static conservative, logged.
+- `OMP_NUM_THREADS` always wins (H3's rule, preserved).
+- Never grow the engine LRU to "use RAM."
+
+### Acceptance
+
+- **M3 Air:** `tier=reference-fanless`; behavior **byte-identical to today**
+  (same-seed output; tok/s within noise). **The gate.**
+- **Big-RAM many-core box:** profile detected correctly; `[host]` line accurate;
+  default threads > 2 **only** if that tier was measured (E-H5), else conservative
+  + logged; the RAM win appears as a `bytes_read` drop via the page cache (E-H2),
+  **not** LRU growth.
+- **Non-SMT host:** `phys_perf_cores` correct — the value H3/H4 also consume.
+- **Battery / container / unknown:** conservative, reason logged.
+- **`OMP_NUM_THREADS=N`** wins in every case above.
+
+### Risks
+
+- Scaling the default risks violating the owner's preference — mitigated by the
+  byte-identical `reference-fanless` gate and the measure-before-shipping rule.
+- Detection lies (VMs misreport cores/thermals) — ambiguous → conservative, never
+  optimistic; detect the container case explicitly rather than trusting a sensor
+  read to fail (H3's rule).
+- "Intelligent about the host" invites scope creep into autotuning — bounded to
+  the named tiers with measured parameters.
+
+---
+
 ## Experiments
 
 ### E-H1 — Does vectorization actually cool the machine?  ~1 day  **Gates H1+H2's framing**
@@ -536,15 +657,31 @@ neither.
 statement that endurance ratings are write-based with the caveat about read
 disturb. H1 cites whichever.
 
+### E-H5 — Measure a non-reference capability tier  ~1 day  **Gates any default above the fanless floor**
+
+H5 may not ship a higher default for any tier it has not measured. On real
+non-reference hardware — a cooled desktop or a big-RAM cloud box (the **same
+hardware gap** as E-H2/E-L1; see Open questions) — run E-H3's sustained-generation
+protocol at the tier's candidate thread count, plus E-H2's memory → `bytes_read`
+sweep, and record whether the tier sustains its proposed default without thermal
+pressure and whether more RAM actually quiets the SSD.
+
+**Acceptance:** a per-tier row — thread count, sustained tok/s, thermal pressure,
+steady-state `bytes_read` — that either justifies the tier's default or sends it
+back to conservative. A tier with no measurement ships conservative. **Same rule
+as everywhere: an unmeasured tier is not "fast."**
+
 ---
 
 ## Non-goals
 
 - **GPU/Metal.** The separate, already-planned post-release performance track.
   H2 is CPU dispatch only.
-- **Changing the macOS default thread count.** It is the owner's explicit comfort
-  preference. H3 adapts `--fast` and fixes non-macOS derivation; the default
-  stands.
+- **Changing the *reference fanless* (M3 Air) default thread count.** It is the
+  owner's explicit comfort preference and stays byte-identical. H3 adapts
+  `--fast` and fixes non-macOS derivation; **H5** may raise the *default* for
+  other, **measured** capability tiers (a cooled desktop), but never for the
+  fanless reference class.
 - **Growing the engine's expert cache.** Measured 41% slower. Settled.
 - **Undervolting, fan control, or any OS power settings.** Not our business, and
   not something a local chat app should touch.
