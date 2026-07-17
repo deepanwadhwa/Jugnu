@@ -70,6 +70,26 @@ two-thread checks then passed:
 The rendered-image/vision prefill portion has not yet had an equivalent
 interruption measurement. It is therefore not claimed as verified here.
 
+## Follow-up: one-page JSS extraction smoke
+
+With the same two-thread cap, extracted text from `v109i03.pdf` page 2 was sent
+through the actual Jobs request shape with `max_tokens: 128` and background
+priority. It completed with 1,341 prompt tokens and 100 completion tokens at
+5.78 decode tokens/s (4.39 GiB RSS). The response passed the job's output-schema
+validator with no errors or warnings. It correctly returned:
+
+```json
+{
+  "title": "openTSNE: t-SNE Dimensionality Reduction and Embedding in Python",
+  "journal": "Journal of Statistical Software"
+}
+```
+
+The remaining fields were `null` on that individual page. This is expected for
+a page-level unit and is why the real job's final document record is produced by
+the deterministic reducer. It is a smoke result only: it is not a four-document
+field-accuracy result, and it does not cover image-bearing pages.
+
 ## Consequences
 
 1. This run has no correctness, malformed-rate, throughput, or field-accuracy
