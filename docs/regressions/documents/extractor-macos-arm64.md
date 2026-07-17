@@ -34,6 +34,10 @@ malformed input, symlink rejection, the configurable downward-only input-size
 limit, successful execution under `sandbox-exec` with `(deny network*)`, and
 PPM rendering with no overwrite of an existing output file.
 
+Native UTF-8 text extraction was added with a committed metadata fixture. It
+normalizes CRLF/CR to LF; binary non-PDF input, ZIP/DOCX input, and HTML all
+return specific errors rather than falling through as plain text.
+
 Manual render check:
 
 ```sh

@@ -3,6 +3,7 @@ set -eu
 
 EXTRACTOR=${SAMOSA_EXTRACT:-./samosa-extract}
 FIXTURE=tests/fixtures/documents/hello.pdf
+TEXT_FIXTURE=tests/fixtures/documents/notes.txt
 
 if [ ! -x "$EXTRACTOR" ]; then
   echo "samosa-extract: SKIP (build with PDFIUM_DIR=... make samosa-extract)"
@@ -14,6 +15,11 @@ printf '%s' "$out" | grep -F '"ok":true' >/dev/null
 printf '%s' "$out" | grep -F 'Hello PDFium' >/dev/null
 printf '%s' "$out" | grep -F '"text_layer":true' >/dev/null
 printf '%s' "$out" | grep -F '"index":1' >/dev/null
+
+text_out=$("$EXTRACTOR" --json "$TEXT_FIXTURE")
+printf '%s' "$text_out" | grep -F '"input_type":"text/plain"' >/dev/null
+printf '%s' "$text_out" | grep -F 'Ada Lovelace' >/dev/null
+printf '%s' "$text_out" | grep -F 'ada@example.test' >/dev/null
 
 # macOS's sandbox-exec checks the controller's required no-network policy. The
 # Linux sandbox adapter is a separate packaging task, so its absence is fine.
@@ -46,12 +52,33 @@ if "$EXTRACTOR" --json /dev/null >"$error_file" 2>&1; then
 fi
 grep -F 'not_regular_file' "$error_file" >/dev/null
 
-printf 'not a PDF' >"$bad_file"
+printf '%%PDF-1.7\nbroken' >"$bad_file"
 if "$EXTRACTOR" --json "$bad_file" >"$error_file" 2>&1; then
   echo "samosa-extract accepted malformed input" >&2
   exit 1
 fi
 grep -F 'pdf_malformed' "$error_file" >/dev/null
+
+printf 'not\000text' >"$bad_file"
+if "$EXTRACTOR" --json "$bad_file" >"$error_file" 2>&1; then
+  echo "samosa-extract accepted binary non-PDF input" >&2
+  exit 1
+fi
+grep -F 'text_invalid_utf8' "$error_file" >/dev/null
+
+printf 'PK\003\004x' >"$bad_file"
+if "$EXTRACTOR" --json "$bad_file" >"$error_file" 2>&1; then
+  echo "samosa-extract silently treated a ZIP/DOCX as text" >&2
+  exit 1
+fi
+grep -F 'docx_extractor_unavailable' "$error_file" >/dev/null
+
+printf '<html><body>not plain text</body></html>' >"$bad_file"
+if "$EXTRACTOR" --json "$bad_file" >"$error_file" 2>&1; then
+  echo "samosa-extract silently treated HTML as text" >&2
+  exit 1
+fi
+grep -F 'html_extractor_unavailable' "$error_file" >/dev/null
 
 ln -s "$bad_file" "$link_file"
 if "$EXTRACTOR" --json "$link_file" >"$error_file" 2>&1; then

@@ -30,6 +30,7 @@
 #define DEFAULT_MAX_BYTES (20UL * 1024UL * 1024UL)
 #define MAX_PAGE_CHARS 2000000
 #define MAX_JSON_BYTES (16UL * 1024UL * 1024UL)
+#define MAX_NATIVE_TEXT_BYTES (7UL * 1024UL * 1024UL)
 #define RENDER_LONG_EDGE 768
 #define MAX_RENDER_PIXELS (RENDER_LONG_EDGE * RENDER_LONG_EDGE)
 #define CPU_SECONDS 15
@@ -152,6 +153,31 @@ static int write_all(int fd, const void *data, size_t length) {
     return 1;
 }
 
+static int read_prefix(InputFile *input, unsigned char *out, size_t capacity,
+                       size_t *length) {
+    size_t want = input->length < capacity ? input->length : capacity;
+    ssize_t got = pread(input->fd, out, want, 0);
+    if (got < 0)
+        return 0;
+    *length = (size_t)got;
+    return 1;
+}
+
+static int has_ascii_prefix(const unsigned char *data, size_t length,
+                            const char *prefix) {
+    size_t i, prefix_length = strlen(prefix);
+    if (length < prefix_length)
+        return 0;
+    for (i = 0; i < prefix_length; ++i) {
+        unsigned char c = data[i];
+        if (c >= 'A' && c <= 'Z')
+            c = (unsigned char)(c + ('a' - 'A'));
+        if (c != (unsigned char)prefix[i])
+            return 0;
+    }
+    return 1;
+}
+
 static int buf_reserve(Buffer *buf, size_t extra) {
     size_t need;
     char *next;
@@ -264,6 +290,91 @@ static int utf16_to_utf8(const unsigned short *input, int count, Buffer *out) {
             return 0;
     }
     return 1;
+}
+
+static int valid_utf8(const unsigned char *data, size_t length) {
+    size_t i = 0;
+    while (i < length) {
+        unsigned char c = data[i++];
+        int continuation = 0;
+        if (c == 0)
+            return 0;
+        if (c < 0x80)
+            continue;
+        if (c >= 0xc2 && c <= 0xdf) continuation = 1;
+        else if (c >= 0xe0 && c <= 0xef) continuation = 2;
+        else if (c >= 0xf0 && c <= 0xf4) continuation = 3;
+        else return 0;
+        if ((size_t)continuation > length - i)
+            return 0;
+        if (c == 0xe0 && data[i] < 0xa0) return 0;
+        if (c == 0xed && data[i] >= 0xa0) return 0;
+        if (c == 0xf0 && data[i] < 0x90) return 0;
+        if (c == 0xf4 && data[i] >= 0x90) return 0;
+        while (continuation--) {
+            if ((data[i++] & 0xc0) != 0x80)
+                return 0;
+        }
+    }
+    return 1;
+}
+
+static unsigned long utf8_char_count(const char *text) {
+    unsigned long count = 0;
+    for (; *text; ++text)
+        if (((unsigned char)*text & 0xc0) != 0x80)
+            ++count;
+    return count;
+}
+
+static unsigned long estimate_tokens(const char *text);
+
+static int extract_native_text(InputFile *input, Buffer *text, const char **error) {
+    unsigned char *raw;
+    size_t i;
+    if (input->length > MAX_NATIVE_TEXT_BYTES) {
+        *error = "native_text_output_limit";
+        return 0;
+    }
+    raw = malloc((size_t)input->length);
+    if (!raw) {
+        *error = "out_of_memory";
+        return 0;
+    }
+    if (!read_block(input, 0, raw, input->length) || !valid_utf8(raw, input->length)) {
+        free(raw);
+        *error = "text_invalid_utf8";
+        return 0;
+    }
+    for (i = 0; i < input->length; ++i) {
+        if (raw[i] == '\r') {
+            if (i + 1 < input->length && raw[i + 1] == '\n')
+                ++i;
+            if (!buf_putn(text, "\n", 1)) {
+                free(raw);
+                *error = "output_too_large";
+                return 0;
+            }
+        } else if (!buf_putn(text, (const char *)raw + i, 1)) {
+            free(raw);
+            *error = "output_too_large";
+            return 0;
+        }
+    }
+    free(raw);
+    return 1;
+}
+
+static int emit_native_text(Buffer *text, Buffer *output) {
+    unsigned long chars = utf8_char_count(text->data ? text->data : "");
+    const char *contents = text->data ? text->data : "";
+    return buf_put(output, "{\"ok\":true,\"input_type\":\"text/plain\",\"text_layer\":true,\"pages\":[{\"index\":1,\"text_chars\":") &&
+           buf_printf(output, "%lu", chars) &&
+           buf_put(output, ",\"has_raster_figure\":false,\"text\":") &&
+           buf_json_string(output, contents) &&
+           buf_put(output, "}],\"text\":") &&
+           buf_json_string(output, contents) &&
+           buf_printf(output, ",\"tokens_estimate\":%lu}\n", estimate_tokens(contents));
 }
 
 static int page_has_raster_figure(FPDF_PAGE page) {
@@ -394,7 +505,7 @@ done:
 }
 
 static void usage(void) {
-    fputs("usage: samosa-extract --json FILE.pdf\n"
+    fputs("usage: samosa-extract --json FILE\n"
           "       samosa-extract --render-ppm FILE.pdf PAGE OUTPUT.ppm\n", stderr);
 }
 
@@ -407,6 +518,8 @@ int main(int argc, char **argv) {
     int page_count, page_index, text_layer = 0;
     int render_page = 0;
     char *end = NULL;
+    unsigned char prefix[64];
+    size_t prefix_length = 0;
 
     if (argc == 3 && strcmp(argv[1], "--json") == 0) {
         input_path = argv[2];
@@ -435,6 +548,41 @@ int main(int argc, char **argv) {
     }
     signal(SIGALRM, on_alarm);
     alarm(WALL_SECONDS);
+
+    if (!read_prefix(&input, prefix, sizeof(prefix), &prefix_length)) {
+        put_error("file_unavailable");
+        close(input.fd);
+        return 65;
+    }
+    if (!render_page && !has_ascii_prefix(prefix, prefix_length, "%pdf-")) {
+        if (has_ascii_prefix(prefix, prefix_length, "pk\003\004")) {
+            put_error("docx_extractor_unavailable");
+        } else if (has_ascii_prefix(prefix, prefix_length, "<html") ||
+                   has_ascii_prefix(prefix, prefix_length, "<!doctype html")) {
+            put_error("html_extractor_unavailable");
+        } else if (has_ascii_prefix(prefix, prefix_length, "{\\rtf")) {
+            put_error("rtf_unsupported");
+        } else if (extract_native_text(&input, &document_text, &error) &&
+                   emit_native_text(&document_text, &output)) {
+            fputs(output.data, stdout);
+            free(output.data);
+            free(document_text.data);
+            close(input.fd);
+            alarm(0);
+            return 0;
+        } else {
+            put_error(error ? error : "output_too_large");
+        }
+        free(output.data);
+        free(document_text.data);
+        close(input.fd);
+        return 65;
+    }
+    if (render_page && !has_ascii_prefix(prefix, prefix_length, "%pdf-")) {
+        put_error("not_pdf");
+        close(input.fd);
+        return 65;
+    }
 
     memset(&access, 0, sizeof(access));
     access.m_FileLen = input.length;

@@ -8,6 +8,12 @@ exactly one JSON object to standard output.
 samosa-extract --json file.pdf
 ```
 
+UTF-8 plain-text input is also handled natively. Its line endings are normalized
+to LF and it receives the same one-page JSON shape. The extractor sniffs bytes,
+not extensions: invalid UTF-8/binary input is rejected rather than silently
+treated as text. DOCX, HTML, and RTF receive explicit unavailable/unsupported
+errors until their portable extractors land; no macOS host tool is used.
+
 A successful response has this shape:
 
 ```json
