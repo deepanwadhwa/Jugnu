@@ -38,6 +38,11 @@ Native UTF-8 text extraction was added with a committed metadata fixture. It
 normalizes CRLF/CR to LF; binary non-PDF input, ZIP/DOCX input, and HTML all
 return specific errors rather than falling through as plain text.
 
+With the local verified `tokenizer_qwen36.json`, exact token output was also
+verified: the metadata text fixture produced 18 tokens and the PDF fixture
+produced 3. `tokens_estimate` remains only an explicitly non-authoritative
+fallback when no tokenizer is supplied.
+
 Manual render check:
 
 ```sh

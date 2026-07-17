@@ -26,6 +26,7 @@
 #include "fpdf_edit.h"
 #include "fpdf_text.h"
 #include "fpdfview.h"
+#include "tok.h"
 
 #define DEFAULT_MAX_BYTES (20UL * 1024UL * 1024UL)
 #define MAX_PAGE_CHARS 2000000
@@ -365,15 +366,33 @@ static int extract_native_text(InputFile *input, Buffer *text, const char **erro
     return 1;
 }
 
-static int emit_native_text(Buffer *text, Buffer *output) {
+static int count_model_tokens(Tok *tokenizer, const char *text, unsigned long *count) {
+    size_t length = strlen(text);
+    int *ids;
+    if (length > INT_MAX)
+        return 0;
+    ids = calloc(length ? length : 1, sizeof(*ids));
+    if (!ids)
+        return 0;
+    *count = (unsigned long)tok_encode(tokenizer, text, (int)length, ids, (int)length);
+    free(ids);
+    return 1;
+}
+
+static int emit_native_text(Buffer *text, Buffer *output, Tok *tokenizer) {
     unsigned long chars = utf8_char_count(text->data ? text->data : "");
+    unsigned long exact_tokens = 0;
     const char *contents = text->data ? text->data : "";
+    if (tokenizer && !count_model_tokens(tokenizer, contents, &exact_tokens))
+        return 0;
     return buf_put(output, "{\"ok\":true,\"input_type\":\"text/plain\",\"text_layer\":true,\"pages\":[{\"index\":1,\"text_chars\":") &&
            buf_printf(output, "%lu", chars) &&
+           (!tokenizer || buf_printf(output, ",\"tokens\":%lu", exact_tokens)) &&
            buf_put(output, ",\"has_raster_figure\":false,\"text\":") &&
            buf_json_string(output, contents) &&
            buf_put(output, "}],\"text\":") &&
            buf_json_string(output, contents) &&
+           (!tokenizer || buf_printf(output, ",\"tokens\":%lu", exact_tokens)) &&
            buf_printf(output, ",\"tokens_estimate\":%lu}\n", estimate_tokens(contents));
 }
 
@@ -506,6 +525,7 @@ done:
 
 static void usage(void) {
     fputs("usage: samosa-extract --json FILE\n"
+          "       samosa-extract --json FILE --tokenizer tokenizer.json\n"
           "       samosa-extract --render-ppm FILE.pdf PAGE OUTPUT.ppm\n", stderr);
 }
 
@@ -516,13 +536,21 @@ int main(int argc, char **argv) {
     Buffer pages = {0}, document_text = {0}, output = {0};
     const char *error = NULL, *input_path, *render_path = NULL;
     int page_count, page_index, text_layer = 0;
+    unsigned long document_tokens = 0;
     int render_page = 0;
     char *end = NULL;
     unsigned char prefix[64];
     size_t prefix_length = 0;
+    Tok tokenizer;
+    Tok *tokenizer_ptr = NULL;
+    const char *tokenizer_path = NULL;
 
     if (argc == 3 && strcmp(argv[1], "--json") == 0) {
         input_path = argv[2];
+    } else if (argc == 5 && strcmp(argv[1], "--json") == 0 &&
+               strcmp(argv[3], "--tokenizer") == 0) {
+        input_path = argv[2];
+        tokenizer_path = argv[4];
     } else if (argc == 5 && strcmp(argv[1], "--render-ppm") == 0) {
         long page;
         errno = 0;
@@ -546,12 +574,17 @@ int main(int argc, char **argv) {
         put_error(error);
         return 65;
     }
+    if (tokenizer_path) {
+        tok_load(&tokenizer, tokenizer_path);
+        tokenizer_ptr = &tokenizer;
+    }
     signal(SIGALRM, on_alarm);
     alarm(WALL_SECONDS);
 
     if (!read_prefix(&input, prefix, sizeof(prefix), &prefix_length)) {
         put_error("file_unavailable");
         close(input.fd);
+        if (tokenizer_ptr) tok_free(tokenizer_ptr);
         return 65;
     }
     if (!render_page && !has_ascii_prefix(prefix, prefix_length, "%pdf-")) {
@@ -563,12 +596,13 @@ int main(int argc, char **argv) {
         } else if (has_ascii_prefix(prefix, prefix_length, "{\\rtf")) {
             put_error("rtf_unsupported");
         } else if (extract_native_text(&input, &document_text, &error) &&
-                   emit_native_text(&document_text, &output)) {
+                   emit_native_text(&document_text, &output, tokenizer_ptr)) {
             fputs(output.data, stdout);
             free(output.data);
             free(document_text.data);
             close(input.fd);
             alarm(0);
+            if (tokenizer_ptr) tok_free(tokenizer_ptr);
             return 0;
         } else {
             put_error(error ? error : "output_too_large");
@@ -576,11 +610,13 @@ int main(int argc, char **argv) {
         free(output.data);
         free(document_text.data);
         close(input.fd);
+        if (tokenizer_ptr) tok_free(tokenizer_ptr);
         return 65;
     }
     if (render_page && !has_ascii_prefix(prefix, prefix_length, "%pdf-")) {
         put_error("not_pdf");
         close(input.fd);
+        if (tokenizer_ptr) tok_free(tokenizer_ptr);
         return 65;
     }
 
@@ -594,6 +630,7 @@ int main(int argc, char **argv) {
         put_error(pdf_error(FPDF_GetLastError()));
         FPDF_DestroyLibrary();
         close(input.fd);
+        if (tokenizer_ptr) tok_free(tokenizer_ptr);
         return 65;
     }
     page_count = FPDF_GetPageCount(document);
@@ -602,6 +639,7 @@ int main(int argc, char **argv) {
         FPDF_CloseDocument(document);
         FPDF_DestroyLibrary();
         close(input.fd);
+        if (tokenizer_ptr) tok_free(tokenizer_ptr);
         return 65;
     }
     if (render_page) {
@@ -610,6 +648,7 @@ int main(int argc, char **argv) {
             FPDF_CloseDocument(document);
             FPDF_DestroyLibrary();
             close(input.fd);
+            if (tokenizer_ptr) tok_free(tokenizer_ptr);
             return 65;
         }
         printf("{\"ok\":true,\"page\":%d,\"format\":\"image/x-portable-pixmap\"}\n", render_page);
@@ -617,6 +656,7 @@ int main(int argc, char **argv) {
         FPDF_DestroyLibrary();
         close(input.fd);
         alarm(0);
+        if (tokenizer_ptr) tok_free(tokenizer_ptr);
         return 0;
     }
     if (!buf_put(&pages, "[")) error = "output_too_large";
@@ -626,6 +666,7 @@ int main(int argc, char **argv) {
         unsigned short *utf16 = NULL;
         Buffer page_text = {0};
         int chars = 0, written = 0, has_raster;
+        unsigned long page_tokens = 0;
         if (!page) { error = "pdf_page_error"; break; }
         text_page = FPDFText_LoadPage(page);
         if (!text_page) { FPDF_ClosePage(page); error = "pdf_page_error"; break; }
@@ -637,9 +678,15 @@ int main(int argc, char **argv) {
         if (!utf16) { FPDFText_ClosePage(text_page); FPDF_ClosePage(page); error = "out_of_memory"; break; }
         if (chars) written = FPDFText_GetText(text_page, 0, chars, utf16);
         if (written < 0 || !utf16_to_utf8(utf16, written, &page_text)) error = "output_too_large";
+        if (!error && tokenizer_ptr && !count_model_tokens(tokenizer_ptr,
+                                                             page_text.data ? page_text.data : "",
+                                                             &page_tokens))
+            error = "token_count_failed";
         has_raster = page_has_raster_figure(page);
-        if (!error && !buf_printf(&pages, "%s{\"index\":%d,\"text_chars\":%d,\"has_raster_figure\":%s,\"text\":",
-                                  page_index ? "," : "", page_index + 1, chars,
+        if (!error && !buf_printf(&pages, "%s{\"index\":%d,\"text_chars\":%d",
+                                  page_index ? "," : "", page_index + 1, chars)) error = "output_too_large";
+        if (!error && tokenizer_ptr && !buf_printf(&pages, ",\"tokens\":%lu", page_tokens)) error = "output_too_large";
+        if (!error && !buf_printf(&pages, ",\"has_raster_figure\":%s,\"text\":",
                                   has_raster ? "true" : "false")) error = "output_too_large";
         if (!error && !buf_json_string(&pages, page_text.data ? page_text.data : "")) error = "output_too_large";
         if (!error && !buf_put(&pages, "}")) error = "output_too_large";
@@ -652,10 +699,15 @@ int main(int argc, char **argv) {
         FPDF_ClosePage(page);
     }
     if (!error && !buf_put(&pages, "]")) error = "output_too_large";
+    if (!error && tokenizer_ptr && !count_model_tokens(tokenizer_ptr,
+                                                         document_text.data ? document_text.data : "",
+                                                         &document_tokens))
+        error = "token_count_failed";
     if (!error && (!buf_printf(&output, "{\"ok\":true,\"text_layer\":%s,\"pages\":", text_layer ? "true" : "false") ||
                    !buf_putn(&output, pages.data, pages.len) ||
                    !buf_put(&output, ",\"text\":") ||
                    !buf_json_string(&output, document_text.data ? document_text.data : "") ||
+                   (tokenizer_ptr && !buf_printf(&output, ",\"tokens\":%lu", document_tokens)) ||
                    !buf_printf(&output, ",\"tokens_estimate\":%lu}\n", estimate_tokens(document_text.data ? document_text.data : ""))))
         error = "output_too_large";
     if (error) put_error(error);
@@ -667,5 +719,6 @@ int main(int argc, char **argv) {
     FPDF_DestroyLibrary();
     close(input.fd);
     alarm(0);
+    if (tokenizer_ptr) tok_free(tokenizer_ptr);
     return error ? 65 : 0;
 }

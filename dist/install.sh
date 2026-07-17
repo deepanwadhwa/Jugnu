@@ -225,7 +225,7 @@ if [ "$DOCUMENTS_ENABLED" = 1 ]; then
   else
     EXTRACT_RPATH='$ORIGIN/../lib'
   fi
-  $COMPILER -O2 -Wall -Wextra -Werror -std=c11 -I"$PDFIUM_ROOT/include" \
+  $COMPILER -O2 -Wall -Wextra -Werror -Wno-unused-function -std=c11 -I"$PDFIUM_ROOT/include" \
     "$STAGE/engine/samosa_extract.c" "$PDFIUM_ROOT/lib/$PDFIUM_LIBRARY" \
     -Wl,-rpath,"$EXTRACT_RPATH" -o "$STAGE/bin/samosa-extract" ||
     fail "staged document extractor compilation failed; live release was not changed"

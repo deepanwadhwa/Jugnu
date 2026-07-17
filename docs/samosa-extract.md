@@ -31,6 +31,17 @@ ingestion caller must calculate the exact model-token count with its loaded
 tokenizer before deciding whether input fits context; it must not treat this
 estimate as a budget authority.
 
+The controller can request exact counts from its trusted, release-provided Qwen
+tokenizer:
+
+```sh
+samosa-extract --json file.pdf --tokenizer tokenizer_qwen36.json
+```
+
+That adds exact `tokens` fields for the whole document and each page. The
+tokenizer path is not a user document; callers must pass only their installed,
+verified model tokenizer.
+
 For the scanned-page/vision seam, the sidecar can render one page to a bounded
 PPM image that the existing `stb_image` decoder accepts:
 

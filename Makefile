@@ -35,14 +35,14 @@ endif
 samosa-engine: src/qwen36b.c src/expert_cache.c src/vision.c $(ENGINE_HEADERS)
 	$(CC) -O3 -Wno-unused-function -pthread src/qwen36b.c src/expert_cache.c src/vision.c -o qwen36b -lm
 
-samosa-extract: src/samosa_extract.c $(PDFIUM_READY)
+samosa-extract: src/samosa_extract.c src/tok.h src/tok_unicode.h src/json.h $(PDFIUM_READY)
 	@if [ -z "$(PDFIUM_DIR)" ]; then \
 	  echo "PDFium support unavailable: set PDFIUM_DIR to an unpacked PDFium artifact" >&2; exit 2; \
 	fi
 	@if [ -z "$(PDFIUM_LIBRARY)" ]; then \
 	  echo "PDFium support unavailable: no libpdfium shared library under $(PDFIUM_DIR)/lib" >&2; exit 2; \
 	fi
-	$(CC) -O2 -Wall -Wextra -Werror -std=c11 -I$(PDFIUM_DIR)/include \
+	$(CC) -O2 -Wall -Wextra -Werror -Wno-unused-function -std=c11 -I$(PDFIUM_DIR)/include \
 	  src/samosa_extract.c $(PDFIUM_LIBRARY) \
 	  -Wl,-rpath,$(PDFIUM_DIR)/lib -o samosa-extract
 	@if [ "$(UNAME_S)" = "Darwin" ]; then \
@@ -51,6 +51,10 @@ samosa-extract: src/samosa_extract.c $(PDFIUM_READY)
 
 extract-test: samosa-extract tests/test_samosa_extract.sh tests/fixtures/documents/hello.pdf
 	SAMOSA_EXTRACT=./samosa-extract sh tests/test_samosa_extract.sh
+
+extract-tokenizer-test: samosa-extract tests/test_samosa_extract.sh
+	@test -n "$(SAMOSA_EXTRACT_TOKENIZER)" || { echo "set SAMOSA_EXTRACT_TOKENIZER to run exact-token tests" >&2; exit 2; }
+	SAMOSA_EXTRACT=./samosa-extract SAMOSA_EXTRACT_TOKENIZER="$(SAMOSA_EXTRACT_TOKENIZER)" sh tests/test_samosa_extract.sh
 
 document-installer-test: tests/test_document_installer.sh
 	sh tests/test_document_installer.sh

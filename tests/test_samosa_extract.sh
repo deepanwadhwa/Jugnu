@@ -21,6 +21,16 @@ printf '%s' "$text_out" | grep -F '"input_type":"text/plain"' >/dev/null
 printf '%s' "$text_out" | grep -F 'Ada Lovelace' >/dev/null
 printf '%s' "$text_out" | grep -F 'ada@example.test' >/dev/null
 
+if [ -n "${SAMOSA_EXTRACT_TOKENIZER:-}" ]; then
+  exact_out=$("$EXTRACTOR" --json "$TEXT_FIXTURE" --tokenizer "$SAMOSA_EXTRACT_TOKENIZER")
+  printf '%s' "$exact_out" | python3 -c '
+import json, sys
+result = json.load(sys.stdin)
+assert isinstance(result["tokens"], int) and result["tokens"] > 0
+assert result["tokens"] == result["pages"][0]["tokens"]
+'
+fi
+
 # macOS's sandbox-exec checks the controller's required no-network policy. The
 # Linux sandbox adapter is a separate packaging task, so its absence is fine.
 if command -v sandbox-exec >/dev/null 2>&1; then
