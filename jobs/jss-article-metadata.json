@@ -8,7 +8,7 @@
     "types": ["application/pdf"],
     "max_file_bytes": 26214400
   },
-  "unit": "auto",
+  "unit": "page",
   "instruction": "Extract bibliographic and contact metadata from this Journal of Statistical Software article. Return ONLY the requested JSON. Use the article title page and final Affiliation block. Preserve author order. For authors, author_emails, affiliations, and universities, emit a semicolon-separated string in document order; include only email addresses and affiliations explicitly present in the article. `universities` must include only affiliations containing a university name, not research institutes. Normalize the publication month as YYYY-MM. Extract submitted_date and accepted_date as YYYY-MM-DD when printed; otherwise use null. Do not infer missing data.",
   "reduce": {
     "mode": "deterministic",

@@ -37,6 +37,7 @@ _BEHAVIOR = {         # special behaviors
 _REQUEST_COUNT = 0
 _REQUEST_LOCK = threading.Lock()
 _LAST_HEADERS = {}    # headers of the most recent POST /v1/chat/completions
+_CANCEL_COUNT = 0
 
 
 def set_canned(body_hash, response):
@@ -47,6 +48,15 @@ def set_status(**kwargs):
 
 def set_behavior(**kwargs):
     _BEHAVIOR.update(kwargs)
+
+
+def get_cancel_count():
+    return _CANCEL_COUNT
+
+
+def reset_cancel_count():
+    global _CANCEL_COUNT
+    _CANCEL_COUNT = 0
 
 
 class FakeServeHandler(BaseHTTPRequestHandler):
@@ -79,9 +89,19 @@ class FakeServeHandler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self):
-        global _REQUEST_COUNT
+        global _REQUEST_COUNT, _CANCEL_COUNT
         with _REQUEST_LOCK:
             _REQUEST_COUNT += 1
+
+        if self.path == '/v1/cancel':
+            _CANCEL_COUNT += 1
+            body = b'{"cancelled":true}'
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
 
         if self.path != '/v1/chat/completions':
             self.send_error(404)

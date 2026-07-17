@@ -6,7 +6,12 @@ publication month, and editorial dates from the four JSS PDFs at the repository
 root. [`jss-article-metadata.expected.json`](jss-article-metadata.expected.json)
 is the review reference extracted from those documents.
 
-The runner currently defers PDF work with
-`extractor_unavailable:application/pdf` until the #5 pdfium sidecar lands. Do
-not replace that controlled review result with an ad hoc host-specific PDF tool;
-the job is ready to run through Samosa once that extractor contract is available.
+This job deliberately uses `"unit": "page"`: the articles are long enough
+that even the one auto-planned whole-file input is not an appropriate 16-GB
+machine-safety test. Page records are reduced deterministically at the end, so
+the runner never submits an entire article as one request.
+
+The runner uses the installed #5 `samosa-extract` sidecar for page text, exact
+Qwen token counts, and bounded page rendering. If a release has no sidecar, it
+retains the controlled `extractor_unavailable:application/pdf` review result;
+it never falls back to a host-specific PDF tool.

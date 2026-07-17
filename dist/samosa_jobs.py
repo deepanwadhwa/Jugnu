@@ -33,9 +33,11 @@ import platform
 import re
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 import urllib.error
@@ -638,10 +640,10 @@ def _page_needs_image(page):
 def plan_units(input_meta, unit_mode, context_budget, tokenizer_cmd=None):
     """Plan processing units for an input file (§J1.2).
 
-    Deterministic; the PDF path consumes optional `pages` metadata
+    Deterministic; the PDF path consumes page metadata
     (list of {index, text_tokens, has_raster_figure}) from the #5 extract_meta
     contract. Without that metadata a real PDF cannot be planned and is flagged
-    `extractor_unavailable` (the sidecar is #5, not yet built).
+    `extractor_unavailable` for controlled capability degradation.
 
     Args:
         input_meta: dict with input_sha256, media_type, input_path, size,
@@ -681,7 +683,14 @@ def plan_units(input_meta, unit_mode, context_budget, tokenizer_cmd=None):
             return [_file_unit(sha, 'extractor_unavailable')]
 
         image_pages = sum(1 for p in pages if _page_needs_image(p))
-        total_tokens = sum(p.get('text_tokens', 0) for p in pages) + image_pages * IMAGE_TOKENS
+        # Tokenization is not additive across page boundaries.  The sidecar's
+        # whole-document count is therefore authoritative for a whole-file
+        # decision; retain the page sum only for synthetic metadata/tests that
+        # do not provide it.
+        text_tokens = input_meta.get('text_tokens')
+        if not isinstance(text_tokens, int) or isinstance(text_tokens, bool) or text_tokens < 0:
+            text_tokens = sum(p.get('text_tokens', 0) for p in pages)
+        total_tokens = text_tokens + image_pages * IMAGE_TOKENS
 
         if unit_mode == 'file':
             # Honor the explicit choice, but warn: one inference sees only one
@@ -792,6 +801,163 @@ def count_tokens_file(path, tokenizer_cmd):
 # J1.3 — Extraction dispatch
 # ---------------------------------------------------------------------------
 
+def get_pdf_extractor():
+    """Return the installed sidecar path, if this release has one.
+
+    The explicit environment variable is useful for a staged release and tests;
+    otherwise a packaged sibling is preferred before consulting PATH.  We never
+    substitute a host PDF utility when the sidecar is absent.
+    """
+    configured = os.environ.get('SAMOSA_EXTRACTOR')
+    if configured:
+        return configured
+    sibling = Path(__file__).resolve().with_name('samosa-extract')
+    if sibling.is_file() and os.access(str(sibling), os.X_OK):
+        return str(sibling)
+    return shutil.which('samosa-extract')
+
+
+def get_pdf_tokenizer():
+    """Return the trusted installed tokenizer used for exact PDF page counts."""
+    return (os.environ.get('SAMOSA_EXTRACT_TOKENIZER')
+            or os.environ.get('TOKENIZER'))
+
+
+def _run_pdf_sidecar(command):
+    """Run a short-lived sidecar with a parent watchdog and parse its JSON.
+
+    The extractor already applies its own CPU/memory limits.  The runner adds a
+    wall-clock watchdog and starts a process group so a timeout cannot strand a
+    child process in an unattended job.
+    """
+    try:
+        proc = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=25)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            return None, 'extract_timeout'
+    except OSError:
+        return None, 'extractor_unavailable:application/pdf'
+
+    try:
+        payload = json.loads(stdout)
+    except (TypeError, json.JSONDecodeError):
+        return None, 'extract_invalid_response'
+    if proc.returncode != 0 or not isinstance(payload, dict):
+        return None, 'extract_failed'
+    if not payload.get('ok'):
+        error = payload.get('error')
+        return None, f"extract_failed:{error}" if isinstance(error, str) else 'extract_failed'
+    return payload, None
+
+
+def extract_pdf_metadata(input_meta):
+    """Hydrate PDF metadata from `samosa-extract` with exact page token counts."""
+    extractor = get_pdf_extractor()
+    tokenizer = get_pdf_tokenizer()
+    if not extractor:
+        return None, 'extractor_unavailable:application/pdf'
+    if not tokenizer or not os.path.isfile(tokenizer):
+        return None, 'extractor_unavailable:tokenizer'
+
+    payload, error = _run_pdf_sidecar(
+        [extractor, '--json', input_meta['input_path'], '--tokenizer', tokenizer]
+    )
+    if error:
+        return None, error
+
+    document_tokens = payload.get('tokens')
+    if (not isinstance(document_tokens, int) or isinstance(document_tokens, bool)
+            or document_tokens < 0):
+        return None, 'extract_invalid_response'
+    raw_pages = payload.get('pages')
+    if not isinstance(raw_pages, list) or not raw_pages:
+        return None, 'extract_invalid_response'
+    pages = []
+    for page in raw_pages:
+        if not isinstance(page, dict):
+            return None, 'extract_invalid_response'
+        index = page.get('index')
+        tokens = page.get('tokens')
+        text = page.get('text')
+        if (not isinstance(index, int) or isinstance(index, bool) or index < 1
+                or not isinstance(tokens, int) or isinstance(tokens, bool) or tokens < 0
+                or not isinstance(text, str)):
+            return None, 'extract_invalid_response'
+        pages.append({
+            'index': index,
+            'text_tokens': tokens,
+            'has_raster_figure': bool(page.get('has_raster_figure', False)),
+            'text': text,
+        })
+    if len({page['index'] for page in pages}) != len(pages):
+        return None, 'extract_invalid_response'
+    document_text = payload.get('text')
+    if not isinstance(document_text, str):
+        return None, 'extract_invalid_response'
+    return {'pages': pages, 'text': document_text, 'text_tokens': document_tokens}, None
+
+
+def hydrate_pdf_input(input_meta):
+    """Attach sidecar metadata to a discovered PDF, retaining a stable error."""
+    if input_meta.get('media_type') != 'application/pdf' or input_meta.get('pages'):
+        return None
+    metadata, error = extract_pdf_metadata(input_meta)
+    if error:
+        input_meta['_pdf_extract_error'] = error
+        return error
+    input_meta['pages'] = metadata['pages']
+    input_meta['_pdf_text'] = metadata['text']
+    input_meta['text_tokens'] = metadata['text_tokens']
+    return None
+
+
+def _render_pdf_page(input_meta, page_index):
+    """Render one PDF page and return it as an in-memory PPM data URI.
+
+    PPM is the sidecar's bounded, local interchange format.  The file exists
+    only under the job's intermediates directory and is unlinked before this
+    function returns, so terminal events never leave document imagery behind.
+    """
+    extractor = get_pdf_extractor()
+    if not extractor:
+        return None, 'extractor_unavailable:application/pdf'
+    parent = input_meta.get('_intermediates_dir')
+    if parent:
+        Path(parent).mkdir(parents=True, exist_ok=True)
+        os.chmod(str(parent), 0o700)
+    else:
+        parent = tempfile.gettempdir()
+    fd, output_path = tempfile.mkstemp(prefix='pdf-page-', suffix='.ppm', dir=str(parent))
+    os.close(fd)
+    os.unlink(output_path)  # the sidecar deliberately refuses pre-existing output
+    try:
+        _payload, error = _run_pdf_sidecar(
+            [extractor, '--render-ppm', input_meta['input_path'], str(page_index), output_path]
+        )
+        if error:
+            return None, error
+        try:
+            with open(output_path, 'rb') as f:
+                image = f.read()
+        except OSError:
+            return None, 'extract_render_missing'
+        if not image:
+            return None, 'extract_render_empty'
+        encoded = base64.b64encode(image).decode('ascii')
+        return f'data:image/x-portable-pixmap;base64,{encoded}', None
+    finally:
+        try:
+            os.unlink(output_path)
+        except FileNotFoundError:
+            pass
+
+
 def extract_unit(unit, input_meta):
     """Extract content for a processing unit.
     Returns {text, image_data_uri, error}."""
@@ -799,7 +965,8 @@ def extract_unit(unit, input_meta):
     path = input_meta['input_path']
 
     if unit.get('plan_reason') == 'extractor_unavailable':
-        return {'error': 'extractor_unavailable:application/pdf'}
+        return {'error': input_meta.get('_pdf_extract_error',
+                                        'extractor_unavailable:application/pdf')}
 
     if media_type.startswith('image/'):
         # Read image, encode as base64 data URI
@@ -826,6 +993,36 @@ def extract_unit(unit, input_meta):
             return {'text': text}
         except OSError as e:
             return {'error': f'read_failed:{e}'}
+
+    if media_type == 'application/pdf':
+        pages = input_meta.get('pages')
+        if not pages:
+            return {'error': input_meta.get('_pdf_extract_error',
+                                            'extractor_unavailable:application/pdf')}
+        if unit.get('granularity') == 'page':
+            page_index = unit.get('page_index')
+            page = next((p for p in pages if p['index'] == page_index), None)
+            if page is None:
+                return {'error': 'extract_page_not_found'}
+            result = {'text': page['text']}
+            if _page_needs_image(page):
+                image, error = _render_pdf_page(input_meta, page_index)
+                if error:
+                    return {'error': error}
+                result['image_data_uri'] = image
+            return result
+
+        result = {'text': input_meta.get('_pdf_text', '')}
+        image_pages = [p for p in pages if _page_needs_image(p)]
+        # A forced whole-file unit with multiple image pages intentionally keeps
+        # only the first image (and carries the planner warning); F-J4 forbids
+        # putting more than one image in one inference request.
+        if image_pages:
+            image, error = _render_pdf_page(input_meta, image_pages[0]['index'])
+            if error:
+                return {'error': error}
+            result['image_data_uri'] = image
+        return result
 
     return {'error': f'unsupported_type:{media_type}'}
 
@@ -951,10 +1148,30 @@ def call_serve(body, serve_url, timeout=None, is_background=True):
         except json.JSONDecodeError:
             code = str(e.code)
         return None, code
+    except (TimeoutError, socket.timeout):
+        return None, 'timeout'
     except urllib.error.URLError as e:
+        if isinstance(e.reason, (TimeoutError, socket.timeout)):
+            return None, 'timeout'
         return None, f'connection_error:{e.reason}'
     except Exception as e:
         return None, f'request_error:{e}'
+
+
+def request_cancel(serve_url):
+    """Ask the local server to cooperatively stop its active inference.
+
+    Closing the timed-out client socket alone cannot interrupt a non-streaming
+    prefill: the server has nothing to write until inference finishes.  The
+    loopback-only cancel endpoint flips the model's checked cancellation flag.
+    """
+    req = urllib.request.Request(f"{serve_url}/v1/cancel", data=b'', method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=5) as response:
+            payload = json.loads(response.read())
+        return bool(payload.get('cancelled'))
+    except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError):
+        return False
 
 
 def derive_timing(resp, wall_seconds):
@@ -2058,10 +2275,13 @@ def cmd_preview(args):
     # Plan
     inf = job.get('inference', {})
     budget = MAX_CONTEXT - inf.get('max_tokens', 512) - SYSTEM_RESERVE
-    units = plan_units(input_meta, job.get('unit', 'auto'), budget)
+    hydrate_pdf_input(input_meta)
+    units = plan_units(input_meta, job.get('unit', 'auto'), budget,
+                       get_tokenizer_cmd())
     unit = units[0]  # Preview: first unit only
 
     # Extract
+    input_meta['_intermediates_dir'] = str(preview_dir / 'intermediates')
     extraction = extract_unit(unit, input_meta)
     if extraction.get('error'):
         result = {'error': extraction['error']}
@@ -2200,6 +2420,7 @@ def _run_job(job, job_dir):
 
     all_units = []
     for item in new_items:
+        hydrate_pdf_input(item)
         units = plan_units(item, job.get('unit', 'auto'), budget, tokenizer_cmd)
         for u in units:
             already_planned = any(
@@ -2257,17 +2478,8 @@ def _run_job(job, job_dir):
             if ok:
                 event_log.append('job_resumed', reason=f"cleared:{reason}")
 
-        # Handle extractor_unavailable
-        if unit.get('plan_reason') == 'extractor_unavailable':
-            event_log.append('item_review_required',
-                             unit_id=uid,
-                             input_sha256=item['input_sha256'],
-                             input_path=item['input_path'],
-                             reasons=['extractor_unavailable:application/pdf'])
-            review_count += 1
-            continue
-
         # Extract
+        item['_intermediates_dir'] = str(Path(job_dir) / 'results' / 'intermediates')
         extraction = extract_unit(unit, item)
         if extraction.get('error'):
             event_log.append('item_review_required',
@@ -2348,6 +2560,11 @@ def _run_job(job, job_dir):
                 attempt -= 1  # Don't count this attempt
                 continue
             elif err:
+                if err == 'timeout':
+                    # A non-streaming response does not discover a closed
+                    # client during prefill.  Explicitly flip the server's
+                    # cooperative cancel flag before waiting for the slot.
+                    request_cancel(serve_url)
                 if attempt < max_attempts:
                     event_log.append('item_retry_wait', unit_id=uid,
                                      attempt=attempt, error=err,

@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 # Add dist/ to path so we can import samosa_jobs
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'dist'))
@@ -86,6 +87,84 @@ class TestPlanner(unittest.TestCase):
             self.assertTrue(all(u['reduce_group'] == 'bb' for u in units))
         finally:
             os.unlink(path)
+
+
+class TestPdfSidecar(unittest.TestCase):
+    """#5 adapter: exact page metadata and one bounded render per inference."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.pdf = os.path.join(self.tmp.name, 'article.pdf')
+        self.tokenizer = os.path.join(self.tmp.name, 'tokenizer.json')
+        self.extractor = os.path.join(self.tmp.name, 'samosa-extract')
+        with open(self.pdf, 'wb') as f:
+            f.write(b'%PDF fake fixture')
+        with open(self.tokenizer, 'w') as f:
+            f.write('{}')
+        script = '''#!/usr/bin/env python3
+import json
+import sys
+
+args = sys.argv[1:]
+if args[0] == '--json':
+    print(json.dumps({"ok": True, "text_layer": True,
+                      "text": "First page\\nSecond page", "tokens": 26,
+                      "pages": [
+                          {"index": 1, "tokens": 25, "text": "First page", "has_raster_figure": False},
+                          {"index": 2, "tokens": 1, "text": "Second page", "has_raster_figure": True}
+                      ]}))
+elif args[0] == '--render-ppm':
+    with open(args[3], 'wb') as f:
+        f.write(b'P6\\n1 1\\n255\\n\\x00\\x00\\x00')
+    print(json.dumps({"ok": True, "page": int(args[2])}))
+else:
+    raise SystemExit(2)
+'''
+        with open(self.extractor, 'w') as f:
+            f.write(script)
+        os.chmod(self.extractor, 0o700)
+        self.old_env = {name: os.environ.get(name)
+                        for name in ('SAMOSA_EXTRACTOR', 'SAMOSA_EXTRACT_TOKENIZER')}
+        os.environ['SAMOSA_EXTRACTOR'] = self.extractor
+        os.environ['SAMOSA_EXTRACT_TOKENIZER'] = self.tokenizer
+
+    def tearDown(self):
+        for name, value in self.old_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        self.tmp.cleanup()
+
+    def test_hydrates_exact_pages_and_removes_render_intermediate(self):
+        meta = {'input_sha256': 'pdf', 'media_type': 'application/pdf',
+                'input_path': self.pdf, 'size': os.path.getsize(self.pdf),
+                '_intermediates_dir': os.path.join(self.tmp.name, 'intermediates')}
+        self.assertIsNone(samosa_jobs.hydrate_pdf_input(meta))
+        self.assertEqual([p['text_tokens'] for p in meta['pages']], [25, 1])
+        self.assertEqual(meta['text_tokens'], 26)
+        units = samosa_jobs.plan_units(meta, 'auto', 23040)
+        # One image page and a small text layer fit in one F-J4-safe request.
+        self.assertEqual(units[0]['granularity'], 'file')
+        out = samosa_jobs.extract_unit(units[0], meta)
+        self.assertEqual(out['text'], 'First page\nSecond page')
+        self.assertTrue(out['image_data_uri'].startswith(
+            'data:image/x-portable-pixmap;base64,'))
+        self.assertEqual(os.listdir(meta['_intermediates_dir']), [])
+
+    def test_rejects_sidecar_metadata_without_exact_tokens(self):
+        with open(self.extractor, 'w') as f:
+            f.write('''#!/usr/bin/env python3
+import json
+print(json.dumps({"ok": True, "text": "x", "pages": [{"index": 1, "text": "x"}]}))
+''')
+        os.chmod(self.extractor, 0o700)
+        meta = {'input_sha256': 'pdf', 'media_type': 'application/pdf',
+                'input_path': self.pdf, 'size': os.path.getsize(self.pdf)}
+        self.assertEqual(samosa_jobs.hydrate_pdf_input(meta), 'extract_invalid_response')
+        self.assertEqual(samosa_jobs.extract_unit(
+            samosa_jobs.plan_units(meta, 'auto', 23040)[0], meta)['error'],
+            'extract_invalid_response')
 
 
 class TestMergedOutput(unittest.TestCase):
@@ -591,6 +670,17 @@ class TestCallServe(unittest.TestCase):
         resp, err = samosa_jobs.call_serve(self._body(), self.serve_url)
         self.assertIsNone(err)
         self.assertIn('choices', resp)
+
+    def test_timeout_is_classified_for_cancellation(self):
+        with mock.patch('samosa_jobs.urllib.request.urlopen',
+                        side_effect=TimeoutError('timed out')):
+            _resp, err = samosa_jobs.call_serve(self._body(), self.serve_url, timeout=1)
+        self.assertEqual(err, 'timeout')
+
+    def test_cancel_endpoint_is_called(self):
+        fake_serve.reset_cancel_count()
+        self.assertTrue(samosa_jobs.request_cancel(self.serve_url))
+        self.assertEqual(fake_serve.get_cancel_count(), 1)
 
     def test_background_header_sent(self):
         samosa_jobs.call_serve(self._body(), self.serve_url, is_background=True)

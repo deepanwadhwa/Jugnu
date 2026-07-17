@@ -12,6 +12,7 @@
 #   samosa serve                            run the local app server in foreground
 #   samosa serve --stop                     stop the local app server cleanly
 #   samosa app                              start the server and open the browser app
+#   samosa jobs <command> <job.json>         run structured local batch work
 #   samosa pull                             pull the 24 GB model to local volume
 #   samosa doctor                           check the installation
 #
@@ -279,6 +280,13 @@ if [ "${1:-}" = "app" ]; then
   echo "$url"
   "$OPEN" "$url"
   exit 0
+fi
+
+if [ "${1:-}" = "jobs" ]; then
+  shift
+  JOBS_RUNNER="$RELEASE_DIR/bin/samosa_jobs.py"
+  [ -f "$JOBS_RUNNER" ] || fail "Jobs is unavailable in this release; install an updated Samosa release."
+  TOKENIZER="$TOKENIZER" exec python3 "$JOBS_RUNNER" "$@"
 fi
 
 while [ $# -gt 0 ]; do
