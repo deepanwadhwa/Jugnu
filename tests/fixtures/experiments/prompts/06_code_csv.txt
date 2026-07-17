@@ -1,0 +1,1 @@
+Write a short Python function that takes a list of daily attendance counts and returns their arithmetic mean. Handle an empty list by returning None.

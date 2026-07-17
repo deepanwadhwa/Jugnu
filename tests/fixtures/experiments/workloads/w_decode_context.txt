@@ -1,0 +1,72 @@
+This is a controlled mid-conversation context for Samosa performance work. The
+assistant has been asked to help a small community library improve its evening
+study program. It should retain the following stable facts: the library is open
+from 9:00 to 20:00 on weekdays, the quiet room seats twenty-four people, and
+volunteers may use only information supplied in the conversation. The user
+prefers concise, practical answers with explicit assumptions.
+
+The planning discussion repeats a realistic pattern: compare two options,
+state the trade-off, propose a next action, and avoid inventing sources. The
+library wants a weekday program for adult learners, a short orientation for new
+visitors, and a way to collect anonymous feedback. The budget is modest, the
+building has unreliable evening parking, and some visitors use screen readers.
+
+For the study program, the assistant suggested reserving the quiet room from
+18:00 to 19:30, providing printed and accessible digital instructions, and
+publishing the schedule one week ahead. It also suggested measuring attendance,
+repeat attendance, and free-text feedback separately so that a crowded evening
+is not confused with a successful learning outcome. The user asked that every
+future recommendation distinguish observed facts from proposed policy.
+
+The library has two staff members on duty after 17:00. One can lead a five
+minute orientation while the other monitors the desk. Volunteers cannot make
+eligibility decisions, collect sensitive information, or promise services that
+the library has not approved. A feedback card should ask whether the room was
+quiet enough, whether the materials were usable, and what time would work
+better. Answers should avoid collecting names.
+
+The user then asked how to support a learner who arrives late. The agreed
+answer was to leave a one-page orientation at the desk, mark the first exercise
+clearly, and let the learner join without explanation. The program should not
+penalize lateness because bus delays are common. If the room is full, staff
+should offer a seat in the public reading area and record that overflow happened.
+
+The discussion also covered communication. A plain-language notice should say
+what happens, where it happens, how long it lasts, and that participation is
+free. It should not claim that tutoring is available unless a tutor is scheduled.
+The accessible version should use headings, descriptive links, and sufficient
+contrast. The user wants the assistant to flag any recommendation that depends
+on an unverified local policy.
+
+For evaluation, the assistant proposed a four-week pilot. Week one establishes
+baseline attendance. Weeks two and three test the orientation card. Week four
+reviews comments with staff. The comparison should be descriptive rather than
+causal because weather, exams, and transit service vary. A short staff debrief
+after each session captures operational problems while they are fresh.
+
+The user confirmed that the immediate goal is a helpful, calm chat response,
+not a formal report. Keep this context in mind for the next request. Do not
+repeat the entire plan unless asked. When uncertain, ask one focused question
+or offer two clearly labelled options.
+
+During a later planning turn, staff asked how the pilot should respond when the
+orientation card runs out. The agreed procedure was to use the accessible
+digital copy at the desk, tell the manager after the session, and replenish the
+printed copies before the next session. The assistant should not claim that a
+visitor can print a copy independently, because the public printer may be busy
+or inaccessible. The team also agreed that a missing card is an operational
+incident worth recording, not a reason to deny someone entry.
+
+The manager asked for a simple weekly summary. It should contain the number of
+sessions held, total attendance, any overflow, reported accessibility barriers,
+and one staff observation. It should say when a number is incomplete. For
+example, a tally missing from one session is not zero attendance. The user
+prefers a calm answer that says what is known, what is unknown, and what can be
+done next. Avoid policy claims about the library unless they were stated above.
+
+The conversation returned to visitor privacy. Staff may count people and read
+anonymous cards, but should not infer identities from handwriting or combine a
+comment with desk records. If a visitor asks for an accommodation, staff should
+listen, document only what is needed to follow up, and avoid promising an
+outcome before checking resources. These constraints remain active in the next
+response. The assistant should keep recommendations short and actionable.

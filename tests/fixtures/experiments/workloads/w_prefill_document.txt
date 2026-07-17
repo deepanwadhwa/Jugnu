@@ -1,0 +1,161 @@
+# Riverside Library evening-study pilot
+
+Riverside Library is considering a six-week evening-study pilot for adults who
+want a quiet, dependable place to work. The library is open on weekdays from
+09:00 to 20:00. The quiet room has twenty-four seats, reliable power outlets,
+and a door that reduces noise from the children’s area. It does not have a
+dedicated tutor, food service, or reserved parking. Evening bus delays are a
+frequent reason that visitors arrive after the advertised start time.
+
+The proposed pilot runs Tuesdays and Thursdays from 18:00 to 19:30. Two staff
+members are normally on duty after 17:00. One staff member can offer a short
+orientation while the other remains at the public desk. Volunteers may greet
+visitors and restock materials, but they may not collect sensitive information,
+make eligibility decisions, or promise services that the library has not
+approved. Every public notice must state what is offered, where it happens, how
+long it lasts, and that participation is free.
+
+The pilot’s first goal is to make it easier for adult learners to begin work.
+The second goal is to understand whether the library can offer the program
+without disrupting normal desk service. The pilot is not designed to prove that
+attendance causes learning gains. Weather, examination periods, bus service,
+and local events all affect who arrives. The evaluation will therefore report
+descriptive trends and staff observations rather than causal conclusions.
+
+At the start of each session, staff will place a one-page orientation at the
+desk. The page explains where to sit, where to find the first exercise, how to
+ask for help, and how to borrow headphones. It is written in plain language and
+also available as an accessible digital document. The digital document uses
+headings, descriptive links, readable contrast, and no instructions that rely
+only on colour. A visitor who arrives late may take the page and join quietly;
+no explanation or penalty is required.
+
+The room policy is simple. Visitors use headphones for audio, keep calls outside
+the room, and ask staff before moving furniture. If all twenty-four seats are
+occupied, staff offer a place in the public reading area and mark the session as
+having overflow. Overflow is an operational signal, not a reason to turn away a
+visitor. Staff should also note interruptions that make the quiet room less
+usable, such as maintenance work or repeated door noise.
+
+The library will track attendance using a tally rather than names. It will
+separately tally first-time visitors, returning visitors when they volunteer
+that information, and overflow. A small anonymous feedback card asks three
+questions: Was the room quiet enough? Were the materials usable? What time
+would work better? The card includes an optional open response. It must not ask
+for names, contact details, immigration status, disability status, or other
+sensitive information.
+
+Staff will run a five-minute debrief after each session. The debrief records
+whether the orientation was available, whether desk service was interrupted,
+whether accessibility problems were reported, whether overflow occurred, and
+one improvement to test next time. The manager reviews these notes weekly. A
+change is recorded with its date so that later readers do not confuse a policy
+change with a change in attendance.
+
+The communication plan has three channels: a printed notice near the entrance,
+the library website, and a short message for partner organisations. Each uses
+the same factual wording. The notice should not imply tutoring, certification,
+child care, food, transportation, or guaranteed seating. The website includes a
+contact route for accessibility requests, but it does not promise an
+accommodation before staff confirm it can be provided.
+
+The pilot begins with one baseline week in which the room remains open but the
+orientation card is not offered. Weeks two through five use the card. Week six
+is reserved for review. The manager compares the weekly tallies, reads the
+anonymous comments, and asks staff whether the program was manageable. A
+summary distinguishes observed facts from recommendations. For example,
+“overflow occurred on three Tuesdays” is an observed fact; “add another study
+night” is a recommendation that requires an owner decision.
+
+Possible follow-up decisions include changing the start time, adding a second
+orientation page, reserving a nearby overflow table, or ending the pilot. The
+decision should weigh attendance, repeat attendance, overflow, accessibility
+feedback, and staff workload together. A single busy night should not decide
+the program’s future. The library’s stated aim is a calm, practical service
+that helps visitors begin work without creating promises it cannot keep.
+
+## Operations appendix: opening each session
+
+Before each pilot session, the staff member assigned to orientation checks that
+the room is unlocked, the orientation cards are present, the accessible digital
+copy can be opened, and the feedback cards are at the exit. The desk staff
+member checks the sign near the entrance for accuracy and removes any outdated
+notice. These checks are short, but they prevent a common reporting error: a
+visitor cannot use a service that was described but not actually available. If
+an item is missing, staff record it in the debrief and use the least disruptive
+fallback that remains within the approved policy.
+
+The opening check does not require a list of participants. Staff should not ask
+visitors why they are studying, what course they take, or whether they have a
+diagnosis. A visitor can choose a seat, read the orientation, and begin. If a
+visitor asks for help outside staff expertise, the appropriate response is to
+identify a known library resource or say that staff do not have enough
+information. The program is a place to study, not an assessment or advising
+service.
+
+## Operations appendix: accessibility and communication
+
+Accessibility requests are handled with care. A staff member may ask what
+would make the visit workable, but should not request more personal detail than
+is necessary. The response can include moving a chair, describing where a
+resource is located, or offering the digital orientation. It cannot include a
+promise that a specialist, device, or building modification will be available
+unless that has been confirmed. The debrief notes the barrier and the general
+category of response without identifying the visitor.
+
+All three communication channels are reviewed together. A discrepancy between
+the printed notice and the website is treated as a problem because visitors may
+rely on either one. Staff use the approved factual wording: evening study is a
+quiet place to work, it runs at the stated time, seats may be limited, and it
+does not include tutoring. Partner organisations may share the notice, but they
+should not rewrite it to add benefits that the library has not approved.
+
+## Operations appendix: interpreting the pilot
+
+Attendance is useful but incomplete. A session with fewer people may still be
+valuable if participants can work without interruption, and a full room may be
+unsuccessful if desk service collapses. The weekly review therefore reads the
+tallies alongside accessibility comments, overflow, and staff notes. The
+manager should explicitly mark a conclusion as tentative when the evidence is
+thin. For example, two busy Tuesdays do not establish that Tuesday is the best
+night for every visitor.
+
+When a change is tested, the manager writes the change before the session. A
+useful entry says what changed, why it changed, and what observation would make
+the team revisit it. This small discipline keeps the pilot understandable when
+several changes occur near each other. It also makes the final summary more
+honest: readers can see whether an apparent improvement followed a new policy,
+a holiday week, or a one-time event.
+
+## Operations appendix: close of session
+
+At 19:20, staff give a quiet reminder that the room closes at 19:30. The
+reminder should not shame visitors or demand that they disclose why they need
+more time. At closing, staff count uncollected feedback cards, secure any paper
+that contains comments, and return shared materials to the desk. The room is
+then checked for obvious hazards and furniture is returned to its usual layout.
+No participant list is created during this process.
+
+The manager reviews feedback in aggregate. A comment about a broken outlet is
+an operational issue to route to maintenance. A comment about noise is a signal
+to compare against staff observations and scheduled building activity. A
+comment asking for tutoring is evidence of demand, not evidence that tutoring
+was offered. The final report should preserve that distinction and should list
+any unanswered question that requires a future owner decision.
+
+## Operations appendix: decision scenarios
+
+If attendance is steady, overflow is rare, and staff workload is manageable,
+the manager may recommend continuing the schedule. If overflow is frequent,
+the manager may evaluate a second room or a different time, subject to staffing
+and accessibility review. If the room is consistently underused, the manager
+may test a different communication channel before ending the program. None of
+these responses is automatic. Each is a proposal whose expected benefit,
+operational cost, and uncertainty should be stated plainly.
+
+If a serious accessibility or safety problem occurs, staff pause the affected
+part of the pilot and notify the manager. They do not improvise a policy that
+could create a new barrier. The report records the date, the general nature of
+the problem, the immediate safe action, and the follow-up owner. This approach
+is intentionally conservative: the program values reliable access and honest
+communication over a headline attendance number.

@@ -1,0 +1,1 @@
+Write a JavaScript function named isPositiveInteger that returns true only for finite positive integers. Include three example calls as comments.

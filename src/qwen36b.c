@@ -240,6 +240,10 @@ typedef struct {
 } ESlot;
 
 typedef struct {
+    double attn, router, dense, expert_mm, expert_disk, head;
+} PhaseCounters;
+
+typedef struct {
     Cfg c;
     shards S;
     QT embed, lm_head;
@@ -280,6 +284,14 @@ typedef struct {
     int eslot_pool_n, eslot_pool_cap;
     uint64_t hits, miss;
     double t_edisk, t_emm;
+    /* E-X1: phase timing is deliberately opt-in.  The timers are scoped by
+     * generate()/generate_continue() so prefill and decode never share a
+     * bucket, even though they use the same forward code. */
+    struct {
+        int enabled;
+        int current; /* 0=off, 1=prefill, 2=decode */
+        PhaseCounters prefill, decode;
+    } phase;
     /* T2.5: buffer transiente per la lettura sequenziale di un intero layer
      * di expert durante il prefill (rilasciato al primo passo di decode). */
     uint8_t *seq_buf;
@@ -287,6 +299,50 @@ typedef struct {
     uint64_t seq_reads, seq_bytes;
     RefineStore refine;
 } Model;
+
+enum { PHASE_NONE, PHASE_PREFILL, PHASE_DECODE };
+enum { PHASE_ATTN, PHASE_ROUTER, PHASE_DENSE, PHASE_EXPERT_MM,
+       PHASE_EXPERT_DISK, PHASE_HEAD };
+
+/* Keep the disabled path to one predictable branch.  In particular, do not
+ * call clock_gettime() in hot kernels unless SAMOSA_PHASE_STATS=1. */
+static inline double phase_start(const Model *m) {
+    return (m->phase.enabled && m->phase.current) ? now_s() : 0.0;
+}
+
+static inline void phase_add_s(Model *m, int bucket, double seconds) {
+    if (!m->phase.enabled || !m->phase.current) return;
+    PhaseCounters *p = m->phase.current == PHASE_PREFILL
+        ? &m->phase.prefill : &m->phase.decode;
+    switch (bucket) {
+    case PHASE_ATTN:        p->attn += seconds; break;
+    case PHASE_ROUTER:      p->router += seconds; break;
+    case PHASE_DENSE:       p->dense += seconds; break;
+    case PHASE_EXPERT_MM:   p->expert_mm += seconds; break;
+    case PHASE_EXPERT_DISK: p->expert_disk += seconds; break;
+    case PHASE_HEAD:        p->head += seconds; break;
+    }
+}
+
+static inline void phase_add(Model *m, int bucket, double started) {
+    if (m->phase.enabled && m->phase.current)
+        phase_add_s(m, bucket, now_s() - started);
+}
+
+static inline void phase_enter(Model *m, int phase) {
+    if (m->phase.enabled) m->phase.current = phase;
+}
+
+static inline void phase_leave(Model *m) {
+    if (m->phase.enabled) m->phase.current = PHASE_NONE;
+}
+
+static inline void phase_reset(Model *m) {
+    if (!m->phase.enabled) return;
+    memset(&m->phase.prefill, 0, sizeof(m->phase.prefill));
+    memset(&m->phase.decode, 0, sizeof(m->phase.decode));
+    m->phase.current = PHASE_NONE;
+}
 
 /* T2.5 knobs — MISURATO 2026-07-12, default OFF: anche a cache di pagina
  * completamente fredda i pread sparsi bufferizzati costano 2.6 s su un
@@ -2161,6 +2217,7 @@ static void model_init(Model *m, const char *snap, const char *refine_dir,
                        int refine_mode, int refine_verify,
                        int refine_full_ranks, uint8_t refine_base_projections,
                        const char *refine_base_layers) {
+    const char *phase_stats_env = getenv("SAMOSA_PHASE_STATS");
     g_direct = getenv("DIRECT") ? atoi(getenv("DIRECT")) : 0;
     /* IDOT=0 -> kernel f32 esatti (dequant-on-use senza quantizzare le
      * attivazioni): stesso interruttore A/B di glm.c, serve per la
@@ -2177,6 +2234,11 @@ static void model_init(Model *m, const char *snap, const char *refine_dir,
     if (getenv("SEQ_PREFILL_FRAC")) g_seq_frac = (float)atof(getenv("SEQ_PREFILL_FRAC"));
     if (getenv("SEQ_PREFILL_MIN_S")) g_seq_min_s = atoi(getenv("SEQ_PREFILL_MIN_S"));
     memset(m, 0, sizeof(*m));
+    if (phase_stats_env && *phase_stats_env && strcmp(phase_stats_env, "0")) {
+        m->phase.enabled = 1;
+        fprintf(stderr, "[config] phase_stats=enabled (SAMOSA_PHASE_STATS=%s)\n",
+                phase_stats_env);
+    }
     load_cfg(&m->c, snap);
     
     st_init(&m->S, snap);
@@ -2400,6 +2462,7 @@ static void attention_gqa(Model *m, Layer *l, int layer, float *x, int S, int po
         exit(1);
     }
     
+    double phase_t0 = phase_start(m);
     float *q_and_gate = falloc((int64_t)S * 2 * H * hd);
     matmul_qt(q_and_gate, x, &l->q_proj, S, g_idot, g_i4s);
     
@@ -2421,7 +2484,9 @@ static void attention_gqa(Model *m, Layer *l, int layer, float *x, int S, int po
     float *v = falloc((int64_t)S * G * hd);
     matmul_qt(k, x, &l->k_proj, S, g_idot, g_i4s);
     matmul_qt(v, x, &l->v_proj, S, g_idot, g_i4s);
-    
+    phase_add(m, PHASE_DENSE, phase_t0);
+
+    phase_t0 = phase_start(m);
     for (int s = 0; s < S; s++) {
         for (int h = 0; h < H; h++) {
             rmsnorm_row(q + (int64_t)s * H * hd + h * hd, q + (int64_t)s * H * hd + h * hd, l->q_norm, hd, c->eps);
@@ -2508,9 +2573,12 @@ static void attention_gqa(Model *m, Layer *l, int layer, float *x, int S, int po
         ctx[j] = ctx[j] * sigmoid(gate[j]);
     }
     free(gate);
+    phase_add(m, PHASE_ATTN, phase_t0);
     
+    phase_t0 = phase_start(m);
     matmul_qt(out, ctx, &l->o_proj, S, g_idot, g_i4s);
     free(ctx);
+    phase_add(m, PHASE_DENSE, phase_t0);
 }
 
 static void attention_deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_base, float *out) {
@@ -2525,6 +2593,7 @@ static void attention_deltanet(Model *m, Layer *l, int layer, float *x, int S, i
     int head_v_dim = c->linear_value_head_dim;
     int grp = num_v_heads / num_k_heads;
     
+    double phase_t0 = phase_start(m);
     float *mixed_qkv = falloc((int64_t)S * conv_dim);
     matmul_qt(mixed_qkv, x, &l->in_proj_qkv, S, g_stateful_idot, g_i4s);
     
@@ -2535,7 +2604,9 @@ static void attention_deltanet(Model *m, Layer *l, int layer, float *x, int S, i
     float *a_proj = falloc((int64_t)S * num_v_heads);
     matmul_qt(b_proj, x, &l->in_proj_b, S, g_stateful_idot, g_i4s);
     matmul_qt(a_proj, x, &l->in_proj_a, S, g_stateful_idot, g_i4s);
+    phase_add(m, PHASE_DENSE, phase_t0);
     
+    phase_t0 = phase_start(m);
     // Gated DeltaNet Convolution state update and causal conv.
     // T2.6 fase 1: ogni canale porta il proprio stato (v0,v1,v2) e la sua
     // catena nei token e' indipendente dagli altri canali — il loop esterno
@@ -2661,8 +2732,11 @@ static void attention_deltanet(Model *m, Layer *l, int layer, float *x, int S, i
     free(q); free(k); free(v); free(z); free(b_proj); free(a_proj);
     
     // Output projection
+    phase_add(m, PHASE_ATTN, phase_t0);
+    phase_t0 = phase_start(m);
     matmul_qt(out, attn_out, &l->out_proj, S, g_stateful_idot, g_i4s);
     free(attn_out);
+    phase_add(m, PHASE_DENSE, phase_t0);
 }
 
 static void mlp_moe(Model *m, Layer *l, int layer, float *x, int S, float *out,
@@ -2679,6 +2753,7 @@ static void mlp_moe(Model *m, Layer *l, int layer, float *x, int S, float *out,
         free(m->seq_buf); m->seq_buf = NULL; m->seq_buf_cap = 0;
     }
     
+    double router_t0 = phase_start(m);
     float *logits = falloc((int64_t)S * E);
     matmul_qt(logits, x, &l->router_w, S, g_idot, g_i4s);
     
@@ -2784,6 +2859,7 @@ static void mlp_moe(Model *m, Layer *l, int layer, float *x, int S, float *out,
         keff[s] = effective_k;
     }
     free(logits);
+    phase_add(m, PHASE_ROUTER, router_t0);
     
     // Prefill batch-union: unique experts list
     int *uniq = malloc((size_t)E*8u*sizeof(int));
@@ -2838,7 +2914,9 @@ static void mlp_moe(Model *m, Layer *l, int layer, float *x, int S, float *out,
             int fd = (m->fd_exp_direct >= 0) ? m->fd_exp_direct : m->fd_exp;
             refine_pread_exact(fd, m->seq_buf, (uint64_t)span, (uint64_t)lo,
                                "sequential layer expert region");
-            m->t_edisk += now_s() - t0;
+            double elapsed = now_s() - t0;
+            m->t_edisk += elapsed;
+            phase_add_s(m, PHASE_EXPERT_DISK, elapsed);
             m->seq_reads++; m->seq_bytes += (uint64_t)span;
             seq_slots = calloc((size_t)nu, sizeof(ESlot));
             if (!seq_slots) { fprintf(stderr, "OOM seq slots\n"); exit(1); }
@@ -2891,7 +2969,9 @@ static void mlp_moe(Model *m, Layer *l, int layer, float *x, int S, float *out,
                 int item=base+missk[q];
                 expert_load(m,layer,uniq[item],uniq_masks[item],&m->ws[q]);
             }
-            m->t_edisk += now_s() - t0;
+            double elapsed = now_s() - t0;
+            m->t_edisk += elapsed;
+            phase_add_s(m, PHASE_EXPERT_DISK, elapsed);
         }
         
         // Prefetch next batch asynchronoulsy
@@ -2935,7 +3015,9 @@ static void mlp_moe(Model *m, Layer *l, int layer, float *x, int S, float *out,
                 const float *hr = hh + (int64_t)r * D;
                 for (int d = 0; d < D; d++) os[d] += wgt * hr[d];
             }
-            m->t_emm += now_s() - t0;
+            double elapsed = now_s() - t0;
+            m->t_emm += elapsed;
+            phase_add_s(m, PHASE_EXPERT_MM, elapsed);
         }
         
         // Admission: ogni miss calcolato viene offerto al budget globale.  Il
@@ -2975,6 +3057,7 @@ static void mlp_moe(Model *m, Layer *l, int layer, float *x, int S, float *out,
     free(xg); free(gg); free(uu); free(hh); free(rows); free(rw);
     
     // Shared expert evaluation
+    double dense_t0 = phase_start(m);
     float *sg = falloc((int64_t)S * sI);
     float *su = falloc((int64_t)S * sI);
     float *shh = falloc((int64_t)S * D);
@@ -2996,6 +3079,7 @@ static void mlp_moe(Model *m, Layer *l, int layer, float *x, int S, float *out,
     }
     
     free(sg); free(su); free(shh);
+    phase_add(m, PHASE_DENSE, dense_t0);
 }
 
 static float *step(Model *m, float *x, const int *ids, int S, int pos_base, int mrope_delta, int *pos_t_ids, int *pos_h_ids, int *pos_w_ids) {
@@ -3009,9 +3093,11 @@ static float *step(Model *m, float *x, const int *ids, int S, int pos_base, int 
         Layer *l = &m->L[i];
         
         // Input layernorm
+        double dense_t0 = phase_start(m);
         for (int s = 0; s < S; s++) {
             rmsnorm_row(nrm + (int64_t)s * D, x + (int64_t)s * D, l->in_ln, D, c->eps);
         }
+        phase_add(m, PHASE_DENSE, dense_t0);
         
         // Attention mixer
         if (l->block_type == 0) {
@@ -3019,17 +3105,20 @@ static float *step(Model *m, float *x, const int *ids, int S, int pos_base, int 
         } else {
             attention_gqa(m, l, i, nrm, S, pos_base, mrope_delta, pos_t_ids, pos_h_ids, pos_w_ids, tmp);
         }
+        dense_t0 = phase_start(m);
         for (int64_t j = 0; j < (int64_t)S * D; j++) x[j] += tmp[j];
         
         // Post layernorm
         for (int s = 0; s < S; s++) {
             rmsnorm_row(nrm + (int64_t)s * D, x + (int64_t)s * D, l->post_ln, D, c->eps);
         }
+        phase_add(m, PHASE_DENSE, dense_t0);
         
         // MLP (Dense or MoE)
         if (l->has_moe) {
             mlp_moe(m, l, i, nrm, S, tmp, pos_base, ids);
         } else {
+            dense_t0 = phase_start(m);
             float *g = falloc((int64_t)S * c->moe_intermediate_size);
             float *u = falloc((int64_t)S * c->moe_intermediate_size);
             float *h = falloc((int64_t)S * D);
@@ -3041,10 +3130,14 @@ static float *step(Model *m, float *x, const int *ids, int S, int pos_base, int 
             
             memcpy(tmp, h, (int64_t)S * D * sizeof(float));
             free(g); free(u); free(h);
+            phase_add(m, PHASE_DENSE, dense_t0);
         }
+        dense_t0 = phase_start(m);
         for (int64_t j = 0; j < (int64_t)S * D; j++) x[j] += tmp[j];
+        phase_add(m, PHASE_DENSE, dense_t0);
     }
     
+    double head_t0 = phase_start(m);
     float *last = falloc(D);
     rmsnorm_row(last, x + (int64_t)(S - 1) * D, m->final_norm, D, c->eps);
     
@@ -3052,6 +3145,7 @@ static float *step(Model *m, float *x, const int *ids, int S, int pos_base, int 
     /* matmul_qt dequantizza on-the-fly riga per riga (kernel int8/int4 dot);
      * niente bisogno di materializzare l'intera tabella lm_head ad ogni token. */
     matmul_qt(logit, last, &m->lm_head, 1, g_idot, g_i4s);
+    phase_add(m, PHASE_HEAD, head_t0);
     
     free(x); free(nrm); free(tmp); free(last);
     return logit;
@@ -3125,11 +3219,45 @@ typedef struct {
     int repetition_stopped;
     int cancelled;
     int thinking_forced;
+    int phase_prefill_tokens;
     int session_save_requested;
     int session_save_failed;
     int session_save_skipped;
     double prefill_s, decode_s, total_s;
 } GenStats;
+
+static double phase_total(const PhaseCounters *p) {
+    return p->attn + p->router + p->dense + p->expert_mm +
+           p->expert_disk + p->head;
+}
+
+static void phase_print_one(const char *name, const PhaseCounters *p,
+                            int tokens, double wall_s) {
+    double other = wall_s - phase_total(p);
+    if (other < 0.0) other = 0.0; /* timing calls are not perfectly nested */
+    double divisor = tokens > 0 ? (double)tokens : 1.0;
+    fprintf(stderr,
+        "%s tokens=%d wall=%.3fs attn=%.3fs/%.2fms_tok router=%.3fs/%.2fms_tok "
+        "dense=%.3fs/%.2fms_tok expert_mm=%.3fs/%.2fms_tok "
+        "expert_disk=%.3fs/%.2fms_tok head=%.3fs/%.2fms_tok "
+        "other=%.3fs/%.2fms_tok",
+        name, tokens, wall_s,
+        p->attn, 1e3*p->attn/divisor, p->router, 1e3*p->router/divisor,
+        p->dense, 1e3*p->dense/divisor, p->expert_mm, 1e3*p->expert_mm/divisor,
+        p->expert_disk, 1e3*p->expert_disk/divisor, p->head, 1e3*p->head/divisor,
+        other, 1e3*other/divisor);
+}
+
+static void phase_print(Model *m, const GenStats *stats) {
+    if (!m->phase.enabled) return;
+    int decode_tokens = stats->generated > 1 ? stats->generated - 1 : 0;
+    fprintf(stderr, "[phase] ");
+    phase_print_one("prefill", &m->phase.prefill, stats->phase_prefill_tokens,
+                    stats->prefill_s);
+    fprintf(stderr, " | ");
+    phase_print_one("decode", &m->phase.decode, decode_tokens, stats->decode_s);
+    fputc('\n', stderr);
+}
 
 static uint64_t rng_next(uint64_t *s) {
     uint64_t x = *s ? *s : 0x9e3779b97f4a7c15ULL;
@@ -3420,6 +3548,7 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out,
                      TokenSink sink, void *sink_ctx, GenOptions *options,
                      GenStats *stats) {
     Cfg *c = &m->c;
+    phase_reset(m);
     m->max_t = np + n_new;
     
     m->K = calloc(c->n_layers, sizeof(float*));
@@ -3491,7 +3620,9 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out,
         for (int s = 0; s < np; s++) embed_gather_row(x_prompt + s * m->c.hidden, &m->embed, prompt[s]);
     }
     
+    phase_enter(m, PHASE_PREFILL);
     float *logit = step(m, x_prompt, prompt, np, 0, mrope_delta, pos_t, pos_h, pos_w);
+    phase_leave(m);
     if (pos_t) { free(pos_t); free(pos_h); free(pos_w); }
     double prefill_done=now_s();
     int len = np;
@@ -3502,12 +3633,16 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out,
     
     for (int s = 0; s < n_new; s++) {
         adjust_threads(m, s);
+        phase_enter(m, PHASE_DECODE);
         if (options && options->cancel_flag &&
             atomic_load_explicit(options->cancel_flag, memory_order_relaxed)) {
             cancelled=1;
+            phase_leave(m);
             break;
         }
+        double head_t0 = phase_start(m);
         int best = choose_controlled_token(logit, c->vocab, options, generated);
+        phase_add(m, PHASE_HEAD, head_t0);
         free(logit);
         out[len++] = best;
         generated++;
@@ -3515,6 +3650,7 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out,
         if (sink_result) {
             if (sink_result == 1) model_stopped=1;
             else cancelled=1;
+            phase_leave(m);
             break;
         }
         int repeated_period = sink ? repeated_tail_period(out + np, generated) : 0;
@@ -3522,13 +3658,15 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out,
             fprintf(stderr,"[decode] stopped repeated token cycle period=%d repeats=16\n",
                     repeated_period);
             repetition_stopped=1;
+            phase_leave(m);
             break;
         }
-        if (s == n_new - 1) break;
+        if (s == n_new - 1) { phase_leave(m); break; }
         int one = best;
         float *x_one = falloc(m->c.hidden);
         embed_gather_row(x_one, &m->embed, one);
         logit = step(m, x_one, &one, 1, len - 1, mrope_delta, NULL, NULL, NULL);
+        phase_leave(m);
     }
     if(stats) {
         double done=now_s();
@@ -3537,6 +3675,7 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out,
         stats->repetition_stopped=repetition_stopped;
         stats->cancelled=cancelled;
         stats->thinking_forced=options ? options->thinking_forced : 0;
+        stats->phase_prefill_tokens=np;
         stats->prefill_s=prefill_done-gen_t0;
         stats->decode_s=done-prefill_done;
         stats->total_s=done-gen_t0;
@@ -3788,6 +3927,7 @@ static void generate_continue(Model *m, int *hist, int hist_len,
                               TokenSink sink, void *sink_ctx, GenOptions *options,
                               GenStats *stats) {
     Cfg *c = &m->c;
+    phase_reset(m);
     if (options && options->presence_penalty > 0.f && !options->seen)
         options->seen = calloc(((size_t)c->vocab + 7) / 8, 1);
     int n_cont = 1 + n_extra;
@@ -3874,7 +4014,10 @@ static void generate_continue(Model *m, int *hist, int hist_len,
         for (int s = 0; s < n_cont; s++) embed_gather_row(x_cont + s * m->c.hidden, &m->embed, cont[s]);
     }
     
-    float *logit = step(m, x_cont, cont, n_cont, hist_len - 1, mrope_delta, pos_t, pos_h, pos_w);
+    phase_enter(m, PHASE_PREFILL);
+    float *logit = step(m, x_cont, cont, n_cont, hist_len - 1, mrope_delta,
+                        pos_t, pos_h, pos_w);
+    phase_leave(m);
     if (pos_t) { free(pos_t); free(pos_h); free(pos_w); }
     double prefill_done = now_s();
     free(cont);
@@ -3885,12 +4028,16 @@ static void generate_continue(Model *m, int *hist, int hist_len,
     int cancelled = 0;
     for (int s = 0; s < n_new; s++) {
         adjust_threads(m, s);
+        phase_enter(m, PHASE_DECODE);
         if (options && options->cancel_flag &&
             atomic_load_explicit(options->cancel_flag, memory_order_relaxed)) {
             cancelled=1;
+            phase_leave(m);
             break;
         }
+        double head_t0 = phase_start(m);
         int best = choose_controlled_token(logit, c->vocab, options, generated);
+        phase_add(m, PHASE_HEAD, head_t0);
         free(logit);
         out[generated++] = best;
         hist[len++] = best; /* il chiamante garantisce la capacita' */
@@ -3898,6 +4045,7 @@ static void generate_continue(Model *m, int *hist, int hist_len,
         if (sink_result) {
             if (sink_result == 1) model_stopped=1;
             else cancelled=1;
+            phase_leave(m);
             break;
         }
         int repeated_period = sink ? repeated_tail_period(out, generated) : 0;
@@ -3905,13 +4053,15 @@ static void generate_continue(Model *m, int *hist, int hist_len,
             fprintf(stderr,"[decode] stopped repeated token cycle period=%d repeats=16\n",
                     repeated_period);
             repetition_stopped=1;
+            phase_leave(m);
             break;
         }
-        if (s == n_new - 1) break;
+        if (s == n_new - 1) { phase_leave(m); break; }
         int one = best;
         float *x_one = falloc(m->c.hidden);
         embed_gather_row(x_one, &m->embed, one);
         logit = step(m, x_one, &one, 1, len - 1, mrope_delta, NULL, NULL, NULL);
+        phase_leave(m);
     }
     if (stats) {
         double done = now_s();
@@ -3920,6 +4070,7 @@ static void generate_continue(Model *m, int *hist, int hist_len,
         stats->repetition_stopped = repetition_stopped;
         stats->cancelled = cancelled;
         stats->thinking_forced = options ? options->thinking_forced : 0;
+        stats->phase_prefill_tokens = n_cont;
         stats->prefill_s = prefill_done - t0;
         stats->decode_s = done - prefill_done;
         stats->total_s = done - t0;
@@ -4428,6 +4579,7 @@ static int run_chat(Model *m, const char *tokenizer_path, const char *user,
         stats.decode_s,decode_tps,stats.total_s,
         (unsigned long long)m->hits,(unsigned long long)(m->hits+m->miss),100.0*hit_rate,
         m->t_edisk,m->t_emm,peak_rss_gb());
+    phase_print(m, &stats);
     {
         ecache_stats est; ecache_get_stats(m->ec,&est);
         fprintf(stderr,"[ecache] budget=%.2f GB payload=%.2f GB peak=%.2f GB "

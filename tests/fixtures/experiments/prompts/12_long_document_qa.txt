@@ -1,0 +1,1 @@
+Using the committed Jobs corpus fixture, identify the main task, its required input, and one limitation. If the corpus fixture is unavailable, say exactly that rather than inventing an answer.
