@@ -1189,6 +1189,16 @@ def request_cancel(serve_url):
         return False
 
 
+def wait_for_slot_clear(serve_url, polls=30, interval_s=2):
+    """Wait for a cancelled serve request to release the single inference slot."""
+    for _ in range(polls):
+        status = get_serve_status(serve_url)
+        if status and not status.get('inference_busy'):
+            return True
+        time.sleep(interval_s)
+    return False
+
+
 def derive_timing(resp, wall_seconds):
     """B2 — provenance timing: serve stats when present, else runner wall-clock.
 
@@ -2327,6 +2337,12 @@ def cmd_preview(args):
     resp, err = call_serve(body, serve_url, timeout=300)
     wall_seconds = time.perf_counter() - _call_t0
     if err:
+        # Preview is a real model call too. A client-side timeout must not
+        # strand its inference and make the next interactive turn queue behind
+        # it (J1.4/F-J1).
+        if err == 'timeout':
+            request_cancel(serve_url)
+            wait_for_slot_clear(serve_url)
         print(f"error: serve call failed: {err}", file=sys.stderr)
         return 2
 
@@ -2596,12 +2612,8 @@ def _run_job(job, job_dir):
                     event_log.append('item_retry_wait', unit_id=uid,
                                      attempt=attempt, error=err,
                                      model_call_seconds=wall_seconds)
-                    # Poll status until inference_busy is false
-                    for _ in range(30):
-                        st = get_serve_status(serve_url)
-                        if st and not st.get('inference_busy'):
-                            break
-                        time.sleep(2)
+                    # Poll status until inference_busy is false.
+                    wait_for_slot_clear(serve_url)
                     time.sleep(1)  # Small additional delay
                     continue
                 else:

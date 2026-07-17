@@ -717,6 +717,14 @@ class TestCallServe(unittest.TestCase):
         self.assertTrue(samosa_jobs.request_cancel(self.serve_url))
         self.assertEqual(fake_serve.get_cancel_count(), 1)
 
+    def test_wait_for_slot_clear_polls_until_cancel_releases_it(self):
+        with mock.patch('samosa_jobs.get_serve_status', side_effect=[
+                {'inference_busy': True}, {'inference_busy': False}]), \
+             mock.patch('samosa_jobs.time.sleep') as sleep:
+            self.assertTrue(samosa_jobs.wait_for_slot_clear(self.serve_url,
+                                                             polls=2, interval_s=1))
+        sleep.assert_called_once_with(1)
+
     def test_background_header_sent(self):
         samosa_jobs.call_serve(self._body(), self.serve_url, is_background=True)
         headers = {k.lower(): v for k, v in fake_serve.get_last_headers().items()}
