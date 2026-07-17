@@ -121,21 +121,30 @@ this program.
 
 ## Required next condition
 
-Do not rerun E-X1 until the owner confirms the machine is otherwise idle and
-swap has returned to the pre-run level.  Start a privileged `powermetrics
---samplers cpu_power,thermal -i 1000` capture in another terminal before the
-next attempt.  Only then run the one warm-up plus three measured runs for each
-2T/4T workload leg.
+Do not rerun E-X1 until the owner confirms the machine is otherwise idle.
+Immediately before the next attempt, record fresh `vm.swapusage` and `vm_stat`
+baselines, then apply the card's actual per-run gate: swap-used delta
+approximately zero and pageout delta below 100 MB.  macOS may retain old swap
+allocations after pressure has passed, so its current global swap high-water
+mark is not itself a reason to reject a fresh, stable baseline.  Start a
+privileged `powermetrics --samplers cpu_power,thermal -i 1000` capture in
+another terminal before the next attempt.  Only then run the one warm-up plus
+three measured runs for each 2T/4T workload leg.
 
 ## Preflight check — no model run (2026-07-17)
 
 A read-only preflight was performed before resuming the card.  No `qwen36b` or
 Samosa process was running and `memory_pressure` reported 79% system-wide free
 memory, but `vm.swapusage` still reported 1,300.94 MB used.  This is not the
-246.06 MB pre-run level recorded above, so the swap-return condition is not
-met.  `pmset -g therm` showed no thermal or performance warning.
+246.06 MB global value recorded before the earlier attempt.  It does not show
+current pressure by itself: a subsequent sample reported 3.30 GB unused memory
+and no new swap-ins or swap-outs in the sampling interval.  The next experiment
+will instead use its own immediately-before-run VM baselines and evaluate their
+deltas.  `pmset -g therm` showed no thermal or performance warning.
 
 Privileged power capture is also unavailable to the noninteractive experiment
-shell: `sudo -n true` returned `sudo: a password is required`.  Consequently,
-no real-model invocation, including the E-X1 warm-up, was started.  This is a
-preflight observation only, not a performance or safety result.
+shell: `sudo -n true` returned `sudo: a password is required`.  The owner can
+start the required capture in a separate terminal; its output can be written to
+a file for the experiment to archive.  No real-model invocation was started in
+this preflight.  This is a preflight observation only, not a performance or
+safety result.
