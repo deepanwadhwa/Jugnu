@@ -2,8 +2,8 @@
 
 **Status: J1 implementation is landed on `issue-7-jobs`; its offline suite is
 green. E-J1 acceptance is still open.** The real four-PDF sidecar/planner check
-is measured, but the first long-PDF preview hit unsafe memory pressure on the
-16-GiB reference host and exposed non-interruptible prefill; see
+is measured, and the first long-PDF preview hit unsafe memory pressure on the
+16-GiB reference host; see
 [`pdf-preview-aborted-2026-07-16.md`](regressions/jobs/e-j1/pdf-preview-aborted-2026-07-16.md).
 No performance or accuracy claim is implied until the full E-J1 experiment
 completes. Claims about the *current* engine, by contrast, are verified below
@@ -507,9 +507,8 @@ One-shot runner (daemon = J2).
 release. J1 uses it for exact PDF page metadata and bounded one-page rendering;
 a release without it still returns the controlled
 `review_required reason:"extractor_unavailable:application/pdf"` result. DOCX
-remains deferred. E-J1 must resume only after the prefill-cancellation blocker
-above is addressed; it is not safe to infer long-PDF readiness from the offline
-suite alone.
+remains deferred. Text-prefill cancellation is now measured, but it is not safe
+to infer long-PDF or image-prefill readiness from the offline suite alone.
 
 **Schema decision (resolved):** the explicit `output_schema` is the validation
 contract, always. Schema *suggestion* is a **separate command** (`samosa jobs
@@ -816,12 +815,12 @@ serve unless noted; build in order.
 
 ### E-J1 — Does the runner work on the real model?  ~1–2 days  **RUN FIRST (after J1 offline tests are green)**
 
-**Current result (2026-07-16): blocked, with a recorded negative experiment.**
-The sidecar correctly measured/planned all four supplied JSS PDFs, but a
-20,817-token whole-file preview caused heavy compression/swap on the 16-GiB
-host. Closing the client and explicit `POST /v1/cancel` did not clear the slot
-during prefill. The JSS job now forces page units; engine prefill must become
-interruptible before proceeding to the full acceptance batch. Exact commands
+**Current result (2026-07-16): partial, with a recorded negative experiment and
+follow-up cancellation fix.** The sidecar correctly measured/planned all four
+supplied JSS PDFs, but a 20,817-token whole-file preview caused heavy
+compression/swap on the 16-GiB host. The JSS job now forces page units. Bounded
+text-prefill cancellation is measured on a JSS page, but rendered-image prefill,
+full-batch safety, and extraction accuracy remain unmeasured. Exact commands
 and observations are in the linked regression record above.
 
 Real `samosa serve` + the real 24 GB model; full runner + `preview` over 10–20

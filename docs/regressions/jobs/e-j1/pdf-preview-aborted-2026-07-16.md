@@ -51,19 +51,33 @@ longer listening and free pages recovered to 422,668.
 The retry was repeated with `OMP_NUM_THREADS=2`, a forced page unit, and an
 explicit `POST /v1/cancel` after eight seconds. The endpoint returned
 `{"cancelled":true}`, but `inference_busy` remained true for five subsequent
-five-second polls. This shows that the engine checks its cancellation flag only
-after the current monolithic prefill returns. The runner now calls that endpoint
-on a timeout, which is necessary for decode cancellation, but it cannot make a
-long prefill interruptible by itself.
+five-second polls. At that point the engine checked its cancellation flag only
+after the current monolithic prefill returned.
+
+## Follow-up: bounded text-prefill cancellation
+
+The server prefill path was changed to checkpoint its cancel flag every 32 text
+tokens, while the CLI retains its established single-prefill path. The offline
+suite (`make test` and `make jobs-test`) passed after the change. Three real
+two-thread checks then passed:
+
+| Request | Result |
+| --- | --- |
+| 1,516-token plain-text prompt, cancel after 3 s | slot cleared within the next 5-second poll; response had `finish_reason:"cancelled"`, 0 completion tokens, 4.34 GiB RSS |
+| JSS `v109i03.pdf` page 2, extracted text only (1,341 model prompt tokens), cancel after 3 s | slot cleared within the next 5-second poll; response had `finish_reason:"cancelled"`, 0 completion tokens, 4.34 GiB RSS |
+| 17-token prompt, no cancel | completed normally in 2.9 s with content `OK` and `finish_reason:"stop"` |
+
+The rendered-image/vision prefill portion has not yet had an equivalent
+interruption measurement. It is therefore not claimed as verified here.
 
 ## Consequences
 
 1. This run has no correctness, malformed-rate, throughput, or field-accuracy
    result. E-J1 acceptance is still open.
-2. The failure to cancel a disconnected request — and the explicit cancel
-   endpoint's inability to interrupt prefill — is an E-J1 blocker for unattended
-   Jobs. The engine must checkpoint cancellation during prefill and then be
-   retested before describing J1.4's timeout/cancel behavior as verified.
+2. The runner calls the explicit cancel endpoint on a timeout, and bounded
+   **text** prefill cancellation is now measured. A rendered-image prefill
+   interruption check and the full E-J1 safety/accuracy batch remain required
+   before describing unattended PDF Jobs as verified.
 3. `jobs/jss-article-metadata.json` now forces page units. That honors the
    single-image limit and avoids submitting a 20k-token article in one request.
 4. A resumed E-J1 run must start with `vm_stat` captured both before and after,

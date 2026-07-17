@@ -3131,6 +3131,44 @@ typedef struct {
     double prefill_s, decode_s, total_s;
 } GenStats;
 
+/* Server inference supplies a cooperative cancellation flag.  A monolithic
+ * prefill otherwise cannot observe that flag until decode begins, which can
+ * strand a timed-out background job for minutes.  Keep the established single
+ * prefill call for CLI work; only server calls are split into small, cache-safe
+ * chunks.  `step` writes absolute cache rows, so each chunk attends to the
+ * complete prefix already written by its predecessors. */
+static float *prefill_with_cancel(Model *m, float *embeddings, const int *ids,
+                                  int count, int pos_base, int mrope_delta,
+                                  int *pos_t, int *pos_h, int *pos_w,
+                                  GenOptions *options, int *cancelled) {
+    const int chunk_tokens = (options && options->cancel_flag) ? 32 : count;
+    float *logit = NULL;
+    *cancelled = 0;
+    for (int start = 0; start < count; start += chunk_tokens) {
+        if (options && options->cancel_flag &&
+            atomic_load_explicit(options->cancel_flag, memory_order_relaxed)) {
+            *cancelled = 1;
+            break;
+        }
+        int n = count - start;
+        if (n > chunk_tokens) n = chunk_tokens;
+        float *chunk = falloc((int64_t)n * m->c.hidden);
+        memcpy(chunk, embeddings + (int64_t)start * m->c.hidden,
+               (size_t)n * m->c.hidden * sizeof(float));
+        free(logit);
+        logit = step(m, chunk, ids + start, n, pos_base + start, mrope_delta,
+                     pos_t ? pos_t + start : NULL,
+                     pos_h ? pos_h + start : NULL,
+                     pos_w ? pos_w + start : NULL);
+    }
+    free(embeddings);
+    if (*cancelled) {
+        free(logit);
+        return NULL;
+    }
+    return logit;
+}
+
 static uint64_t rng_next(uint64_t *s) {
     uint64_t x = *s ? *s : 0x9e3779b97f4a7c15ULL;
     x ^= x >> 12; x ^= x << 25; x ^= x >> 27; *s = x;
@@ -3491,16 +3529,17 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out,
         for (int s = 0; s < np; s++) embed_gather_row(x_prompt + s * m->c.hidden, &m->embed, prompt[s]);
     }
     
-    float *logit = step(m, x_prompt, prompt, np, 0, mrope_delta, pos_t, pos_h, pos_w);
+    int cancelled=0;
+    float *logit = prefill_with_cancel(m, x_prompt, prompt, np, 0, mrope_delta,
+                                       pos_t, pos_h, pos_w, options, &cancelled);
     if (pos_t) { free(pos_t); free(pos_h); free(pos_w); }
     double prefill_done=now_s();
     int len = np;
     int generated=0;
     int model_stopped=0;
     int repetition_stopped=0;
-    int cancelled=0;
     
-    for (int s = 0; s < n_new; s++) {
+    for (int s = 0; !cancelled && s < n_new; s++) {
         adjust_threads(m, s);
         if (options && options->cancel_flag &&
             atomic_load_explicit(options->cancel_flag, memory_order_relaxed)) {
@@ -3874,7 +3913,10 @@ static void generate_continue(Model *m, int *hist, int hist_len,
         for (int s = 0; s < n_cont; s++) embed_gather_row(x_cont + s * m->c.hidden, &m->embed, cont[s]);
     }
     
-    float *logit = step(m, x_cont, cont, n_cont, hist_len - 1, mrope_delta, pos_t, pos_h, pos_w);
+    int cancelled = 0;
+    float *logit = prefill_with_cancel(m, x_cont, cont, n_cont, hist_len - 1,
+                                       mrope_delta, pos_t, pos_h, pos_w,
+                                       options, &cancelled);
     if (pos_t) { free(pos_t); free(pos_h); free(pos_w); }
     double prefill_done = now_s();
     free(cont);
@@ -3882,8 +3924,7 @@ static void generate_continue(Model *m, int *hist, int hist_len,
     int generated = 0;
     int model_stopped = 0;
     int repetition_stopped = 0;
-    int cancelled = 0;
-    for (int s = 0; s < n_new; s++) {
+    for (int s = 0; !cancelled && s < n_new; s++) {
         adjust_threads(m, s);
         if (options && options->cancel_flag &&
             atomic_load_explicit(options->cancel_flag, memory_order_relaxed)) {
