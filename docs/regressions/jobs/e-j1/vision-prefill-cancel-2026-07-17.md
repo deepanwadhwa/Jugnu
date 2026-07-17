@@ -59,6 +59,22 @@ subsequent polls remained clear. Server stats reported `prompt=1253`,
 ## Status
 
 The rendered-image interruption gate now passes for this one bounded page.
+An uncancelled run of the same page subsequently stayed inside the safety
+envelope (no swapout, throttling, or thermal warning) but reached the preview
+client's 300-second timeout without a model response. Server statistics after
+the cancellation show why: the 1,253-token prompt had generated **zero** tokens
+after 312.495 seconds of prefill (4.01 tok/s), with 75.50 GB read from the
+expert shards, a 1.1% expert-cache hit rate, and 3.87 GB peak RSS. It never
+entered decode, so lowering its 512-token output cap would not solve this
+specific result. This is a measured cost/latency limit, not an accuracy result.
+
+The timeout exposed a runner defect: `preview` returned without cancelling the
+still-active inference. That path now uses the same cancel-and-wait cleanup as
+`run`; the live timeout was cancelled and the slot cleared on the first
+five-second poll, with `Swapouts` still `188362`.
+
 E-J1 acceptance remains open: it still needs the full labeled representative
 batch, field-accuracy/malformed-rate results, and a recorded live chat
-interlock pause/resume.
+interlock pause/resume. The current JSS page shape must also be resized or
+otherwise measured to a completed response before it is used for an unattended
+117-page batch.
