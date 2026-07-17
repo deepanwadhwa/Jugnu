@@ -126,3 +126,16 @@ swap has returned to the pre-run level.  Start a privileged `powermetrics
 --samplers cpu_power,thermal -i 1000` capture in another terminal before the
 next attempt.  Only then run the one warm-up plus three measured runs for each
 2T/4T workload leg.
+
+## Preflight check — no model run (2026-07-17)
+
+A read-only preflight was performed before resuming the card.  No `qwen36b` or
+Samosa process was running and `memory_pressure` reported 79% system-wide free
+memory, but `vm.swapusage` still reported 1,300.94 MB used.  This is not the
+246.06 MB pre-run level recorded above, so the swap-return condition is not
+met.  `pmset -g therm` showed no thermal or performance warning.
+
+Privileged power capture is also unavailable to the noninteractive experiment
+shell: `sudo -n true` returned `sudo: a password is required`.  Consequently,
+no real-model invocation, including the E-X1 warm-up, was started.  This is a
+preflight observation only, not a performance or safety result.
