@@ -87,3 +87,68 @@ be a cheaper draft than `MOE_K=1`.
 
 Not run: everything in this section.  No performance claim is made by this
 report.
+
+## Addendum 2026-07-18 — checkpoint has a native MTP draft head; plan deltas from colibrì evidence
+
+The card gained an addendum on `main` (commit `5bd41bc`); this section
+records the verification evidence behind it and the resulting plan deltas.
+No measurement was run.
+
+### Verified: the active checkpoint ships an MTP layer the engine loads but never runs
+
+Command and output (2026-07-18, active snapshot):
+
+```
+$ python3 -c "
+import json
+cfg=json.load(open('$HOME/.samosa/current/model/config.json'))
+tc=cfg.get('text_config',cfg)
+for k in ['num_hidden_layers','num_experts','num_experts_per_tok',
+          'moe_intermediate_size','hidden_size','mtp_num_hidden_layers',
+          'shared_expert_intermediate_size']:
+    print(k, tc.get(k))
+"
+num_hidden_layers 40
+num_experts 256
+num_experts_per_tok 8
+moe_intermediate_size 512
+hidden_size 2048
+mtp_num_hidden_layers 1
+shared_expert_intermediate_size 512
+```
+
+Engine cross-references (code read, same date): expert offset/size tables
+are sized for `n_layers + mtp_layers`
+([qwen36b.c:1284](../../../../src/qwen36b.c#L1284),
+[:2345](../../../../src/qwen36b.c#L2345)); the refine store requires MTP
+experts to be `passthrough-int8` ([:1679](../../../../src/qwen36b.c#L1679));
+`expert_views` maps layer index `n_layers` (i.e. 40) as int8
+([:1845-1850](../../../../src/qwen36b.c#L1845-L1850)); the forward loop
+runs `i < c->n_layers` ([:3092](../../../../src/qwen36b.c#L3092)), so layer
+40 is parsed and loadable but never executed.  Grepping `mtp` over
+`src/qwen36b.c` shows only config/geometry/loading sites — no forward-pass
+call.  **Conclusion: the model carries its own draft head, int8, unwired.**
+
+### Plan deltas (from the card addendum; external colibrì numbers are GLM-5.2 on other hardware, directional only)
+
+1. Steps 2–3 gain a `MOE_K=2` leg beside `MOE_K=1` (draft-quality
+   sensitivity: colibrì saw MTP acceptance collapse 39–59% → 0–4% between
+   int8 and int4 heads — acceptance can sit on a cliff).
+2. Step 4 additionally diffs a batched forward's per-position argmax
+   against the S=1 teacher capture on one already-captured sequence —
+   colibrì #100 measured that shape-dependent integer kernels alone can
+   fork greedy output; this is the free early warning for the
+   "greedy acceptance keeps token identity" assumption.
+3. Step 6's model is reported warm and cold separately (colibrì measured
+   cold-cache expert-loads/token inflating ~660 → ~1100 under
+   speculation); draft legs archive their `[ecache]`/`[stats]` lines.
+4. If go: the follow-up implementation card's leading design candidate is
+   wiring the native MTP head (donor design:
+   [colibri/c/glm.c](../../../../colibri/c/glm.c) — MTP drafting,
+   batch-union verify, rejection sampling), with `MOE_K` drafts as the
+   measured lower bound it must beat.
+
+Runner's note: the owner's live privileged capture (started 2026-07-18) is
+`sudo /usr/bin/powermetrics --samplers cpu_power,gpu_power,thermal -i 1000
+-o /tmp/samosa-e-x10-m0-powermetrics.log`; `/tmp` does not survive reboot —
+copy each leg's slice beside this report immediately after the run.
