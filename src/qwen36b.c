@@ -4267,6 +4267,26 @@ static int run_teacher_capture(Model *m, const char *tokenizer_path,
         jval *item=prompts->kids[sequence];
         if (!item || item->t!=J_OBJ) teacher_die("corpus prompt %d is not an object",sequence);
         jval *prompt=json_get(item,"prompt"), *direct=json_get(item,"no_thinking");
+        jval *tokens=json_get(item,"tokens");
+        if (tokens) {
+            /* Exact token ids, forced verbatim: no chat template, no
+             * re-tokenization.  Decode-then-encode need not round-trip, so a
+             * caller scoring a generated continuation must supply ids. */
+            if (prompt || direct)
+                teacher_die("corpus prompt %d must not combine tokens with prompt/no_thinking",sequence);
+            if (tokens->t!=J_ARR || tokens->len<2)
+                teacher_die("corpus prompt %d tokens must be an array of at least two ids",sequence);
+            sequences[sequence].ids=malloc((size_t)tokens->len*sizeof(int));
+            if (!sequences[sequence].ids) teacher_die("OOM reading corpus tokens");
+            for (int position=0;position<tokens->len;++position) {
+                jval *id=tokens->kids[position];
+                if (!id || id->t!=J_NUM || id->num!=floor(id->num) ||
+                    id->num<0.0 || id->num>=(double)m->c.vocab)
+                    teacher_die("corpus prompt %d token %d is not a valid id",sequence,position);
+                sequences[sequence].ids[position]=(int)id->num;
+            }
+            sequences[sequence].count=tokens->len;
+        } else {
         if (!prompt || prompt->t!=J_STR || (direct && direct->t!=J_BOOL))
             teacher_die("corpus prompt %d has invalid prompt/no_thinking fields",sequence);
         char *templated=qwen_chat_prompt(prompt->str,NULL,direct?direct->boolean:0);
@@ -4280,6 +4300,7 @@ static int run_teacher_capture(Model *m, const char *tokenizer_path,
         free(templated);
         if (sequences[sequence].count<2)
             teacher_die("corpus prompt %d tokenized to fewer than two tokens",sequence);
+        }
         uint64_t add=(uint64_t)sequences[sequence].count-1u;
         if (positions>UINT64_MAX-add) teacher_die("teacher position count overflow");
         positions+=add;
