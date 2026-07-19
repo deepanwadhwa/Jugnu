@@ -29,6 +29,7 @@ samosa --fast "summarize this design"                   # adaptive threads, runs
 samosa --seed 11 "give me a deterministic sample"       # reproducible sampling
 samosa --max-tokens 2048 "write a long explanation"     # change the ceiling
 samosa --thinking-budget 512 "..."                      # cap internal reasoning
+samosa --context-tokens 131072 "..."                    # larger total context, if memory permits
 samosa doctor                                           # check the installation
 ```
 
@@ -44,9 +45,18 @@ many more SSD read passes. Use direct mode unless you need deep thinking
 to get results faster and keep the machine cooler. See
 [SSD speed](#ssd-speed-the-one-thing-to-be-deliberate-about) for details.
 
-A conversation is capped at 24,576 tokens total (saved history + your new
-message + the answer ceiling). Samosa checks this before it runs and stops
-rather than growing memory without limit.
+**Context capacity.** Saved history, your new message, thinking, and the answer
+share one total-context budget. Samosa reads the model's native maximum from
+the checkpoint (262,144 tokens for the shipped Qwen model), then selects a
+stable hardware-aware default: 24,576 on a 16 GB-class machine, 65,536 on
+32 GB-class hardware, and 131,072 on 64 GB-class hardware. It also checks
+currently available memory before allocating KV state.
+
+Set `SAMOSA_CONTEXT_TOKENS=auto` for the default policy, or explicitly choose
+a safe value up to the model maximum with `SAMOSA_CONTEXT_TOKENS=131072` or
+`--context-tokens 131072`. An explicit value is not a promise that a giant
+one-shot paste will be fast: the current prefill path still has temporary
+memory and time costs that grow with the prompt.
 
 ## The web app (a demo)
 
@@ -85,10 +95,12 @@ answer in that chat would copy the cut-off style and reply with only a word or
 two before stopping. That is now fixed. If a stopped answer has no complete
 sentence yet, Samosa keeps the previous saved state instead of overwriting it.
 
-**Context limit.** The same 24,576-token cap applies here. The server checks a
-turn before queueing it and rejects an oversized one before allocating any
-memory. Only the conversation you are using is loaded into RAM; opening other
-saved chats does not add to memory.
+**Context capacity.** The server uses the same total-context setting as the
+terminal. `GET /healthz` reports the model maximum, effective limit, mode, and
+KV bytes per token. The server checks a turn before queueing it and again after
+admission; it rejects an oversized or currently unsafe request before allocating
+KV. Only the conversation you are using is loaded into RAM, so opening other
+saved chats does not add resident KV.
 
 ## Thinking modes
 

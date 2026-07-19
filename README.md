@@ -108,7 +108,10 @@ samosa doctor
 ```
 
 Conversations are sealed to disk and resume byte-exactly, so a follow-up never
-re-reads the history. A conversation is capped at 24,576 tokens total.
+re-reads the history. Their total context (history, new turn, thinking, and
+answer) is hardware-aware: the shipped Qwen model permits up to 262,144 tokens,
+while Samosa chooses a safe default for the machine and accepts an explicit
+`--context-tokens` setting up to that model limit.
 [Thinking modes](docs/USAGE.md#thinking-modes) explains `--think` and
 `--think-code`.
 

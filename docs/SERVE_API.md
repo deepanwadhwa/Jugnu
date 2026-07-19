@@ -12,15 +12,18 @@ samosa app            # background single instance, then open the browser
 samosa serve --stop   # cooperative cancellation + clean shutdown
 ```
 
-`SAMOSA_PORT` overrides the port. Background state is under `~/.samosa/`:
+`SAMOSA_PORT` overrides the port. `SAMOSA_CONTEXT_TOKENS=auto` selects the
+hardware-aware total-context policy; set it to an integer such as `131072` to
+choose an explicit limit (never above the checkpoint's model limit). The CLI
+equivalent is `--context-tokens 131072`. Background state is under `~/.samosa/`:
 `server.pid`, `server.log`, and `chats/`.
 
 ## Endpoints
 
 - `GET /` — dependency-free interactive Samosa Chat application.
 - `GET /assets/samosa-chat.png` — local transparent app mascot.
-- `GET /healthz` — macOS physical footprint, the 24,576-token context cap,
-  uptime, queue state, and last-generation speed.
+- `GET /healthz` — macOS physical footprint, model/effective context limits,
+  KV bytes per token, uptime, queue state, and last-generation speed.
 - `GET /v1/models` — OpenAI-shaped model listing.
 - `POST /v1/chat/completions` — JSON or SSE chat response.
 - `POST /v1/cancel` — cooperatively stop the active generation between tokens.
@@ -40,9 +43,12 @@ so multiple saved chats do not accumulate KV allocations in RAM.
 
 The exact tokenized request is checked before queue admission or stream
 headers. Saved history + the new turn + the requested completion ceiling must
-not exceed 24,576 tokens. Oversized turns receive `400 context_limit` without
-allocating their KV state. At roughly 40 KiB per token across the ten GQA
-layers, this bounds the variable KV component to about 960 MiB.
+not exceed the effective total-context limit. The model's own declared position
+limit is an absolute ceiling; the current Qwen checkpoint declares 262,144.
+Oversized turns receive `400 context_limit` without allocating KV state. A
+request that fits the configured token limit but fails the current-memory
+preflight receives `503 insufficient_memory`. The server reports the actual KV
+bytes per token in `/healthz` rather than assuming a model-specific constant.
 The session choice and token count are checked again after queue admission, so
 two requests for the same conversation cannot race against a stale snapshot.
 

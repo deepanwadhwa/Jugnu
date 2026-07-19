@@ -11,6 +11,7 @@ mkdir -p "$TMP/bin" "$TMP/model"
 cat >"$TMP/bin/qwen36b" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$@"
+printf 'context=%s\n' "${SAMOSA_CONTEXT_TOKENS:-}"
 EOF
 chmod +x "$TMP/bin/qwen36b"
 
@@ -43,9 +44,17 @@ printf '%s\n' "$code" | grep -qx -- '2048'
 custom_budget=$(run --think --thinking-budget 333 "solve this")
 printf '%s\n' "$custom_budget" | grep -qx -- '333'
 
+custom_context=$(run --context-tokens 65536 "remember this")
+printf '%s\n' "$custom_context" | grep -qx -- '--context-tokens'
+printf '%s\n' "$custom_context" | grep -qx -- '65536'
+
 serve=$(run serve)
 printf '%s\n' "$serve" | grep -qx -- '--serve'
 printf '%s\n' "$serve" | grep -qx -- '8642'
+printf '%s\n' "$serve" | grep -qx -- 'context=auto'
+
+serve_custom=$(run serve --context-tokens 65536)
+printf '%s\n' "$serve_custom" | grep -qx -- 'context=65536'
 
 cat >"$TMP/fake-curl" <<'EOF'
 #!/bin/sh
@@ -64,6 +73,10 @@ printf '%s\n' "$stopped" | grep -qx -- 'Samosa server stopped.'
 
 if run --seed nope test >/dev/null 2>&1; then
   echo "invalid seed was accepted" >&2
+  exit 1
+fi
+if run --context-tokens nope test >/dev/null 2>&1; then
+  echo "invalid context capacity was accepted" >&2
   exit 1
 fi
 

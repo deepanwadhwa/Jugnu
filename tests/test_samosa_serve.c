@@ -26,10 +26,27 @@ static char *request(int port,const char *wire){
 }
 
 int main(void){
-    assert(context_fits(0,16384,8192));
-    assert(context_fits(24000,500,76));
-    assert(!context_fits(24000,500,77));
-    assert(!context_fits(24576,1,1));
+    Cfg loaded={0};
+    load_cfg(&loaded,"tests/fixtures/context_config");
+    assert(loaded.max_position_embeddings==65536);
+    assert(loaded.n_layers==2&&loaded.layer_type[0]==0&&loaded.layer_type[1]==1);
+    free(loaded.layer_type);
+
+    Model legacy_context={.context_limit=24576};
+    assert(context_fits(&legacy_context,0,16384,8192));
+    assert(context_fits(&legacy_context,24000,500,76));
+    assert(!context_fits(&legacy_context,24000,500,77));
+    assert(!context_fits(&legacy_context,24576,1,1));
+    int layer_types[]={1,0,1};
+    Model context_model={.c={.n_layers=3,.n_kv_heads=2,.head_dim=128,
+                              .layer_type=layer_types,.max_position_embeddings=262144}};
+    assert(model_configure_context_limit(&context_model,"131072"));
+    assert(context_model.model_context_limit==262144);
+    assert(context_model.context_limit==131072);
+    assert(context_model.kv_bytes_per_token==4096);
+    assert(!model_configure_context_limit(&context_model,"262145"));
+    assert(context_auto_limit(UINT64_C(16)*1024*1024*1024,262144)==24576);
+    assert(context_auto_limit(UINT64_C(64)*1024*1024*1024,262144)==131072);
 
     assert(piece_ends_sentence("2003.",5));
     assert(piece_ends_sentence(".\n\n",3));
@@ -66,6 +83,7 @@ int main(void){
 
     char *health=request(server.port,"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert(strstr(health,"HTTP/1.1 200 OK"));assert(strstr(health,"\"status\":\"ok\""));
+    assert(strstr(health,"\"model_context_limit_tokens\":24576"));
     assert(strstr(health,"\"context_limit_tokens\":24576"));free(health);
     double warm_rss=rss_gb();
     for(int i=0;i<20;i++){

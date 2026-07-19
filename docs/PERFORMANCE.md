@@ -84,9 +84,11 @@ That growth is bounded, not a leak. The per-token memory (the KV cache) is about
 40 KiB per token across the 10 attention layers. The measured rise is a little
 higher because the memory allocator holds on to its high point. For a
 conversation of fixed length, memory levels off — an eight-turn test on the same
-length held at **3.91–3.92 GiB**. The 24,576-token limit caps the worst case at
-roughly **5–5.5 GiB** after a maximum-length chat. Only one conversation is in
-memory at a time.
+length held at **3.91–3.92 GiB**. That measurement used the former 24,576-token
+default, which bounded the variable KV component to roughly 960 MiB. Context is
+now selected from hardware capacity or an explicit user setting, so higher
+limits need correspondingly more RAM; only one conversation is in memory at a
+time.
 
 The memory number the app shows is the real macOS "physical footprint," which
 matches Activity Monitor.

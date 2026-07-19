@@ -8,6 +8,7 @@
 #   samosa --fast "..."                     adaptive thermal thread scaling (faster, runs warmer)
 #   samosa --seed N "..."                   reproducible sampling
 #   samosa --max-tokens N "..."             override the safety ceiling
+#   samosa --context-tokens N "..."         set total context capacity (or auto)
 #   samosa --thinking-budget N "..."         cap internal reasoning before the answer
 #   samosa serve                            run the local app server in foreground
 #   samosa serve --stop                     stop the local app server cleanly
@@ -50,6 +51,7 @@ TOKENS=""
 THINKING_BUDGET=""
 RESUME=""
 SEED=""
+CONTEXT_TOKENS="${SAMOSA_CONTEXT_TOKENS:-auto}"
 
 say()  { printf '\033[1;36m[samosa]\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m[samosa] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -126,6 +128,10 @@ positive_integer() {
   case "$1" in ''|*[!0-9]*|0) return 1 ;; *) return 0 ;; esac
 }
 
+context_tokens_value() {
+  [ "$1" = "auto" ] || positive_integer "$1"
+}
+
 server_running() {
   "$CURL" -fsS --max-time 1 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1
 }
@@ -134,6 +140,7 @@ serve_foreground() {
   mkdir -p "$HOME_DIR/chats"
   SNAP="$MODEL" TOKENIZER="$TOKENIZER" SAMOSA_CHATS_DIR="$HOME_DIR/chats" \
     SAMOSA_APP_HTML="$APP_HTML" SAMOSA_APP_LOGO="$APP_LOGO" \
+    SAMOSA_CONTEXT_TOKENS="$CONTEXT_TOKENS" \
     exec "$ENGINE" --serve --port "$PORT" --tokenizer "$TOKENIZER"
 }
 
@@ -146,6 +153,7 @@ start_server() {
   fi
   nohup env SNAP="$MODEL" TOKENIZER="$TOKENIZER" SAMOSA_CHATS_DIR="$HOME_DIR/chats" \
     SAMOSA_APP_HTML="$APP_HTML" SAMOSA_APP_LOGO="$APP_LOGO" \
+    SAMOSA_CONTEXT_TOKENS="$CONTEXT_TOKENS" \
     "$ENGINE" --serve --port "$PORT" --tokenizer "$TOKENIZER" \
     >"$SERVER_LOG" 2>&1 &
   pid=$!
@@ -267,12 +275,24 @@ if [ "${1:-}" = "serve" ]; then
     stop_server
     exit 0
   fi
+  if [ "${1:-}" = "--context-tokens" ]; then
+    shift
+    [ "$#" = 1 ] && context_tokens_value "$1" || fail "--context-tokens requires auto or a positive integer"
+    CONTEXT_TOKENS=$1
+    shift
+  fi
   [ "$#" = 0 ] || usage
   serve_foreground
 fi
 
 if [ "${1:-}" = "app" ]; then
   shift
+  if [ "${1:-}" = "--context-tokens" ]; then
+    shift
+    [ "$#" = 1 ] && context_tokens_value "$1" || fail "--context-tokens requires auto or a positive integer"
+    CONTEXT_TOKENS=$1
+    shift
+  fi
   [ "$#" = 0 ] || usage
   start_server
   url="http://127.0.0.1:$PORT"
@@ -299,6 +319,11 @@ while [ $# -gt 0 ]; do
       shift
       [ $# -gt 0 ] && positive_integer "$1" || { echo "--max-tokens requires a positive integer" >&2; exit 1; }
       TOKENS="$1"
+      ;;
+    --context-tokens)
+      shift
+      [ $# -gt 0 ] && context_tokens_value "$1" || { echo "--context-tokens requires auto or a positive integer" >&2; exit 1; }
+      CONTEXT_TOKENS="$1"
       ;;
     --thinking-budget)
       shift
@@ -337,6 +362,7 @@ esac
 
 set -- "$@" --stream --tokens "$TOKENS" --tokenizer "$TOKENIZER" \
   --save-session "$SESSION"
+[ "$CONTEXT_TOKENS" = "auto" ] || set -- "$@" --context-tokens "$CONTEXT_TOKENS"
 [ -z "$SEED" ] || set -- "$@" --seed "$SEED"
 [ -z "$THINKING_BUDGET" ] || set -- "$@" --thinking-budget "$THINKING_BUDGET"
 

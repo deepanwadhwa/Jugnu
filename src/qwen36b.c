@@ -114,6 +114,8 @@ static void l2norm_head(float *x, int hd, float eps) {
 typedef struct {
     int hidden, n_layers, n_heads, n_kv_heads, head_dim;
     int vocab;
+    /* Native trained position limit from the effective text configuration. */
+    int max_position_embeddings;
     float eps;
     
     // Gated DeltaNet parameters
@@ -241,6 +243,11 @@ typedef struct {
 
 typedef struct {
     Cfg c;
+    /* Context policy is selected after the checkpoint config is loaded. */
+    int model_context_limit;
+    int context_limit;
+    int context_limit_is_auto;
+    uint64_t kv_bytes_per_token;
     shards S;
     QT embed, lm_head;
     float *final_norm;
@@ -1013,6 +1020,15 @@ static void load_cfg(Cfg *c, const char *snap) {
     c->vocab       = (int)json_get_req(cfg_root,"vocab_size","cfg_root")->num;
     c->head_dim    = (int)json_get_req(cfg_root,"head_dim","cfg_root")->num;
     c->eps         = (float)json_get_req(cfg_root,"rms_norm_eps","cfg_root")->num;
+    /* Older tiny fixtures predate this field.  Their conservative fallback is
+     * deliberately the historical Samosa cap, never an unbounded window. */
+    jval *max_positions = json_get(cfg_root, "max_position_embeddings");
+    if (max_positions && (floor(max_positions->num) != max_positions->num ||
+                          max_positions->num < 2 || max_positions->num > INT_MAX)) {
+        fprintf(stderr, "config.json: invalid max_position_embeddings\n");
+        exit(1);
+    }
+    c->max_position_embeddings = max_positions ? (int)max_positions->num : 24576;
     jval *mtp_layers = json_get(cfg_root, "mtp_num_hidden_layers");
     c->mtp_layers = mtp_layers ? (int)mtp_layers->num : 0;
     if (c->mtp_layers < 0 || c->mtp_layers > 16) {
@@ -1902,6 +1918,23 @@ static long long read_cgroup_stat(const char *key) {
     }
     fclose(f);
     return val;
+}
+
+/* A cgroup memory ceiling is part of the machine available to this process.
+ * Use it for stable policy selection instead of the host's physical RAM. */
+static uint64_t cgroup_memory_limit_bytes(void) {
+    uint64_t limit=0;
+    const char *paths[]={"/sys/fs/cgroup/memory.max","/sys/fs/cgroup/memory.high"};
+    for (size_t i=0;i<sizeof(paths)/sizeof(paths[0]);i++) {
+        FILE *f=fopen(paths[i],"r"); if(!f)continue;
+        char text[64]={0};
+        if(fgets(text,sizeof(text),f) && strncmp(text,"max",3)) {
+            char *end=NULL; errno=0; unsigned long long value=strtoull(text,&end,10);
+            if(!errno && end!=text && value && (!limit || value<limit)) limit=(uint64_t)value;
+        }
+        fclose(f);
+    }
+    return limit;
 }
 
 static double cgroup_mem_available_gb(void) {
@@ -3561,7 +3594,95 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out,
  *   | u8 sha256[32]
  */
 #define SESSION_MAGIC "QWSESS01"
-#define SAMOSA_MAX_CONTEXT_TOKENS 24576
+#define SAMOSA_LEGACY_CONTEXT_TOKENS 24576
+
+static uint64_t host_memory_bytes(void) {
+#ifdef __APPLE__
+    uint64_t bytes=0; size_t length=sizeof(bytes);
+    if (!sysctlbyname("hw.memsize", &bytes, &length, NULL, 0) && bytes) return bytes;
+#endif
+    long pages=sysconf(_SC_PHYS_PAGES), page_size=sysconf(_SC_PAGESIZE);
+    if (pages<=0 || page_size<=0 || (uint64_t)pages>UINT64_MAX/(uint64_t)page_size) return 0;
+    uint64_t physical_bytes=(uint64_t)pages*(uint64_t)page_size;
+#ifndef __APPLE__
+    uint64_t cgroup_limit=cgroup_memory_limit_bytes();
+    if (cgroup_limit && cgroup_limit<physical_bytes) physical_bytes=cgroup_limit;
+#endif
+    return physical_bytes;
+}
+
+static int model_full_attention_layers(const Model *m) {
+    int count=0;
+    for (int i=0;i<m->c.n_layers;i++) if (m->c.layer_type[i]==1) count++;
+    return count;
+}
+
+static uint64_t model_kv_bytes_per_token(const Model *m) {
+    uint64_t full=(uint64_t)model_full_attention_layers(m);
+    uint64_t heads=(uint64_t)m->c.n_kv_heads, dim=(uint64_t)m->c.head_dim;
+    if (!full || !heads || !dim || full>UINT64_MAX/heads ||
+        full*heads>UINT64_MAX/dim || full*heads*dim>UINT64_MAX/(2u*sizeof(float)))
+        return 0;
+    return full*heads*dim*2u*sizeof(float);
+}
+
+static int context_auto_limit(uint64_t memory_bytes,int model_limit) {
+    const uint64_t gib=UINT64_C(1024)*1024*1024;
+    int selected;
+    if (!memory_bytes || memory_bytes<24*gib) selected=24576;
+    else if (memory_bytes<48*gib) selected=65536;
+    else if (memory_bytes<96*gib) selected=131072;
+    else selected=model_limit;
+    return selected<model_limit?selected:model_limit;
+}
+
+/* Returns 1 on success. `spec` is NULL/empty/auto for the stable host-tier
+ * default, otherwise a positive integer up to the checkpoint's native limit. */
+static int model_configure_context_limit(Model *m,const char *spec) {
+    m->model_context_limit=m->c.max_position_embeddings;
+    m->kv_bytes_per_token=model_kv_bytes_per_token(m);
+    if (!m->kv_bytes_per_token) {
+        fprintf(stderr,"context: invalid KV geometry\n"); return 0;
+    }
+    if (!spec || !*spec || !strcmp(spec,"auto")) {
+        m->context_limit=context_auto_limit(host_memory_bytes(),m->model_context_limit);
+        m->context_limit_is_auto=1;
+    } else {
+        int requested=0;
+        if (!parse_int_strict(spec,&requested) || requested<2) {
+            fprintf(stderr,"--context-tokens/SAMOSA_CONTEXT_TOKENS must be 'auto' or an integer >= 2\n");
+            return 0;
+        }
+        if (requested>m->model_context_limit) {
+            fprintf(stderr,"requested context %d exceeds this model's %d-token limit\n",
+                    requested,m->model_context_limit);
+            return 0;
+        }
+        m->context_limit=requested;
+        m->context_limit_is_auto=0;
+    }
+    fprintf(stderr,"[context] model_limit=%d configured=%s effective=%d kv=%.2f MiB/1K tokens\n",
+            m->model_context_limit,m->context_limit_is_auto?"auto":spec,m->context_limit,
+            (double)m->kv_bytes_per_token*1000.0/(1024.0*1024.0));
+    return 1;
+}
+
+static int context_fits(const Model *m,int existing,int extra,int generated){
+    int limit=m->context_limit;
+    if(existing<0||extra<0||generated<0)return 0;
+    if(existing>limit || extra>limit-existing)return 0;
+    return generated<=limit-existing-extra;
+}
+
+/* The resident model and expert cache are already reflected in available
+ * memory.  Keep a modest runtime reserve for scratch, allocator overhead, and
+ * the OS before allocating the variable KV cache. */
+static int context_memory_fits(const Model *m,int total_tokens) {
+    const double reserve_bytes=512.0*1024.0*1024.0;
+    if (total_tokens<0 || (uint64_t)total_tokens>UINT64_MAX/m->kv_bytes_per_token) return 0;
+    double required=(double)((uint64_t)total_tokens*m->kv_bytes_per_token)+reserve_bytes;
+    return required<=mem_available_gb()*1e9;
+}
 
 static void session_write(FILE *f, RefineSha256 *sha, const void *data, size_t bytes) {
     refine_sha256_update(sha, data, bytes);
@@ -3580,13 +3701,6 @@ static void session_geometry(const Cfg *c, uint32_t g[9]) {
     g[8]=(uint32_t)c->linear_value_head_dim;
 }
 
-static int context_fits(int existing,int extra,int generated){
-    if(existing<0||extra<0||generated<0)return 0;
-    if(existing>SAMOSA_MAX_CONTEXT_TOKENS||
-       extra>SAMOSA_MAX_CONTEXT_TOKENS-existing)return 0;
-    return generated<=SAMOSA_MAX_CONTEXT_TOKENS-existing-extra;
-}
-
 /* Cheap preflight before KV allocation. session_resume still performs the
  * complete SHA-256 verification before trusting the saved state. */
 static int session_peek(Model *m,const char *path,int *len_out,int *last_out){
@@ -3597,7 +3711,7 @@ static int session_peek(Model *m,const char *path,int *len_out,int *last_out){
     ok=ok&&fread(geometry,1,sizeof(geometry),file)==sizeof(geometry)&&
        !memcmp(geometry,expected,sizeof(geometry));
     ok=ok&&fread(&len,1,4,file)==4&&fread(&kv_rows,1,4,file)==4&&
-       len>=2&&len<=SAMOSA_MAX_CONTEXT_TOKENS&&kv_rows==len-1;
+       len>=2&&len<=(uint32_t)m->context_limit&&kv_rows==len-1;
     for(int i=0;ok&&i<m->c.n_layers;i++){
         uint8_t type=0;ok=fread(&type,1,1,file)==1&&type==(uint8_t)m->c.layer_type[i];
     }
@@ -3729,8 +3843,8 @@ static int *session_resume(Model *m, const char *path, int reserve, int *len_out
     session_read(f, &sha, &len_u, 4, path);
     session_read(f, &sha, &kv_rows, 4, path);
     if (len_u < 2 || kv_rows != len_u - 1) session_die(path, "contatori incoerenti");
-    if(!context_fits((int)len_u,0,reserve))
-        session_die(path,"limite contesto 24576 token superato");
+    if(!context_fits(m,(int)len_u,0,reserve))
+        session_die(path,"configured context limit exceeded");
     for (int i = 0; i < c->n_layers; i++) {
         uint8_t t = 0; session_read(f, &sha, &t, 1, path);
         if (t != (uint8_t)c->layer_type[i]) session_die(path, "layer_type incoerente");
@@ -4327,9 +4441,14 @@ static int run_chat(Model *m, const char *tokenizer_path, const char *user,
             if(n_extra<=0){fprintf(stderr,"session: continuation produced no tokens\n");
                 free(extra);free(cont_text);return 1;}
         }
-        if(!context_fits(hlen_hint,n_extra,n_new)){
+        if(!context_fits(m,hlen_hint,n_extra,n_new)){
             fprintf(stderr,"session: this turn would exceed the %d-token total context limit\n",
-                    SAMOSA_MAX_CONTEXT_TOKENS);
+                    m->context_limit);
+            free(extra);free(cont_text);return 1;
+        }
+        if(!context_memory_fits(m,hlen_hint+n_extra+n_new)){
+            fprintf(stderr,"session: insufficient available memory for %d-token context\n",
+                    hlen_hint+n_extra+n_new);
             free(extra);free(cont_text);return 1;
         }
         int hlen=0;
@@ -4360,9 +4479,13 @@ static int run_chat(Model *m, const char *tokenizer_path, const char *user,
         int *prompt = malloc((size_t)cap * sizeof(int));
         np = tok_encode(tok, text, (int)strlen(text), prompt, cap);
         if (!np) { fprintf(stderr, "The prompt produced no tokens\n"); free(text); free(prompt); return 1; }
-        if(!context_fits(0,np,n_new)){
+        if(!context_fits(m,0,np,n_new)){
             fprintf(stderr,"This turn would exceed the %d-token total context limit\n",
-                    SAMOSA_MAX_CONTEXT_TOKENS);
+                    m->context_limit);
+            free(text);free(prompt);return 1;
+        }
+        if(!context_memory_fits(m,np+n_new)){
+            fprintf(stderr,"This turn needs more available memory for a %d-token context\n",np+n_new);
             free(text);free(prompt);return 1;
         }
         int *out = malloc((size_t)(np + n_new) * sizeof(int));
@@ -4734,7 +4857,8 @@ static int serve_context_preflight(SamosaServeContext *ctx,const char *user,
     int extra=tok_encode(&ctx->tokenizer,text,(int)bytes,tokens,capacity);
     free(tokens);free(text);
     if(extra<=0)return -1;
-    return context_fits(existing,extra,generated)?1:0;
+    if(!context_fits(ctx->model,existing,extra,generated))return 0;
+    return context_memory_fits(ctx->model,existing+extra+generated)?1:-2;
 }
 
 static int serve_finish_reason(const GenStats *stats,const char **closure){
@@ -4843,10 +4967,12 @@ static int samosa_serve_chat(SamosaServeContext *ctx,int fd,jval *root){
 
     int context_ok=serve_context_preflight(ctx,user,system,no_thinking,
                                             resume_session,max_tokens);
+    if(context_ok==-2){ free(user); return samosa_http_json_error(fd,503,"insufficient_memory",
+        "Not enough currently available memory for this context window."); }
     if(context_ok<0){ free(user); return samosa_http_json_error(fd,409,"invalid_session",
         "The saved conversation is invalid or incompatible with this model."); }
     if(!context_ok){ free(user); return samosa_http_json_error(fd,400,"context_limit",
-        "This turn could exceed Samosa Chat's 24576-token total context limit. "
+        "This turn could exceed Samosa Chat's configured total context limit. "
         "Start a new chat, shorten the message, or request fewer output tokens."); }
 
     double wait_s=0; int admitted=serve_scheduler_acquire(&ctx->scheduler,&wait_s);
@@ -4858,12 +4984,15 @@ static int samosa_serve_chat(SamosaServeContext *ctx,int fd,jval *root){
     if(save_session)resume_session=!access(session_path,R_OK)?session_path:NULL;
     context_ok=serve_context_preflight(ctx,user,system,no_thinking,
                                        resume_session,max_tokens);
+    if(context_ok==-2){serve_scheduler_release(&ctx->scheduler); free(user);
+        return samosa_http_json_error(fd,503,"insufficient_memory",
+            "Not enough currently available memory for this context window.");}
     if(context_ok<0){serve_scheduler_release(&ctx->scheduler); free(user);
         return samosa_http_json_error(fd,409,"invalid_session",
             "The saved conversation header is invalid or incompatible with this model.");}
     if(!context_ok){serve_scheduler_release(&ctx->scheduler); free(user);
         return samosa_http_json_error(fd,400,"context_limit",
-            "This turn could exceed Samosa Chat's 24576-token total context limit. "
+            "This turn could exceed Samosa Chat's configured total context limit. "
             "Start a new chat, shorten the message, or request fewer output tokens.");}
     atomic_store(&ctx->cancel,0); g_moe_down_idot=thinking_code?0:g_idot;
     ServeTokenSink sink={.fd=fd,.stream=stream,.thinking_open=!no_thinking,
@@ -4902,13 +5031,18 @@ static int samosa_serve_handler(SamosaHttpServer *server,int fd,
         GenStats stats={0};int has;
         pthread_mutex_lock(&ctx->stats_mu);stats=ctx->last_stats;has=ctx->has_last_stats;pthread_mutex_unlock(&ctx->stats_mu);
         pthread_mutex_lock(&ctx->scheduler.mu);int active=ctx->scheduler.active,queued=ctx->scheduler.waiting;pthread_mutex_unlock(&ctx->scheduler.mu);
+        int model_limit=ctx->model?ctx->model->model_context_limit:SAMOSA_LEGACY_CONTEXT_TOKENS;
+        int context_limit=ctx->model?ctx->model->context_limit:SAMOSA_LEGACY_CONTEXT_TOKENS;
+        uint64_t kv_per_token=ctx->model?ctx->model->kv_bytes_per_token:0;
+        const char *context_mode=ctx->model&&ctx->model->context_limit_is_auto?"auto":"manual";
         char body[1024];snprintf(body,sizeof(body),
             "{\"status\":\"ok\",\"model\":\"qwen3.6-35b-a3b\",\"rss_gb\":%.2f,"
-            "\"context_limit_tokens\":%d,\"uptime_seconds\":%.0f,"
+            "\"model_context_limit_tokens\":%d,\"context_limit_tokens\":%d,"
+            "\"context_limit_mode\":\"%s\",\"kv_bytes_per_token\":%llu,\"uptime_seconds\":%.0f,"
             "\"scheduler\":{\"active\":%s,\"queued\":%d,"
             "\"max_queue\":%d},\"last_generation\":{\"available\":%s,"
             "\"tokens\":%d,\"tokens_per_second\":%.2f}}",rss_gb(),
-            SAMOSA_MAX_CONTEXT_TOKENS,now_s()-ctx->started,
+            model_limit,context_limit,context_mode,(unsigned long long)kv_per_token,now_s()-ctx->started,
             active?"true":"false",queued,ctx->scheduler.max_waiting,has?"true":"false",
             stats.generated,stats.generated>1&&stats.decode_s>0?(stats.generated-1)/stats.decode_s:0);
         return samosa_http_response(fd,200,"application/json",body,NULL);
@@ -5084,6 +5218,8 @@ int main(int argc, char **argv) {
     uint64_t cli_seed=0;
     const char *cli_save_session = NULL, *cli_resume_session = NULL;
     int cli_resume_decode = 0;
+    const char *context_spec=getenv("SAMOSA_CONTEXT_TOKENS");
+    const char *cli_context_spec=NULL;
     const char *moe_fixed = getenv("MOE_K"), *moe_mass = getenv("MOE_MASS");
     const char *moe_max_entropy = getenv("MOE_MAX_ENTROPY");
     const char *moe_min_gap = getenv("MOE_MIN_GAP");
@@ -5118,6 +5254,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--queue") && i+1<argc) {
             if(!parse_int_strict(argv[++i],&serve_queue)||serve_queue<0||serve_queue>64){
                 fprintf(stderr,"--queue requires an integer in 0..64\n");bad_option=1;}
+        }
+        else if (!strcmp(argv[i], "--context-tokens")) {
+            if (i + 1 >= argc) { fprintf(stderr,"--context-tokens requires auto or an integer\n"); bad_option=1; }
+            else cli_context_spec=argv[++i];
         }
         else if (!strcmp(argv[i], "--system") && i + 1 < argc) system = argv[++i];
         else if ((!strcmp(argv[i], "--tokens") || !strcmp(argv[i], "--max-tokens")) && i + 1 < argc) n_chat = atoi(argv[++i]);
@@ -5219,6 +5359,7 @@ int main(int argc, char **argv) {
         else if (!strncmp(argv[i], "--", 2)) { fprintf(stderr, "Unknown option: %s\n", argv[i]); bad_option = 1; }
     }
     if (bad_option) return 1;
+    if (cli_context_spec) context_spec=cli_context_spec;
     if(serve_mode && (chat||cli_resume_session||teacher_corpus)){
         fprintf(stderr,"--serve cannot be combined with chat, resume, or teacher modes\n");return 2;}
     if ((teacher_corpus != NULL) != (teacher_output != NULL)) {
@@ -5343,6 +5484,7 @@ int main(int argc, char **argv) {
         Model m;model_init(&m,snap,refine_dir,refine_mode,refine_verify,
                            refine_full_ranks,refine_base_projections,
                            refine_base_layers_text);
+        if(!model_configure_context_limit(&m,context_spec))return 2;
         return run_samosa_serve(&m,snap,tokenizer_path,serve_port,serve_queue);
     }
     if (chat || cli_resume_session) {
@@ -5419,6 +5561,7 @@ int main(int argc, char **argv) {
         Model m; model_init(&m,snap,refine_dir,refine_mode,refine_verify,
                             refine_full_ranks,refine_base_projections,
                             refine_base_layers_text);
+        if(!model_configure_context_limit(&m,context_spec))return 2;
         return run_chat(&m, tokenizer_path, chat, system, n_chat, no_thinking, stream,&options,
                         cli_save_session, cli_resume_session, cli_resume_decode,
                         NULL, NULL, NULL, NULL);

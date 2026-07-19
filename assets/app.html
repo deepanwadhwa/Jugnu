@@ -277,6 +277,7 @@
         <span>Mode <strong id="modeValue">Direct</strong></span>
         <span>Speed <strong id="speedValue">—</strong></span>
         <span>Memory <strong id="rssValue">—</strong></span>
+        <span>Context <strong id="contextValue">—</strong></span>
         <span>Closure <strong id="closureValue">—</strong></span>
       </footer>
     </main>
@@ -300,6 +301,7 @@
       <input id="seed" inputmode="numeric" pattern="[0-9]*" placeholder="Random">
       <small>Use the same non-negative seed to reproduce a sampling path.</small>
     </div>
+    <div class="field"><small id="contextHelp">Context capacity is set when the local server starts. History, thinking, and the answer share it.</small></div>
     <div class="local-card"><strong>Local-only connection</strong><br>This page talks to <code>127.0.0.1</code>. It contains no analytics, accounts, CDNs, or remote scripts.</div>
   </aside>
 
@@ -312,7 +314,7 @@
         composer: $("composer"), send: $("send"), stop: $("stop"), name: $("conversationName"),
         status: $("modelStatus"), dot: $("statusDot"), settings: $("settings"), scrim: $("scrim"),
         thinking: $("thinking"), maxTokens: $("maxTokens"), seed: $("seed"), mode: $("modeValue"),
-        speed: $("speedValue"), rss: $("rssValue"), closure: $("closureValue"), jump: $("jumpLatest"),
+        speed: $("speedValue"), rss: $("rssValue"), context: $("contextValue"), contextHelp: $("contextHelp"), closure: $("closureValue"), jump: $("jumpLatest"),
         imageInput: $("imageInput"), attachBtn: $("attachBtn"), removeImage: $("removeImage"),
         imagePreviewWrap: $("imagePreviewWrap"), imagePreview: $("imagePreview")
       };
@@ -490,6 +492,7 @@
           const r=await fetch("/healthz",{cache:"no-store"}); if(!r.ok)throw new Error(); const h=await r.json();
           els.dot.className="status-dot online"; els.status.textContent=h.scheduler?.active?"Qwen is generating locally":"Qwen3.6 ready on this Mac";
           if(h.rss_gb)els.rss.textContent=`${h.rss_gb.toFixed(2)} GB`; if(h.last_generation?.tokens_per_second)els.speed.textContent=`${h.last_generation.tokens_per_second.toFixed(2)} tok/s`;
+          if(h.context_limit_tokens){const effective=h.context_limit_tokens.toLocaleString(), model=(h.model_context_limit_tokens||h.context_limit_tokens).toLocaleString(); els.context.textContent=`${effective} tokens`; els.contextHelp.textContent=`${h.context_limit_mode||"configured"} total context: ${effective} tokens (model maximum ${model}). History, thinking, and the answer share it.`;}
         } catch (_) { els.dot.className="status-dot offline"; els.status.textContent="Local model server unavailable"; }
       }
       function openSettings() { els.settings.classList.add("open"); els.settings.setAttribute("aria-hidden","false"); els.scrim.classList.add("show"); }
