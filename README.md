@@ -113,9 +113,10 @@ answer) is hardware-aware: the shipped Qwen model permits up to 262,144 tokens,
 while Samosa chooses a safe default for the machine and accepts an explicit
 `--context-tokens` setting up to that model limit. The web app can compact a
 long conversation without changing its chat ID or removing its visible
-messages: Qwen writes a continuation summary, recent turns stay verbatim, and
-Samosa rebuilds the sealed K/V snapshot. Automatic compaction defaults to 80%
-projected use and is configurable in Settings.
+messages: the active model writes continuation memory, recent turns stay
+verbatim, and Samosa rebuilds Qwen's sealed K/V snapshot or the smaller
+Bonsai/Ornith `llama-server` prompt. Automatic compaction defaults to 80%
+projected use, survives model/gateway restarts, and is configurable in Settings.
 [Thinking modes](docs/USAGE.md#thinking-modes) explains `--think` and
 `--think-code`.
 

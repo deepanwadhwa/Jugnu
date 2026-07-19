@@ -29,6 +29,39 @@ on, it can spend most of a small token budget inside its reasoning trace, so
 raise the max-tokens setting or switch thinking off for short answers. It is
 text-only as installed.
 
+## Context capacity and compaction
+
+All three backends expose the same controls in **Settings → Total context
+capacity** and **Auto-compact conversations**. Qwen uses its hardware-aware
+context policy. The GGUF gateway keeps its conservative 8,192-token default;
+`SAMOSA_GGUF_CONTEXT_TOKENS` can change that startup default, and an explicit
+value selected in the app can use any capacity up to the model-declared
+262,144-token maximum. Applying a different GGUF capacity restarts only the
+active `llama-server`; the gateway and saved conversations stay in place.
+Whether a large explicit window fits and performs well still depends on the
+model, quantization, and machine.
+
+Bonsai and Ornith conversation state is stored separately under:
+
+```text
+~/.samosa/chats/<conversation-id>/bonsai.json
+~/.samosa/chats/<conversation-id>/ornith.json
+```
+
+These are model-facing ledgers; the complete visible transcript remains in the
+browser. The gateway renders each ledger with the active model's own chat
+template and calls that model's tokenizer for exact usage. At the configured
+threshold (80% by default), it asks the active model to summarize older turns,
+keeps a recent message-aligned tail verbatim, and atomically replaces the
+ledger. The next inference sends the smaller prompt, so `llama-server` discards
+the old slot prefix and rebuilds K/V state. The conversation ID does not
+change, and the compacted ledger is reloaded after a gateway or model restart.
+
+**Compact this conversation now** uses the same operation. A failed summary,
+non-shrinking result, oversized result, or file-write failure leaves the
+previous ledger authoritative. Gateway policy is stored in
+`~/.samosa/gateway-settings.json`.
+
 ## Internet sources
 
 Paste a public `http://` or `https://` URL under **Settings → Internet source**

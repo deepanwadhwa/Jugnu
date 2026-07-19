@@ -109,13 +109,14 @@ admission; it rejects an oversized or currently unsafe request before allocating
 KV. Only the conversation you are using is loaded into RAM, so opening other
 saved chats does not add resident KV.
 
-**Compaction.** Samosa resumes the current sealed session and asks Qwen for a
-structured continuation memory, retains recent complete turns verbatim, frees
-the old inference state, and builds a fresh smaller K/V snapshot. The old
-snapshot is not replaced until the compacted one is completely sealed and
-fsynced. Automatic compaction checks projected use—history, the incoming turn,
-and its answer ceiling—so it runs before the hard limit. Manual and automatic
-compaction keep the same conversation ID; browser messages are not deleted.
+**Compaction.** Samosa asks the active model for structured continuation
+memory and retains recent complete turns verbatim. Qwen builds a fresh smaller
+K/V snapshot; Bonsai and Ornith atomically replace a durable model-facing
+ledger, then `llama-server` rebuilds K/V from that smaller prompt. Automatic
+compaction checks projected use—history, the incoming turn, and its answer
+ceiling—so it runs before the hard limit. Manual and automatic compaction keep
+the same conversation ID; browser messages are not deleted, and compacted
+context survives gateway/model restarts.
 
 ## Thinking modes
 

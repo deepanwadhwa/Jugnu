@@ -18,6 +18,13 @@ choose an explicit limit (never above the checkpoint's model limit). The CLI
 equivalent is `--context-tokens 131072`. Background state is under `~/.samosa/`:
 `server.pid`, `server.log`, and `chats/`.
 
+When the multi-model gateway runs Bonsai or Ornith,
+`SAMOSA_GGUF_CONTEXT_TOKENS` sets the conservative GGUF startup default
+(8,192 when unset). The same `/v1/settings` request can select an explicit
+capacity at runtime; changing it restarts the active `llama-server` but not the
+gateway. The selected GGUF policy persists in
+`~/.samosa/gateway-settings.json`.
+
 ## Endpoints
 
 - `GET /` — dependency-free interactive Samosa Chat application.
@@ -37,11 +44,12 @@ Supported controls are `stream`, `max_tokens`/`max_completion_tokens` (1..8192),
 `code`), `thinking_budget` (0..8192), and `conversation_id`.
 
 `conversation_id` is limited to 64 letters, digits, dashes, or underscores.
-The current developer preview persists a sealed `session.qws` under
-`~/.samosa/chats/<id>/`, so later turns avoid history prefill and survive a
-restart. The planned four-slot in-RAM LRU is not implemented yet; turns restore
-the snapshot from disk. Only the active request's conversation state is loaded,
-so multiple saved chats do not accumulate KV allocations in RAM.
+Qwen persists a sealed `session.qws` under `~/.samosa/chats/<id>/`, so later
+turns avoid history prefill and survive a restart. Bonsai and Ornith persist
+atomic model-facing JSON ledgers as `<id>/bonsai.json` and `<id>/ornith.json`;
+their `llama-server` reuses an in-process common K/V prefix and rebuilds it from
+the ledger after restart or compaction. The browser retains the full visible
+transcript for every backend.
 
 The exact tokenized request is checked before queue admission or stream
 headers. Saved history + the new turn + the requested completion ceiling must
@@ -74,13 +82,13 @@ budget mid-generation. Existing conversations are retained.
 ## Conversation compaction
 
 Automatic compaction is enabled by default at 80% projected context use.
-“Projected” means the sealed history plus the exact incoming turn and its
-requested completion ceiling. This leaves room for Qwen to produce the
+“Projected” means the durable history plus the exact incoming turn and its
+requested completion ceiling. This leaves room for the active model to produce
 continuation memory before the hard context limit is reached. Settings can turn
 automatic compaction off or choose a 70%, 75%, 80%, 85%, or 90% threshold.
 
-Compaction is a real state replacement, not an extra summary message appended
-to the old cache:
+Compaction is a real state replacement, not an ever-growing summary appended
+to the old context. Qwen:
 
 1. Samosa resumes the sealed session and asks Qwen for a structured continuation
    memory, so the summarizer sees the actual prior K/V state.
@@ -96,6 +104,13 @@ The conversation ID, browser transcript, and next-turn behavior stay the same.
 If any phase fails, the previous `session.qws` remains authoritative. Image
 understanding is captured by the resumed summary; raw image placeholder tokens
 are not copied into the text-only recent tail.
+
+For Bonsai and Ornith, the gateway uses `/apply-template` and `/tokenize` on
+the active `llama-server` for exact accounting, asks that same model for
+continuation memory with thinking disabled, retains a 15% recent tail, and
+atomically replaces the per-model JSON ledger. The next chat request contains
+the compacted ledger, which makes `llama-server` rebuild the slot K/V instead of
+retaining the old prefix. The old file remains intact if any phase fails.
 
 Manual compaction uses the same path:
 

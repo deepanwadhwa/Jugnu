@@ -42,9 +42,33 @@ ORNITH_MODEL = Path(os.environ.get("SAMOSA_ORNITH_MODEL", HOME / "models/ornith-
 SELECTION_FILE = HOME / "model-backend"
 BACKEND_LOG = HOME / "backend.log"
 CONFIG_FILE = HOME / "config.json"
+GATEWAY_SETTINGS_FILE = HOME / "gateway-settings.json"
+GGUF_CHATS_DIR = HOME / "chats"
 MAX_WEB_BYTES = 5 * 1024 * 1024
 MAX_WEB_TEXT = 120_000
 MAX_TOOL_ROUNDS = 4
+GGUF_MODEL_CONTEXT_TOKENS = 262_144
+try:
+    GGUF_DEFAULT_CONTEXT_TOKENS = int(
+        os.environ.get("SAMOSA_GGUF_CONTEXT_TOKENS", "8192")
+    )
+except ValueError:
+    GGUF_DEFAULT_CONTEXT_TOKENS = 8192
+if not 2 <= GGUF_DEFAULT_CONTEXT_TOKENS <= GGUF_MODEL_CONTEXT_TOKENS:
+    GGUF_DEFAULT_CONTEXT_TOKENS = 8192
+COMPACTION_MEMORY_PREFIX = (
+    "SAMOSA CONTINUATION MEMORY — Treat this as authoritative context from "
+    "earlier in this same conversation. Preserve facts, decisions, constraints, "
+    "open tasks, user preferences, and exact identifiers. Do not mention that "
+    "the conversation was compacted unless asked.\n\n"
+)
+COMPACTION_INSTRUCTION = (
+    "Compress the supplied earlier conversation into continuation memory for "
+    "another instance of this model. Keep all facts needed to continue correctly: "
+    "decisions and rationale, user preferences, requirements, unresolved work, "
+    "exact names/numbers/paths/commands, and important corrections. Remove chatter "
+    "and repetition. Write dense plain text, not commentary about summarizing."
+)
 BLOCKED_NETWORKS = tuple(ipaddress.ip_network(value) for value in (
     "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
     "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.168.0.0/16",
@@ -76,6 +100,162 @@ GGUF_MODELS = {
     "bonsai": BONSAI_MODEL,
     "ornith": ORNITH_MODEL,
 }
+
+
+def _read_json(path: Path, fallback: object) -> object:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return fallback
+
+
+def _atomic_json(path: Path, value: object) -> None:
+    """Durably replace one JSON file without exposing a partial ledger."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(value, stream, ensure_ascii=False, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+class GatewaySettings:
+    def __init__(self) -> None:
+        saved = _read_json(GATEWAY_SETTINGS_FILE, {})
+        saved = saved if isinstance(saved, dict) else {}
+        self.lock = threading.RLock()
+        self.context_spec = str(saved.get("context_tokens", "auto"))
+        if self.context_spec != "auto" and (
+            not self.context_spec.isdigit()
+            or not 2 <= int(self.context_spec) <= GGUF_MODEL_CONTEXT_TOKENS
+        ):
+            self.context_spec = "auto"
+        saved_auto = saved.get("auto_compact", True)
+        self.auto_compact = saved_auto if isinstance(saved_auto, bool) else True
+        try:
+            self.threshold = int(saved.get("compact_threshold_percent", 80))
+        except (TypeError, ValueError):
+            self.threshold = 80
+        if not 50 <= self.threshold <= 90:
+            self.threshold = 80
+
+    def effective_context(self) -> int:
+        if self.context_spec == "auto":
+            return GGUF_DEFAULT_CONTEXT_TOKENS
+        return int(self.context_spec)
+
+    def update(self, payload: dict) -> tuple[dict, bool]:
+        with self.lock:
+            old_context = self.effective_context()
+            context_spec = self.context_spec
+            auto_compact = self.auto_compact
+            threshold = self.threshold
+            if "context_tokens" in payload:
+                raw = payload["context_tokens"]
+                spec = str(raw)
+                if spec != "auto":
+                    if not spec.isdigit() or int(spec) < 2:
+                        raise ValueError("context_tokens must be 'auto' or an integer >= 2")
+                    if int(spec) > GGUF_MODEL_CONTEXT_TOKENS:
+                        raise ValueError(
+                            f"requested context {spec} exceeds this model's "
+                            f"{GGUF_MODEL_CONTEXT_TOKENS}-token limit"
+                        )
+                context_spec = spec
+            if "auto_compact" in payload:
+                if not isinstance(payload["auto_compact"], bool):
+                    raise ValueError("auto_compact must be true or false")
+                auto_compact = payload["auto_compact"]
+            if "compact_threshold_percent" in payload:
+                raw_threshold = payload["compact_threshold_percent"]
+                if isinstance(raw_threshold, bool) or not isinstance(raw_threshold, int) \
+                        or not 50 <= raw_threshold <= 90:
+                    raise ValueError("compact_threshold_percent must be an integer in 50..90")
+                threshold = raw_threshold
+            if not any(key in payload for key in (
+                "context_tokens", "auto_compact", "compact_threshold_percent"
+            )):
+                raise ValueError(
+                    "Provide context_tokens, auto_compact, or compact_threshold_percent."
+                )
+            next_value = {
+                "context_tokens": context_spec,
+                "auto_compact": auto_compact,
+                "compact_threshold_percent": threshold,
+            }
+            _atomic_json(GATEWAY_SETTINGS_FILE, next_value)
+            self.context_spec = context_spec
+            self.auto_compact = auto_compact
+            self.threshold = threshold
+            return self.response(), old_context != self.effective_context()
+
+    def response(self) -> dict:
+        return {
+            "status": "ok",
+            "model_context_limit_tokens": GGUF_MODEL_CONTEXT_TOKENS,
+            "context_limit_tokens": self.effective_context(),
+            "context_limit_mode": "auto" if self.context_spec == "auto" else "manual",
+            "auto_compact": self.auto_compact,
+            "compact_threshold_percent": self.threshold,
+        }
+
+
+settings = GatewaySettings()
+
+
+class ConversationLedger:
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+
+    @staticmethod
+    def valid_id(value: object) -> bool:
+        return isinstance(value, str) and bool(re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value))
+
+    def path(self, conversation_id: str, backend: str) -> Path:
+        return GGUF_CHATS_DIR / conversation_id / f"{backend}.json"
+
+    def load(self, conversation_id: str, backend: str) -> list[dict]:
+        with self.lock:
+            path = self.path(conversation_id, backend)
+            if not path.exists():
+                return []
+            try:
+                value = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as error:
+                raise RuntimeError(
+                    "the saved conversation ledger is unreadable or corrupt"
+                ) from error
+        if not isinstance(value, dict) or value.get("version") != 1 \
+                or value.get("backend") != backend or not isinstance(value.get("messages"), list):
+            raise RuntimeError("the saved conversation ledger has an unsupported format")
+        return normalize_messages(value["messages"])
+
+    def save(self, conversation_id: str, backend: str, messages: list[dict]) -> None:
+        with self.lock:
+            _atomic_json(self.path(conversation_id, backend), {
+                "version": 1,
+                "backend": backend,
+                "conversation_id": conversation_id,
+                "updated_at": int(time.time()),
+                "messages": normalize_messages(messages),
+            })
+
+
+ledger = ConversationLedger()
 
 
 class Supervisor:
@@ -111,6 +291,7 @@ class Supervisor:
                 "SNAP": str(QWEN_MODEL),
                 "TOKENIZER": str(TOKENIZER),
                 "SAMOSA_CHATS_DIR": str(HOME / "chats"),
+                "SAMOSA_CONTEXT_TOKENS": os.environ.get("SAMOSA_CONTEXT_TOKENS", "auto"),
             })
             return [
                 str(QWEN_ENGINE), "--serve", "--port", str(BACKEND_PORT),
@@ -118,7 +299,7 @@ class Supervisor:
             ], env
         return [
             str(BONSAI_SERVER), "-m", str(GGUF_MODELS[name]), "-ngl", "99",
-            "-c", "8192", "-np", "1", "--cache-ram", "0",
+            "-c", str(settings.effective_context()), "-np", "1", "--cache-ram", "0",
             "--host", HOST, "--port", str(BACKEND_PORT), "--no-ui",
             "--alias", BACKENDS[name]["model"],
         ], env
@@ -252,7 +433,7 @@ class Supervisor:
             name = self.backend
             process = self.process
             generating = self.generating
-        return {
+        result = {
             "gateway": True,
             "backend": name,
             "label": BACKENDS[name]["label"],
@@ -263,6 +444,36 @@ class Supervisor:
             "generating": generating,
             "pid": process.pid if process and process.poll() is None else None,
         }
+        if name == "qwen" and result["ready"]:
+            try:
+                code, detail = backend_json("GET", "/healthz")
+                if code == 200 and isinstance(detail, dict):
+                    for key in (
+                        "model_context_limit_tokens", "context_limit_tokens",
+                        "context_limit_mode", "kv_bytes_per_token", "rss_gb",
+                        "last_generation", "scheduler", "compaction",
+                    ):
+                        if key in detail:
+                            result[key] = detail[key]
+            except (OSError, ValueError, http.client.HTTPException):
+                pass
+        elif name != "qwen":
+            result.update(settings.response())
+            result["compaction"] = {
+                "auto": settings.auto_compact,
+                "threshold_percent": settings.threshold,
+            }
+        return result
+
+    def restart_for_context(self) -> None:
+        with self.lock:
+            if self.generating:
+                raise RuntimeError("stop the current response before changing context capacity")
+            backend = self.backend
+        if backend == "qwen":
+            return
+        self.stop()
+        self.start()
 
     def listing(self) -> dict:
         return {
@@ -801,18 +1012,40 @@ def reverse_location(latitude: float, longitude: float) -> str:
     return ", ".join(dict.fromkeys(str(value) for value in (locality, region, country) if value))
 
 
-def prepare_chat_payload(body: bytes) -> dict | None:
-    """Parse a chat request and inject the date + abilities system prompt.
+def normalize_messages(messages: object) -> list[dict]:
+    """Return the durable, text-only subset understood by all GGUF models."""
+    result = []
+    if not isinstance(messages, list):
+        return result
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") not in {
+            "system", "user", "assistant"
+        }:
+            continue
+        content = message.get("content", "")
+        if isinstance(content, list):
+            content = "\n".join(
+                str(part.get("text", "")) for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+        if isinstance(content, str):
+            result.append({"role": message["role"], "content": content})
+    return result
 
-    Returns None when the body is not a chat payload the gateway understands;
-    such requests are proxied through unchanged.
-    """
+
+def parse_chat_payload(body: bytes) -> dict | None:
     try:
         payload = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     if not isinstance(payload, dict) or not isinstance(payload.get("messages"), list):
         return None
+    return payload
+
+
+def inject_system_context(payload: dict) -> dict:
+    payload = dict(payload)
+    payload["messages"] = normalize_messages(payload.get("messages"))
     date_context = time.strftime(
         "The host computer's current local date is %A, %B %d, %Y. "
         "Use this date as authoritative; do not claim you lack access to the current date.",
@@ -835,6 +1068,165 @@ def prepare_chat_payload(body: bytes) -> dict | None:
     else:
         messages.insert(0, {"role": "system", "content": system_text})
     return payload
+
+
+def prepare_chat_payload(body: bytes) -> dict | None:
+    """Parse a chat request and inject the date + abilities system prompt."""
+    payload = parse_chat_payload(body)
+    return inject_system_context(payload) if payload is not None else None
+
+
+def backend_json(method: str, path: str, payload: dict | None = None,
+                 timeout: float | None = None) -> tuple[int, object]:
+    data = None if payload is None else json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":")
+    ).encode()
+    headers = {"Host": f"{HOST}:{BACKEND_PORT}", "Connection": "close"}
+    if data is not None:
+        headers.update({
+            "Content-Type": "application/json",
+            "Content-Length": str(len(data)),
+        })
+    conn = http.client.HTTPConnection(HOST, BACKEND_PORT, timeout=timeout)
+    try:
+        conn.request(method, path, body=data, headers=headers)
+        response = conn.getresponse()
+        raw = response.read()
+        try:
+            value = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            value = {"raw": raw.decode("utf-8", "replace")}
+        return response.status, value
+    finally:
+        conn.close()
+
+
+def exact_message_tokens(messages: list[dict], template_kwargs: dict | None = None) -> int:
+    request = {"messages": messages}
+    if template_kwargs is not None:
+        request["chat_template_kwargs"] = template_kwargs
+    status, rendered = backend_json("POST", "/apply-template", request)
+    if status != 200 or not isinstance(rendered, dict) or not isinstance(rendered.get("prompt"), str):
+        raise RuntimeError("the active model could not apply its chat template")
+    status, tokenized = backend_json("POST", "/tokenize", {
+        "content": rendered["prompt"], "add_special": False, "parse_special": True,
+    })
+    tokens = tokenized.get("tokens") if isinstance(tokenized, dict) else None
+    if status != 200 or not isinstance(tokens, list):
+        raise RuntimeError("the active model could not measure the conversation")
+    return len(tokens)
+
+
+def durable_messages_for_request(payload: dict, backend: str) -> tuple[str | None, list[dict]]:
+    conversation_id = payload.get("conversation_id")
+    incoming = normalize_messages(payload.get("messages"))
+    if not ConversationLedger.valid_id(conversation_id):
+        return None, incoming
+    stored = ledger.load(conversation_id, backend)
+    if not stored:
+        return conversation_id, incoming
+    newest_user = next((message for message in reversed(incoming)
+                        if message["role"] == "user"), None)
+    if newest_user and (not stored or newest_user != stored[-1]):
+        stored.append(newest_user)
+    return conversation_id, stored
+
+
+def summary_text(messages: list[dict], max_tokens: int) -> str:
+    transcript = "\n\n".join(
+        f"{message['role'].upper()}:\n{message['content']}" for message in messages
+    )
+    payload = {
+        "model": BACKENDS[supervisor.backend]["model"],
+        "messages": [
+            {"role": "system", "content": COMPACTION_INSTRUCTION},
+            {"role": "user", "content": transcript},
+        ],
+        "stream": False,
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    status, result = backend_json("POST", "/v1/chat/completions", payload)
+    try:
+        content = result["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        content = ""
+    if status != 200 or not isinstance(content, str) or not content.strip():
+        raise RuntimeError("the active model did not produce continuation memory")
+    return content.strip()
+
+
+def compact_messages(messages: list[dict], context_limit: int) -> tuple[list[dict], dict]:
+    """Summarize older turns and retain a message-aligned recent tail."""
+    messages = normalize_messages(messages)
+    if len(messages) < 3:
+        raise ValueError("This conversation does not yet have enough history to compact.")
+    before = exact_message_tokens(messages)
+    tail_budget = max(64, int(context_limit * 0.15))
+    tail_start = len(messages) - 1
+    # Keep at least the newest message, then grow the verbatim tail while it fits.
+    for index in range(len(messages) - 2, 0, -1):
+        if exact_message_tokens(messages[index:]) > tail_budget:
+            break
+        tail_start = index
+    # Prefer a complete user/assistant turn boundary.
+    while tail_start < len(messages) - 1 and messages[tail_start]["role"] == "assistant":
+        tail_start += 1
+    older, tail = messages[:tail_start], messages[tail_start:]
+    if not older:
+        raise ValueError("This conversation does not yet have enough older history to compact.")
+    summary_budget = min(2048, max(256, int(context_limit * 0.10)))
+    summary = summary_text(older, summary_budget)
+    compacted = [
+        {"role": "system", "content": COMPACTION_MEMORY_PREFIX + summary},
+        *tail,
+    ]
+    after = exact_message_tokens(compacted)
+    if after >= before:
+        raise RuntimeError(
+            f"compaction did not shrink the conversation ({before} → {after} tokens)"
+        )
+    retained = exact_message_tokens(tail) if tail else 0
+    return compacted, {
+        "before_tokens": before,
+        "after_tokens": after,
+        "retained_recent_tokens": retained,
+    }
+
+
+def maybe_compact(payload: dict, messages: list[dict]) -> tuple[list[dict], dict | None]:
+    completion = int(payload.get("max_tokens", 2048) or 0)
+    if completion < 0:
+        raise ValueError("max_tokens must not be negative")
+    measured = exact_message_tokens(
+        inject_system_context({**payload, "messages": messages})["messages"],
+        payload.get("chat_template_kwargs"),
+    )
+    projected = measured + completion
+    limit = settings.effective_context()
+    should_compact = (
+        settings.auto_compact and len(messages) >= 3
+        and projected * 100 >= limit * settings.threshold
+    )
+    if not should_compact:
+        if projected > limit:
+            raise ValueError(
+                f"projected conversation ({projected} tokens) exceeds the "
+                f"configured {limit}-token context"
+            )
+        return messages, None
+    compacted, result = compact_messages(messages, limit)
+    after = exact_message_tokens(
+        inject_system_context({**payload, "messages": compacted})["messages"],
+        payload.get("chat_template_kwargs"),
+    )
+    if after + completion > limit:
+        raise ValueError(
+            f"compacted conversation plus requested answer ({after + completion} tokens) "
+            f"still exceeds the configured {limit}-token context"
+        )
+    return compacted, result
 
 
 def followup_payload(payload: dict, assistant_text: str, call: dict,
@@ -957,6 +1349,56 @@ class Handler(BaseHTTPRequestHandler):
                 self.json_response(200, {"results": search_web(str(data.get("query", "")))})
             except (ValueError, PermissionError, OSError, json.JSONDecodeError) as error:
                 self.json_response(400, {"error": {"message": str(error)}})
+        elif path == "/v1/settings":
+            body = self.body()
+            if supervisor.backend == "qwen":
+                self.proxy(body)
+                return
+            try:
+                payload = json.loads(body)
+                if not isinstance(payload, dict):
+                    raise ValueError("settings must be a JSON object")
+                result, restart = settings.update(payload)
+                if restart:
+                    supervisor.restart_for_context()
+                self.json_response(200, result)
+            except (ValueError, RuntimeError, OSError, json.JSONDecodeError) as error:
+                self.json_response(400, {"error": {"message": str(error)}})
+        elif path == "/v1/compact":
+            body = self.body()
+            if supervisor.backend == "qwen":
+                self.proxy(body)
+                return
+            try:
+                payload = json.loads(body)
+                conversation_id = payload.get("conversation_id")
+                if not ConversationLedger.valid_id(conversation_id):
+                    raise ValueError(
+                        "conversation_id must use 1–64 letters, numbers, dashes, or underscores"
+                    )
+                with supervisor.lock:
+                    if supervisor.generating:
+                        raise RuntimeError("stop the current response before compacting")
+                    supervisor.generating = True
+                try:
+                    messages = ledger.load(conversation_id, supervisor.backend)
+                    if not messages:
+                        self.json_response(404, {
+                            "error": {"message": "This conversation has no saved model context."}
+                        })
+                        return
+                    compacted, result = compact_messages(
+                        messages, settings.effective_context()
+                    )
+                    ledger.save(conversation_id, supervisor.backend, compacted)
+                finally:
+                    with supervisor.lock:
+                        supervisor.generating = False
+                self.json_response(200, {
+                    "status": "ok", "conversation_id": conversation_id, **result,
+                })
+            except (ValueError, RuntimeError, OSError, json.JSONDecodeError) as error:
+                self.json_response(400, {"error": {"message": str(error)}})
         elif path == "/v1/cancel":
             self.json_response(200, {"cancelled": supervisor.cancel()})
         elif path == "/v1/shutdown":
@@ -975,6 +1417,7 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response(503, {"error": {"message": f"{status['label']} is still loading"}})
             return
         conn = http.client.HTTPConnection(HOST, BACKEND_PORT, timeout=None)
+        response = None
         with supervisor.lock:
             supervisor.upstream = conn
         try:
@@ -1007,7 +1450,7 @@ class Handler(BaseHTTPRequestHandler):
             with supervisor.lock:
                 if supervisor.upstream is conn:
                     supervisor.upstream = None
-                if supervisor.upstream_response is response:
+                if response is not None and supervisor.upstream_response is response:
                     supervisor.upstream_response = None
 
     # --- model-decided tool loop ------------------------------------------
@@ -1017,8 +1460,8 @@ class Handler(BaseHTTPRequestHandler):
         if not status["ready"]:
             self.json_response(503, {"error": {"message": f"{status['label']} is still loading"}})
             return
-        payload = prepare_chat_payload(body)
-        if payload is None:
+        raw_payload = parse_chat_payload(body)
+        if raw_payload is None:
             self.proxy(body)
             return
         with supervisor.lock:
@@ -1026,12 +1469,29 @@ class Handler(BaseHTTPRequestHandler):
                 self.json_response(409, {"error": {"message": "another response is already generating"}})
                 return
             supervisor.generating = True
+        self.ledger_id = None
+        self.ledger_messages = None
+        self.compaction_meta = None
         try:
+            if supervisor.backend == "qwen":
+                payload = inject_system_context(raw_payload)
+            else:
+                conversation_id, messages = durable_messages_for_request(
+                    raw_payload, supervisor.backend
+                )
+                messages, self.compaction_meta = maybe_compact(raw_payload, messages)
+                self.ledger_id = conversation_id
+                self.ledger_messages = messages
+                payload = inject_system_context({**raw_payload, "messages": messages})
             if payload.get("stream"):
                 self.chat_stream(payload)
             else:
                 self.chat_once(payload)
-        except (OSError, http.client.HTTPException, BrokenPipeError):
+        except (ValueError, RuntimeError) as error:
+            self.json_response(400, {"error": {"message": str(error)}})
+        except OSError:
+            self.close_connection = True
+        except (http.client.HTTPException, BrokenPipeError):
             self.close_connection = True
         finally:
             with supervisor.lock:
@@ -1059,6 +1519,36 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def persist_assistant(self, content: str) -> bool | None:
+        if not self.ledger_id or self.ledger_messages is None:
+            return None
+        try:
+            ledger.save(self.ledger_id, supervisor.backend, [
+                *self.ledger_messages, {"role": "assistant", "content": content},
+            ])
+            return True
+        except OSError:
+            return False
+
+    def terminal_extra(self, extra: dict, content: str,
+                       persisted: list[bool | None]) -> dict:
+        extra = dict(extra)
+        if persisted[0] is None:
+            persisted[0] = self.persist_assistant(content)
+        samosa = dict(extra.get("samosa") or {})
+        if persisted[0] is not None:
+            samosa["session_saved"] = persisted[0]
+        if self.compaction_meta:
+            samosa.update({
+                "compacted": True,
+                "compacted_from_tokens": self.compaction_meta["before_tokens"],
+                "compacted_to_tokens": self.compaction_meta["after_tokens"],
+                "retained_recent_tokens": self.compaction_meta["retained_recent_tokens"],
+            })
+        if samosa:
+            extra["samosa"] = samosa
+        return extra
+
     def chat_once(self, payload: dict) -> None:
         for round_index in range(MAX_TOOL_ROUNDS + 1):
             conn, response = self.backend_chat(payload)
@@ -1076,6 +1566,21 @@ class Handler(BaseHTTPRequestHandler):
                 return
             kind, call = classify_reply(content)
             if kind != "tool" or round_index >= MAX_TOOL_ROUNDS:
+                saved = self.persist_assistant(content)
+                if self.compaction_meta or saved is not None:
+                    decoded = json.loads(data)
+                    samosa = dict(decoded.get("samosa") or {})
+                    if saved is not None:
+                        samosa["session_saved"] = saved
+                    if self.compaction_meta:
+                        samosa.update({
+                            "compacted": True,
+                            "compacted_from_tokens": self.compaction_meta["before_tokens"],
+                            "compacted_to_tokens": self.compaction_meta["after_tokens"],
+                            "retained_recent_tokens": self.compaction_meta["retained_recent_tokens"],
+                        })
+                    decoded["samosa"] = samosa
+                    data = json.dumps(decoded, separators=(",", ":")).encode()
                 self.send_raw_json(200, data)
                 return
             result = execute_tool(call)
@@ -1147,6 +1652,9 @@ class Handler(BaseHTTPRequestHandler):
         """
         mode = "undecided"
         buffer = ""
+        full_text = ""
+        persisted: list[bool | None] = [None]
+        terminal_sent = False
         held_finish: list[tuple[str | None, dict]] = []
         tool_call = None
         for data in sse_data_events(response):
@@ -1164,6 +1672,7 @@ class Handler(BaseHTTPRequestHandler):
             if reasoning and mode != "tool":
                 self.emit_chunk({"reasoning_content": reasoning})
             if content:
+                full_text += content
                 if mode == "stream":
                     self.emit_chunk({"content": content})
                 elif mode == "undecided":
@@ -1178,7 +1687,11 @@ class Handler(BaseHTTPRequestHandler):
             if finish:
                 extra = {key: event[key] for key in ("timings", "samosa", "usage") if key in event}
                 if mode == "stream":
-                    self.emit_chunk({}, finish=finish, extra=extra)
+                    self.emit_chunk(
+                        {}, finish=finish,
+                        extra=self.terminal_extra(extra, full_text, persisted),
+                    )
+                    terminal_sent = True
                 elif mode == "undecided":
                     held_finish.append((finish, extra))
         if mode == "undecided":
@@ -1187,21 +1700,38 @@ class Handler(BaseHTTPRequestHandler):
                 return call, buffer
             if buffer:
                 self.emit_chunk({"content": buffer})
+            if held_finish:
+                held_finish = [
+                    (finish, self.terminal_extra(extra, full_text, persisted))
+                    for finish, extra in held_finish
+                ]
             for finish, extra in held_finish:
                 self.emit_chunk({}, finish=finish, extra=extra)
             if not held_finish:
-                self.emit_chunk({}, finish="stop")
+                self.emit_chunk(
+                    {}, finish="stop",
+                    extra=self.terminal_extra({}, full_text, persisted),
+                )
             return None, buffer
         if mode == "tool":
             if final:
-                self.emit_chunk({"content": (
+                fallback = (
                     "I ran out of tool calls before finding a confident answer. "
                     "What I still wanted to run was: " + buffer.strip()
                     + " — ask again to continue, or rephrase."
-                )}, finish="stop")
-                return None, buffer
-            return tool_call, buffer
-        return None, buffer
+                )
+                self.emit_chunk(
+                    {"content": fallback}, finish="stop",
+                    extra=self.terminal_extra({}, fallback, persisted),
+                )
+                return None, fallback
+            return tool_call, full_text
+        if not terminal_sent:
+            self.emit_chunk(
+                {}, finish="stop",
+                extra=self.terminal_extra({}, full_text, persisted),
+            )
+        return None, full_text
 
     def shutdown_all(self) -> None:
         supervisor.stopping = True

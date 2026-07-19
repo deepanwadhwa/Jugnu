@@ -363,6 +363,7 @@
       let followOutput = true;
       let currentImageBase64 = null;
       let backend = {id:"qwen",label:"Qwen3.6 35B A3B",model:"qwen3.6-35b-a3b",supports_images:true,ready:false};
+      let healthInitialized = false;
 
       function makeId() {
         const raw = self.crypto && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
@@ -538,6 +539,7 @@
       async function health() {
         try {
           const r=await fetch("/healthz",{cache:"no-store"}); if(!r.ok)throw new Error(); const h=await r.json();
+          const previousBackend=backend.id;
           if(h.gateway) {
             backend={id:h.backend,label:h.label,model:h.model,supports_images:h.supports_images,ready:h.ready};
             els.modelBackend.value=h.backend;
@@ -553,6 +555,14 @@
           if(h.rss_gb)els.rss.textContent=`${h.rss_gb.toFixed(2)} GB`; if(h.last_generation?.tokens_per_second)els.speed.textContent=`${h.last_generation.tokens_per_second.toFixed(2)} tok/s`;
           if(h.context_limit_tokens){const effective=h.context_limit_tokens.toLocaleString(), model=(h.model_context_limit_tokens||h.context_limit_tokens).toLocaleString(); els.context.textContent=`${effective} tokens`; els.contextHelp.textContent=`${h.context_limit_mode||"configured"} total context: ${effective} tokens (model maximum ${model}). History, thinking, and the answer share it.`;}
           if(h.compaction)els.compactHelp.textContent=`Auto-compaction is ${h.compaction.auto?"on":"off"} at ${h.compaction.threshold_percent}% projected use. Manual compaction keeps this chat and its visible messages.`;
+          if(!healthInitialized||previousBackend!==backend.id) {
+            const limit=String(h.context_limit_tokens||"");
+            if(h.context_limit_mode==="auto")els.contextTokens.value="auto";
+            else if([...els.contextTokens.options].some(option=>option.value===limit))els.contextTokens.value=limit;
+            else {els.contextTokens.value="custom";els.contextCustom.value=limit;}
+            if(h.compaction){els.autoCompact.checked=!!h.compaction.auto;els.compactThreshold.value=String(h.compaction.threshold_percent);}
+            syncContextCustom();saveState();healthInitialized=true;
+          }
         } catch (_) { els.dot.className="status-dot offline"; els.status.textContent="Local model server unavailable"; }
       }
       function contextValue() { return els.contextTokens.value === "custom" ? els.contextCustom.value.trim() : els.contextTokens.value; }
@@ -595,6 +605,7 @@
           const r=await fetch("/v1/backends/select",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({backend:requested})});
           if(!r.ok){const j=await r.json();throw new Error(j.error?.message||"Model switch failed");}
           backend={...backend,id:requested,ready:false};
+          healthInitialized=false;
           currentId=null; ensureChat(); render();
           await health();
         } catch(error) {
