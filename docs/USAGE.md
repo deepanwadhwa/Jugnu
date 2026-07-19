@@ -77,6 +77,8 @@ What the app does:
 - Saves your conversations so you can continue them later.
 - Shows live speed (tokens per second) and current memory use.
 - Has settings for thinking mode, maximum answer length, and a fixed seed.
+- Lets you choose automatic, preset, or custom total-context capacity; the
+  choice is stored locally in the browser and applied to the local server.
 
 The server answers these HTTP endpoints:
 

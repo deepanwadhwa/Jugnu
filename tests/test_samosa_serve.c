@@ -73,7 +73,7 @@ int main(void){
     assert(serve_token_sink(11,&special_sink)==1);
     assert(serve_token_sink(12,&special_sink)==0&&!special_sink.thinking_open);
 
-    SamosaServeContext context={.started=now_s()};
+    SamosaServeContext context={.model=&context_model,.started=now_s()};
     snprintf(context.app_html_path,sizeof(context.app_html_path),"assets/app.html");
     snprintf(context.app_logo_path,sizeof(context.app_logo_path),"assets/samosa-chat.png");
     atomic_init(&context.cancel,0);pthread_mutex_init(&context.stats_mu,NULL);
@@ -83,8 +83,20 @@ int main(void){
 
     char *health=request(server.port,"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert(strstr(health,"HTTP/1.1 200 OK"));assert(strstr(health,"\"status\":\"ok\""));
-    assert(strstr(health,"\"model_context_limit_tokens\":24576"));
-    assert(strstr(health,"\"context_limit_tokens\":24576"));free(health);
+    assert(strstr(health,"\"model_context_limit_tokens\":262144"));
+    assert(strstr(health,"\"context_limit_tokens\":131072"));free(health);
+    const char *settings_body="{\"context_tokens\":\"auto\"}";
+    char settings_wire[256];snprintf(settings_wire,sizeof(settings_wire),
+        "POST /v1/settings HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s",
+        strlen(settings_body),settings_body);
+    char *settings=request(server.port,settings_wire);
+    assert(strstr(settings,"HTTP/1.1 200 OK"));assert(strstr(settings,"\"context_limit_mode\":\"auto\""));free(settings);
+    settings_body="{\"context_tokens\":65536}";
+    snprintf(settings_wire,sizeof(settings_wire),
+        "POST /v1/settings HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s",
+        strlen(settings_body),settings_body);
+    settings=request(server.port,settings_wire);
+    assert(strstr(settings,"\"context_limit_tokens\":65536"));free(settings);
     double warm_rss=rss_gb();
     for(int i=0;i<20;i++){
         health=request(server.port,"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -109,6 +121,8 @@ int main(void){
     char *root=request(server.port,"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert(strstr(root,"Your model. Your machine."));
     assert(strstr(root,"/v1/chat/completions"));
+    assert(strstr(root,"Total context capacity"));
+    assert(strstr(root,"/v1/settings"));
     assert(strstr(root,"Content-Security-Policy: default-src 'self'"));free(root);
     char *logo=request(server.port,"GET /assets/samosa-chat.png HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert(strstr(logo,"Content-Type: image/png"));free(logo);

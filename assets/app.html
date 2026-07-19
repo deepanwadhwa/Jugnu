@@ -301,7 +301,13 @@
       <input id="seed" inputmode="numeric" pattern="[0-9]*" placeholder="Random">
       <small>Use the same non-negative seed to reproduce a sampling path.</small>
     </div>
-    <div class="field"><small id="contextHelp">Context capacity is set when the local server starts. History, thinking, and the answer share it.</small></div>
+    <div class="field">
+      <label for="contextTokens">Total context capacity</label>
+      <select id="contextTokens"><option value="auto">Auto (recommended)</option><option value="24576">24,576 tokens</option><option value="65536">65,536 tokens</option><option value="131072">131,072 tokens</option><option value="262144">262,144 tokens</option><option value="custom">Custom…</option></select>
+      <input id="contextCustom" inputmode="numeric" pattern="[0-9]*" placeholder="Custom token limit" hidden>
+      <button class="close-settings" id="applyContext" type="button">Apply context setting</button>
+      <small id="contextHelp">History, thinking, and the answer share this total. The server checks memory before every request.</small>
+    </div>
     <div class="local-card"><strong>Local-only connection</strong><br>This page talks to <code>127.0.0.1</code>. It contains no analytics, accounts, CDNs, or remote scripts.</div>
   </aside>
 
@@ -313,7 +319,7 @@
         sidebar: $("sidebar"), list: $("chatList"), messages: $("messages"), prompt: $("prompt"),
         composer: $("composer"), send: $("send"), stop: $("stop"), name: $("conversationName"),
         status: $("modelStatus"), dot: $("statusDot"), settings: $("settings"), scrim: $("scrim"),
-        thinking: $("thinking"), maxTokens: $("maxTokens"), seed: $("seed"), mode: $("modeValue"),
+        thinking: $("thinking"), maxTokens: $("maxTokens"), seed: $("seed"), contextTokens: $("contextTokens"), contextCustom: $("contextCustom"), applyContext: $("applyContext"), mode: $("modeValue"),
         speed: $("speedValue"), rss: $("rssValue"), context: $("contextValue"), contextHelp: $("contextHelp"), closure: $("closureValue"), jump: $("jumpLatest"),
         imageInput: $("imageInput"), attachBtn: $("attachBtn"), removeImage: $("removeImage"),
         imagePreviewWrap: $("imagePreviewWrap"), imagePreview: $("imagePreview")
@@ -335,11 +341,11 @@
           const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY));
           if (parsed && Array.isArray(parsed.chats)) return parsed;
         } catch (_) {}
-        return { currentId: null, chats: [], settings: { thinking: "off", maxTokens: "2048", seed: "" } };
+        return { currentId: null, chats: [], settings: { thinking: "off", maxTokens: "2048", seed: "", contextTokens: "auto", contextCustom: "", contextConfigured: false } };
       }
       function saveState() {
         state.currentId = currentId;
-        state.settings = { thinking: els.thinking.value, maxTokens: els.maxTokens.value, seed: els.seed.value.trim() };
+        state.settings = { thinking: els.thinking.value, maxTokens: els.maxTokens.value, seed: els.seed.value.trim(), contextTokens: els.contextTokens.value, contextCustom: els.contextCustom.value.trim(), contextConfigured: !!state.settings?.contextConfigured };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       }
       function activeChat() { return state.chats.find(c => c.id === currentId) || null; }
@@ -495,6 +501,22 @@
           if(h.context_limit_tokens){const effective=h.context_limit_tokens.toLocaleString(), model=(h.model_context_limit_tokens||h.context_limit_tokens).toLocaleString(); els.context.textContent=`${effective} tokens`; els.contextHelp.textContent=`${h.context_limit_mode||"configured"} total context: ${effective} tokens (model maximum ${model}). History, thinking, and the answer share it.`;}
         } catch (_) { els.dot.className="status-dot offline"; els.status.textContent="Local model server unavailable"; }
       }
+      function contextValue() { return els.contextTokens.value === "custom" ? els.contextCustom.value.trim() : els.contextTokens.value; }
+      function syncContextCustom() { els.contextCustom.hidden=els.contextTokens.value!=="custom"; }
+      async function applyContextSetting(silent=false) {
+        const value=contextValue();
+        if (value!=="auto"&&!/^[1-9][0-9]*$/.test(value)) { els.contextHelp.textContent="Enter a positive whole-token limit, or choose Auto."; return false; }
+        els.applyContext.disabled=true;
+        try {
+          const r=await fetch("/v1/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({context_tokens:value})});
+          const result=await r.json(); if(!r.ok)throw new Error(result.error?.message||"Could not change the context setting.");
+          state.settings.contextConfigured=true; saveState();
+          const effective=result.context_limit_tokens.toLocaleString(), model=result.model_context_limit_tokens.toLocaleString();
+          els.context.textContent=`${effective} tokens`; els.contextHelp.textContent=`${result.context_limit_mode} total context: ${effective} tokens (model maximum ${model}). History, thinking, and the answer share it.`;
+          return true;
+        } catch(error) { if(!silent)els.contextHelp.textContent=error.message||String(error); return false; }
+        finally { els.applyContext.disabled=false; }
+      }
       function openSettings() { els.settings.classList.add("open"); els.settings.setAttribute("aria-hidden","false"); els.scrim.classList.add("show"); }
       function closePanels() { els.settings.classList.remove("open"); els.settings.setAttribute("aria-hidden","true"); els.sidebar.classList.remove("open"); els.scrim.classList.remove("show"); saveState(); }
       
@@ -526,8 +548,10 @@
       els.jump.onclick=()=>{followOutput=true;els.jump.hidden=true;scrollBottom(true,true)};
       els.prompt.oninput=resizePrompt; els.prompt.onkeydown=e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();els.composer.requestSubmit()}};
       for(const control of [els.thinking,els.maxTokens,els.seed]) control.onchange=()=>{saveState();els.mode.textContent=els.thinking.options[els.thinking.selectedIndex].text};
+      els.contextTokens.onchange=()=>{syncContextCustom();saveState()}; els.applyContext.onclick=()=>applyContextSetting();
       els.thinking.value=state.settings?.thinking||"off"; els.maxTokens.value=state.settings?.maxTokens||"2048"; els.seed.value=state.settings?.seed||"";
-      els.mode.textContent=els.thinking.options[els.thinking.selectedIndex].text; ensureChat(); render(); resizePrompt(); health(); setInterval(health,5000); els.prompt.focus();
+      els.contextTokens.value=state.settings?.contextTokens||"auto"; els.contextCustom.value=state.settings?.contextCustom||""; syncContextCustom();
+      els.mode.textContent=els.thinking.options[els.thinking.selectedIndex].text; ensureChat(); render(); resizePrompt(); health(); if(state.settings?.contextConfigured)applyContextSetting(true); setInterval(health,5000); els.prompt.focus();
     })();
   </script>
 </body>

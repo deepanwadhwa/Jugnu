@@ -5013,6 +5013,34 @@ static int samosa_serve_chat(SamosaServeContext *ctx,int fd,jval *root){
     return result?0:1;
 }
 
+/* Context capacity changes only while the model admission slot is held.  A
+ * queued generation rechecks its exact token budget after admission, so it
+ * will observe the new setting rather than allocate against a stale one. */
+static int samosa_serve_settings(SamosaServeContext *ctx,int fd,jval *root){
+    jval *value=json_get(root,"context_tokens"); char numeric[32]; const char *spec=NULL;
+    if(!value)return samosa_http_json_error(fd,400,"invalid_context_limit",
+        "context_tokens must be 'auto' or a positive integer.");
+    if(value->t==J_STR)spec=value->str;
+    else if(value->t==J_NUM&&floor(value->num)==value->num&&value->num>=2&&value->num<=INT_MAX){
+        snprintf(numeric,sizeof(numeric),"%.0f",value->num);spec=numeric;
+    }else return samosa_http_json_error(fd,400,"invalid_context_limit",
+        "context_tokens must be 'auto' or a positive integer.");
+    int admitted=serve_scheduler_acquire(&ctx->scheduler,NULL);
+    if(admitted==0)return samosa_http_json_error(fd,429,"queue_full","The inference queue is full.");
+    if(admitted<0)return samosa_http_json_error(fd,503,"shutting_down","Samosa is shutting down.");
+    int ok=model_configure_context_limit(ctx->model,spec);
+    serve_scheduler_release(&ctx->scheduler);
+    if(!ok)return samosa_http_json_error(fd,400,"model_context_limit",
+        "The requested context limit is invalid or exceeds this model's native limit.");
+    char body[384];snprintf(body,sizeof(body),
+        "{\"status\":\"ok\",\"model_context_limit_tokens\":%d,"
+        "\"context_limit_tokens\":%d,\"context_limit_mode\":\"%s\","
+        "\"kv_bytes_per_token\":%llu}",ctx->model->model_context_limit,
+        ctx->model->context_limit,ctx->model->context_limit_is_auto?"auto":"manual",
+        (unsigned long long)ctx->model->kv_bytes_per_token);
+    return samosa_http_response(fd,200,"application/json",body,NULL);
+}
+
 static int samosa_serve_handler(SamosaHttpServer *server,int fd,
                                 const SamosaHttpRequest *request,void *opaque){
     SamosaServeContext *ctx=(SamosaServeContext *)opaque;
@@ -5065,6 +5093,11 @@ static int samosa_serve_handler(SamosaHttpServer *server,int fd,
         char *arena=NULL;jval *root=json_parse(request->body,&arena);
         if(!root||root->t!=J_OBJ){json_free(root);return samosa_http_json_error(fd,400,"invalid_json","A JSON object is required.");}
         int result=samosa_serve_chat(ctx,fd,root);json_free(root);free(arena);return result;
+    }
+    if(!strcmp(request->method,"POST")&&!strcmp(request->path,"/v1/settings")){
+        char *arena=NULL;jval *root=json_parse(request->body,&arena);
+        if(!root||root->t!=J_OBJ){json_free(root);return samosa_http_json_error(fd,400,"invalid_json","A JSON object is required.");}
+        int result=samosa_serve_settings(ctx,fd,root);json_free(root);free(arena);return result;
     }
     return samosa_http_json_error(fd,404,"not_found","Endpoint not found.");
 }

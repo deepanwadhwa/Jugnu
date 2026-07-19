@@ -25,6 +25,7 @@ equivalent is `--context-tokens 131072`. Background state is under `~/.samosa/`:
 - `GET /healthz` — macOS physical footprint, model/effective context limits,
   KV bytes per token, uptime, queue state, and last-generation speed.
 - `GET /v1/models` — OpenAI-shaped model listing.
+- `POST /v1/settings` — update the local server's total-context setting.
 - `POST /v1/chat/completions` — JSON or SSE chat response.
 - `POST /v1/cancel` — cooperatively stop the active generation between tokens.
 - `POST /v1/shutdown` — cancel active work, reject queued work, and stop.
@@ -51,6 +52,14 @@ preflight receives `503 insufficient_memory`. The server reports the actual KV
 bytes per token in `/healthz` rather than assuming a model-specific constant.
 The session choice and token count are checked again after queue admission, so
 two requests for the same conversation cannot race against a stale snapshot.
+
+The browser’s **Total context capacity** setting calls the local-only settings
+endpoint and remembers the choice in browser-local storage. It accepts
+`{"context_tokens":"auto"}` or a positive integer no larger than the model
+limit. The update waits for the active generation slot, so it cannot change a
+context budget mid-generation. Existing conversations are retained; a chat
+already longer than a newly lowered limit will ask the user to raise the limit
+or start a new conversation when continued.
 
 Example:
 
