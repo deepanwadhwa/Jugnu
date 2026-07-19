@@ -15,6 +15,7 @@ issues, and the order to do them in.
 | [#6](https://github.com/deepanwadhwa/samosa-chat/issues/6) | Add thermal management/control | [TASKS_HARDWARE.md](TASKS_HARDWARE.md) **H3** | **Implemented 2026-07-15** — E-H3 tuning still unrun |
 | — | **Hardware: best from the user's machine, honestly** | [TASKS_HARDWARE.md](TASKS_HARDWARE.md) | Cross-cutting (#1 + #2 + macOS). H1/H3/H4 done; **H2 is the big one** |
 | — | **Apple Silicon: 12–15 tok/s felt speed, safely** | [TASKS_EXPERIMENTS.md](TASKS_EXPERIMENTS.md) | macOS/M3 experiment program (owner ask 2026-07-17). E-X1 baseline gates all; **nothing run yet** |
+| — | **Context window: scale to the machine** | [TASKS_CONTEXT.md](TASKS_CONTEXT.md) | Replace the unconditional 24,576-token product cap with a model-bounded, hardware-aware runtime setting (owner ask 2026-07-19) |
 | [#7](https://github.com/deepanwadhwa/samosa-chat/issues/7) | Add Samosa Jobs | [TASKS_JOBS.md](TASKS_JOBS.md) | Bounded batch/scheduled multimodal runner — **absorbs #4**; local doc/image extraction (J1) is the PoC. **Design only, nothing built** |
 
 Issues #4 and #5 already have plans in [APP_TASKS.md](APP_TASKS.md) (Phases A3
