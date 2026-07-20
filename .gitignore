@@ -11,3 +11,5 @@ test_repetition_guard
 test_samosa_serve
 test_thinking_budget
 __pycache__/
+dist/libpdfium.dylib
+/results/
