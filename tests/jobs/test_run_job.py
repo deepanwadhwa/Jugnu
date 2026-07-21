@@ -162,6 +162,59 @@ class JobsLayerTest(unittest.TestCase):
         self.assertEqual(len({i['media_type'] for i in first['items']}), 3)
         self.assertEqual(first['artifact_dir'], 'preview')
 
+    def test_preview_job_writes_one_unit_under_preview_only_by_default(self):
+        output = os.path.join(self.work, 'job-output')
+        job = {
+            'job_id': 'preview-default',
+            'input': {'folder': self.inbox, 'recursive': False, 'types': ['text/plain']},
+            'instruction': 'Extract fields',
+            'output_schema': {'type': 'object'},
+            'output': {'dir': output},
+        }
+        result = J.preview_job(job)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['sample_count'], 1)
+        self.assertFalse(result['expanded'])
+        self.assertTrue(os.path.exists(os.path.join(output, 'preview', 'manifest.json')))
+        self.assertTrue(os.path.exists(os.path.join(output, 'preview', 'records.jsonl')))
+        self.assertFalse(os.path.exists(os.path.join(output, 'output.jsonl')))
+        self.assertFalse(os.path.exists(os.path.join(self.jobsroot, 'preview-default', 'events.jsonl')))
+        self.assertEqual(result['records'][0]['status'], 'preview_ready')
+
+    def test_preview_job_expanded_writes_multiple_samples_under_preview(self):
+        output = os.path.join(self.work, 'job-output-expanded')
+        job = {
+            'job_id': 'preview-expanded',
+            'input': {'folder': self.inbox, 'recursive': False},
+            'instruction': 'Extract fields',
+            'output_schema': {'type': 'object'},
+            'output': {'dir': output},
+        }
+        result = J.preview_job(job, sample_count=3)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['sample_count'], 3)
+        self.assertTrue(result['expanded'])
+        records_path = os.path.join(output, 'preview', 'records.jsonl')
+        with open(records_path) as f:
+            records = [json.loads(line) for line in f if line.strip()]
+        self.assertEqual(len(records), 3)
+        self.assertTrue(all('/preview/items/' in r['source_path'] for r in records))
+        self.assertFalse(os.path.exists(os.path.join(output, 'output.jsonl')))
+
+    def test_preview_job_file_override_keeps_one_unit(self):
+        output = os.path.join(self.work, 'job-output-file')
+        target = os.path.join(self.inbox, 'a.txt')
+        job = {
+            'input': {'folder': self.inbox, 'recursive': False, 'types': ['text/plain']},
+            'instruction': 'Extract fields',
+            'output_schema': {'type': 'object'},
+            'output': {'dir': output},
+        }
+        result = J.preview_job(job, file_path=target, sample_count=3)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['sample_count'], 1)
+        self.assertEqual(result['records'][0]['input_path'], target)
+
     # --- report ------------------------------------------------------------
 
     def test_report_stream(self):

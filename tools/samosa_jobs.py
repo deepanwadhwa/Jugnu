@@ -333,6 +333,60 @@ def select_preview_items(job, sample_count=1):
             'skipped_count': len(skipped), 'artifact_dir': 'preview'}
 
 
+def preview_job(job, file_path=None, sample_count=1):
+    """Prepare preview artifacts for one or more selected units.
+
+    Preview has its own namespace and deliberately avoids the real run's
+    events/results files.  This function proves input selection and readable
+    source preparation; model-backed extraction can consume the same per-unit
+    source files later without changing where artifacts live.
+    """
+    selected = _select_preview_for_file(job, file_path) if file_path else \
+        select_preview_items(job, sample_count=sample_count)
+    if not selected.get('ok'):
+        return selected
+    preview_dir = _preview_dir(job)
+    os.makedirs(preview_dir, exist_ok=True)
+    items_dir = os.path.join(preview_dir, 'items')
+    os.makedirs(items_dir, exist_ok=True)
+
+    records = []
+    for index, item in enumerate(selected.get('items') or [], 1):
+        unit_id = _preview_unit_id(index, item)
+        source_text, source_error = _preview_source_text(item)
+        source_path = os.path.join(items_dir, f'{unit_id}.source.txt')
+        fs.atomic_write(source_path, source_text)
+        record = {
+            'unit_id': unit_id,
+            'status': 'preview_ready' if source_error is None else 'review_required',
+            'input_path': item.get('input_path'),
+            'input_sha256': item.get('input_sha256'),
+            'media_type': item.get('media_type'),
+            'source_path': source_path,
+            'source_chars': len(source_text),
+        }
+        if source_error is not None:
+            record['reasons'] = [source_error]
+        record_path = os.path.join(items_dir, f'{unit_id}.record.json')
+        fs.atomic_write(record_path, json.dumps(record, indent=2, sort_keys=True) + '\n')
+        records.append(record)
+
+    manifest = {
+        'ok': True,
+        'artifact_dir': 'preview',
+        'preview_dir': preview_dir,
+        'sample_count': len(records),
+        'expanded': len(records) > 1,
+        'records': records,
+    }
+    fs.atomic_write(os.path.join(preview_dir, 'manifest.json'),
+                    json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+    fs.atomic_write(os.path.join(preview_dir, 'records.jsonl'),
+                    ''.join(json.dumps(r, separators=(',', ':'), sort_keys=True) + '\n'
+                            for r in records))
+    return manifest
+
+
 def review_items(job_id):
     """List reviewable records from <job_dir>/results/output.jsonl."""
     jdir = job_dir_for(job_id)
@@ -919,6 +973,49 @@ def _source_preview(path):
         return os.path.basename(path)
 
 
+def _preview_dir(job):
+    output_dir = (job.get('output') or {}).get('dir') if isinstance(job.get('output'), dict) else None
+    if output_dir:
+        return os.path.join(os.path.abspath(output_dir), 'preview')
+    job_id = job.get('job_id') or slugify(job.get('name') or 'preview')
+    return os.path.join(job_dir_for(job_id), 'preview')
+
+
+def _select_preview_for_file(job, file_path):
+    wanted = os.path.abspath(file_path)
+    has_model_work = bool(job.get('instruction') or job.get('output_schema'))
+    items, skipped = fs.discover_files(job.get('input') or {},
+                                       is_metadata_only=not has_model_work)
+    for item in items:
+        if os.path.abspath(item.get('input_path') or '') == wanted:
+            return {'ok': True, 'sample_count': 1, 'items': [item],
+                    'skipped_count': len(skipped), 'artifact_dir': 'preview'}
+    return {'ok': False, 'reason': f'preview file is not a discoverable job input: {file_path}'}
+
+
+def _preview_unit_id(index, item):
+    digest = str(item.get('input_sha256') or '')[:12] or str(index)
+    stem = slugify(os.path.basename(str(item.get('input_path') or 'unit')), maxlen=24)
+    return f'{index:03d}-{stem}-{digest}'
+
+
+def _preview_source_text(item):
+    path = item.get('input_path')
+    media_type = item.get('media_type')
+    if media_type == 'text/plain':
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return f.read(), None
+        except (OSError, UnicodeDecodeError) as error:
+            return '', f'could_not_read_text:{error}'
+    if media_type == 'application/pdf':
+        extracted, error = fs.extract_document(path)
+        if error:
+            return '', error
+        return extracted.get('text', ''), None
+    return '', f'preview_source_unavailable:{media_type}'
+
+
 def _find_output_record(records, item):
     if isinstance(item, int):
         return item if 0 <= item < len(records) else None
@@ -976,6 +1073,7 @@ def main(argv):
         print("Usage:\n"
               "  samosa jobs suggest-job \"<goal>\" <folder> [--out <job.json>]\n"
               "  samosa jobs estimate <job.json>\n"
+              "  samosa jobs preview <job.json> [--file <path>] [--expanded|--samples N]\n"
               "  samosa jobs run \"<goal>\" <folder> [--execute]\n"
               "  samosa jobs apply <job_id>\n"
               "  samosa jobs undo <job_id>", file=sys.stderr)
@@ -1011,6 +1109,50 @@ def main(argv):
             return 1
         print(json.dumps(estimate_job(job), indent=2, sort_keys=True))
         return 0
+    if cmd == 'preview':
+        rest = argv[1:]
+        file_path = None
+        sample_count = 1
+        i = 0
+        positional = []
+        while i < len(rest):
+            arg = rest[i]
+            if arg == '--file':
+                if i + 1 >= len(rest):
+                    print("Usage: samosa jobs preview <job.json> [--file <path>] [--expanded|--samples N]",
+                          file=sys.stderr)
+                    return 2
+                file_path = rest[i + 1]
+                i += 2
+            elif arg == '--expanded':
+                sample_count = PREVIEW_SAMPLE_TARGET
+                i += 1
+            elif arg == '--samples':
+                if i + 1 >= len(rest):
+                    print("--samples requires a positive integer", file=sys.stderr)
+                    return 2
+                try:
+                    sample_count = max(1, int(rest[i + 1]))
+                except ValueError:
+                    print("--samples requires a positive integer", file=sys.stderr)
+                    return 2
+                i += 2
+            else:
+                positional.append(arg)
+                i += 1
+        if len(positional) != 1:
+            print("Usage: samosa jobs preview <job.json> [--file <path>] [--expanded|--samples N]",
+                  file=sys.stderr)
+            return 2
+        try:
+            with open(positional[0]) as f:
+                job = json.load(f)
+        except (OSError, ValueError) as e:
+            print(f"error: could not read job.json: {e}", file=sys.stderr)
+            return 1
+        result = preview_job(job, file_path=file_path, sample_count=sample_count)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result.get('ok') else 1
     if cmd == 'run':
         rest = [a for a in argv[1:] if a != '--execute']
         mode = 'execute' if '--execute' in argv[1:] else 'confirm'
