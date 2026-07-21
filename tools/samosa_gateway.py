@@ -641,6 +641,68 @@ def update_job_public_inputs(job_id: str, urls: list[str]) -> dict:
             "records": all_records}
 
 
+def prepare_resume_public_workflow(job_id: str, resume_path: str, urls: list[str]) -> dict:
+    """Build changed posting + resume pairs for a scheduled public-web job."""
+    resume = _read_resume_source(resume_path)
+    public = update_job_public_inputs(job_id, urls)
+    public_dir = Path(samosa_jobs.job_dir_for(public["job_id"])) / "public"
+    workflow_dir = public_dir / "resume-workflow"
+    workflow_dir.mkdir(parents=True, exist_ok=True)
+    resume_digest = hashlib.sha256(resume["text"].encode("utf-8")).hexdigest()
+    resume_copy = workflow_dir / f"resume-{resume_digest[:12]}.txt"
+    samosa_jobs.fs.atomic_write(resume_copy, resume["text"])
+
+    pairs = []
+    for item in public["changed_items"]:
+        pair = {
+            "resume_path": str(resume_copy),
+            "resume_source_path": resume["path"],
+            "posting_url": item["url"],
+            "posting_title": item["title"],
+            "posting_text_path": item["text_path"],
+            "posting_sha256": item["sha256"],
+            "status": "ready",
+        }
+        pairs.append(pair)
+    samosa_jobs.fs.atomic_write(
+        workflow_dir / "pairs.jsonl",
+        "".join(json.dumps(pair, separators=(",", ":"), sort_keys=True) + "\n"
+                for pair in pairs))
+    manifest = {
+        "ok": True,
+        "job_id": public["job_id"],
+        "resume_path": str(resume_copy),
+        "resume_chars": len(resume["text"]),
+        "checked": public["checked"],
+        "changed": public["changed"],
+        "pairs": pairs,
+    }
+    samosa_jobs.fs.atomic_write(
+        workflow_dir / "manifest.json",
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return manifest
+
+
+def _read_resume_source(path: str) -> dict:
+    source = os.path.abspath(path)
+    if not os.path.isfile(source):
+        raise ValueError(f"resume file does not exist: {path}")
+    lower = source.lower()
+    if lower.endswith(".txt"):
+        try:
+            text = Path(source).read_text(encoding="utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError(f"resume is not valid UTF-8 text: {error}") from error
+    else:
+        extracted, error = samosa_jobs.fs.extract_document(source)
+        if error:
+            raise ValueError(f"could not read resume: {error}")
+        text = extracted.get("text", "")
+    if not text.strip():
+        raise ValueError("resume did not contain readable text")
+    return {"path": source, "text": text}
+
+
 # Declarative descriptors for well-known search services. A user connects one
 # by naming it in config.json and supplying only its credentials; any other
 # HTTP JSON search API can be described with the same fields under
@@ -1106,6 +1168,8 @@ class Handler(BaseHTTPRequestHandler):
             self.jobs_review_correct(self.body())
         elif path == "/v1/jobs/public-inputs/update":
             self.jobs_public_inputs_update(self.body())
+        elif path == "/v1/jobs/public-inputs/resume-workflow":
+            self.jobs_public_resume_workflow(self.body())
         elif path == "/v1/jobs/apply":
             self.jobs_stream(self.body(), "apply")
         elif path == "/v1/jobs/undo":
@@ -1351,6 +1415,25 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             result = update_job_public_inputs(job_id, urls)
+        except (ValueError, PermissionError, OSError, subprocess.SubprocessError) as error:
+            self.json_response(400, {"error": {"message": str(error)}})
+            return
+        self.json_response(200, result)
+
+    def jobs_public_resume_workflow(self, body: bytes) -> None:
+        try:
+            data = json.loads(body) if body else {}
+        except (ValueError, UnicodeDecodeError):
+            self.json_response(400, {"error": {"message": "invalid JSON body"}})
+            return
+        job_id = str(data.get("job_id", "")).strip()
+        resume_path = str(data.get("resume_path", "")).strip()
+        urls = data.get("urls")
+        if not job_id or not resume_path or not isinstance(urls, list):
+            self.json_response(400, {"error": {"message": "job_id, resume_path, and urls[] are required"}})
+            return
+        try:
+            result = prepare_resume_public_workflow(job_id, resume_path, urls)
         except (ValueError, PermissionError, OSError, subprocess.SubprocessError) as error:
             self.json_response(400, {"error": {"message": str(error)}})
             return

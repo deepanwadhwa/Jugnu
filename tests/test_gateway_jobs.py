@@ -204,6 +204,23 @@ def main():
             assert status == 200, public_again
             assert public_again["changed"] == 0
 
+            resume = Path(inbox) / "resume.txt"
+            resume.write_text("Resume text\nPython\n")
+            gateway.readable_page = lambda url: {
+                "url": url,
+                "title": "Another Posting",
+                "text": "Python role",
+                "truncated": False,
+            }
+            status, workflow = json_post(port, "/v1/jobs/public-inputs/resume-workflow", {
+                "job_id": "resume-route",
+                "resume_path": str(resume),
+                "urls": ["https://example.com/role"],
+            })
+            assert status == 200, workflow
+            assert workflow["changed"] == 1
+            assert len(workflow["pairs"]) == 1
+
             # 8) validation: missing fields -> 400 (not a stream).
             conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
             b = json.dumps({"goal": "", "folder": ""}).encode()
