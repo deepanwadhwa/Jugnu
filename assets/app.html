@@ -264,6 +264,22 @@
     .job-line .running { color: var(--brand); font-weight: 600; }
     .job-plan { margin-top: 6px; display: grid; gap: 3px; font-size: 12.5px; color: var(--muted); font-family: var(--mono, ui-monospace, "SF Mono", Menlo, monospace); }
     .job-plan .more { color: var(--muted); font-style: italic; }
+    .job-review { margin: 16px 0; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); overflow: hidden; }
+    .job-review[hidden] { display: none; }
+    .job-review-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+    .job-review-head strong { font-size: 14px; }
+    .job-review-head span { color: var(--muted); font-size: 12px; }
+    .job-review-list { display: grid; }
+    .job-review-row { display: grid; grid-template-columns: minmax(0,1fr) 18px minmax(0,1fr); gap: 10px; padding: 11px 14px; border-top: 1px solid var(--line); font-size: 12.5px; }
+    .job-review-row:first-child { border-top: 0; }
+    .job-review-cell { min-width: 0; }
+    .job-review-label { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0; margin-bottom: 3px; }
+    .job-review-value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono, ui-monospace, "SF Mono", Menlo, monospace); }
+    .job-review-arrow { color: var(--muted); align-self: end; text-align: center; }
+    @media (max-width: 640px) {
+      .job-review-row { grid-template-columns: 1fr; gap: 6px; }
+      .job-review-arrow { display: none; }
+    }
     .job-bar { position: sticky; bottom: 0; margin-top: 16px; display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 13px 15px; border-radius: 14px; background: var(--brand-soft); border: 1px solid var(--line); }
     .job-bar .txt { font-size: 13.5px; color: var(--ink); }
     .job-bar button { border: 0; border-radius: 10px; padding: 9px 16px; font-weight: 700; cursor: pointer; }
@@ -334,6 +350,10 @@
           </div>
         </form>
         <div class="job-activity" id="jobActivity"><div class="job-empty">No job run yet. Try “organize this folder by type”.</div></div>
+        <section class="job-review" id="jobReview" hidden>
+          <div class="job-review-head"><strong id="jobReviewTitle">Review</strong><span id="jobReviewMeta"></span></div>
+          <div class="job-review-list" id="jobReviewList"></div>
+        </section>
         <div class="job-bar" id="jobBar" hidden>
           <span class="txt" id="jobBarText"></span>
           <span id="jobBarActions"></span>
@@ -660,6 +680,7 @@
         view: $("jobsView"), form: $("jobForm"), folder: $("jobFolder"), goal: $("jobGoal"),
         run: $("jobRun"), auto: $("jobAuto"), activity: $("jobActivity"), bar: $("jobBar"),
         barText: $("jobBarText"), barActions: $("jobBarActions"),
+        review: $("jobReview"), reviewTitle: $("jobReviewTitle"), reviewMeta: $("jobReviewMeta"), reviewList: $("jobReviewList"),
         tabChat: $("tabChat"), tabJobs: $("tabJobs"),
         composer: document.querySelector(".composer-wrap"), telemetry: document.querySelector(".telemetry"),
       };
@@ -693,6 +714,34 @@
         for (const [label, cls, fn] of actions) { const b = document.createElement("button"); b.className = cls; b.textContent = label; b.onclick = fn; jobEls.barActions.appendChild(b); }
         jobEls.bar.hidden = false;
       }
+      function clearReview() {
+        jobEls.review.hidden = true; jobEls.reviewList.innerHTML = ""; jobEls.reviewMeta.textContent = "";
+      }
+      function addReviewRow(leftLabel, leftValue, rightLabel, rightValue) {
+        const row = document.createElement("div"); row.className = "job-review-row";
+        row.innerHTML = '<div class="job-review-cell"><div class="job-review-label"></div><div class="job-review-value"></div></div><div class="job-review-arrow">→</div><div class="job-review-cell"><div class="job-review-label"></div><div class="job-review-value"></div></div>';
+        const cells = row.querySelectorAll(".job-review-cell");
+        cells[0].querySelector(".job-review-label").textContent = leftLabel;
+        cells[0].querySelector(".job-review-value").textContent = leftValue;
+        cells[1].querySelector(".job-review-label").textContent = rightLabel;
+        cells[1].querySelector(".job-review-value").textContent = rightValue;
+        jobEls.reviewList.appendChild(row);
+      }
+      function renderMoveReview(evt, ctx) {
+        clearReview();
+        if (!evt.moves || !evt.moves.length) return;
+        jobEls.reviewTitle.textContent = "Review moves";
+        jobEls.reviewMeta.textContent = `${evt.moves.length} proposed`;
+        evt.moves.slice(0, 25).forEach(m => addReviewRow("From", relTo(m.src, ctx.folder), "To", relTo(m.dst, ctx.folder)));
+        if (evt.moves.length > 25) addReviewRow("More", `${evt.moves.length - 25} additional moves`, "See", "job log");
+        jobEls.review.hidden = false;
+      }
+      function renderExtractionReview(evt, ctx) {
+        jobEls.reviewTitle.textContent = "Needs review";
+        jobEls.reviewMeta.textContent = "Source and extracted fields";
+        addReviewRow("Source", relTo(evt.input_path || evt.path || "", ctx.folder), "Extraction", JSON.stringify(evt.result || evt.fields || evt.reason || {}));
+        jobEls.review.hidden = false;
+      }
 
       function renderJobEvent(evt, ctx) {
         switch (evt.type) {
@@ -713,6 +762,7 @@
               evt.moves.slice(0, 8).forEach(m => { const d = document.createElement("div"); d.textContent = `${baseName(m.src)}  →  ${relTo(m.dst, ctx.folder)}`; box.appendChild(d); });
               if (n > 8) { const d = document.createElement("div"); d.className = "more"; d.textContent = `…and ${n - 8} more`; box.appendChild(d); }
               l.querySelector(".body").appendChild(box);
+              renderMoveReview(evt, ctx);
             }
             break;
           }
@@ -749,6 +799,8 @@
           }
           case "notes":
             jobLine("·", evt.op === "append" ? "Saved a job note" : "Read job notes"); break;
+          case "item_review_required":
+            renderExtractionReview(evt, ctx); jobLine("!", `Needs review: ${baseName(evt.input_path || evt.path || "")}`); break;
           case "applied":
             if (ctx.progress) { ctx.progress.querySelector(".dot").textContent = "●"; ctx.progress.classList.add("step-done"); ctx.progress = null; }
             ctx.moved = evt.applied > 0;
@@ -791,7 +843,7 @@
         if (jobRunning) return;
         const folder = jobEls.folder.value.trim(), goal = jobEls.goal.value.trim();
         if (!folder || !goal) { jobEls.folder.focus(); return; }
-        jobRunning = true; jobEls.run.disabled = true; jobEls.bar.hidden = true; jobEls.activity.innerHTML = "";
+        jobRunning = true; jobEls.run.disabled = true; jobEls.bar.hidden = true; clearReview(); jobEls.activity.innerHTML = "";
         const ctx = { folder };
         try { await streamJob("/v1/jobs/run", { goal, folder, mode: jobEls.auto.checked ? "execute" : "confirm" }, ctx); }
         catch (e) { renderJobEvent({ type: "error", message: String(e) }, ctx); }
