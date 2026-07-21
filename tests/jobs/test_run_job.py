@@ -310,6 +310,24 @@ class JobsLayerTest(unittest.TestCase):
         job_id = by['await_user'][0]['job_id']
         self.assertTrue(os.path.exists(os.path.join(self.jobsroot, job_id, 'convo.json')))
 
+    def test_complete_search_checks_every_readable_file(self):
+        items = []
+        for index in range(75):
+            path = os.path.join(self.inbox, f'note-{index:02d}.txt')
+            with open(path, 'w') as handle:
+                handle.write('ordinary archive')
+            items.append({'input_path': path, 'name': os.path.basename(path),
+                          'media_type': 'text/plain'})
+        target = items[-1]['input_path']
+        with open(target, 'w') as handle:
+            handle.write('veterinary vaccination record for a cat')
+
+        result = J._search_all_files("find my cat's medical records", items)
+        self.assertEqual(result['total'], 75)
+        self.assertEqual(result['content_checked'], 75)
+        self.assertEqual(result['content_unreadable'], 0)
+        self.assertEqual(result['matches'][0]['name'], os.path.basename(target))
+
     def test_find_ask_user_pauses_and_resumes(self):
         def first_model(_messages):
             return '{"samosa_tool":"ask_user","question":"Which pet name should I look for?"}'

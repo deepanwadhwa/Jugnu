@@ -258,6 +258,31 @@ class TestToolLoop(unittest.TestCase):
         self.assertIn('2 files', answer)
         self.assertTrue(any(t == 'tool_call' and k['tool'] == 'fs_survey' for t, k in calls))
 
+    def test_loop_executes_tool_call_after_prefacing_prose(self):
+        calls = []
+        ctx = T.ToolContext(self.root, mode='preview',
+                            emit=lambda t, **k: calls.append((t, k)))
+        scripted = [
+            'Let me inspect the folder.\n\n{"samosa_tool":"fs_survey"}',
+            'There are 2 files.',
+        ]
+        events = list(T.iter_tool_loop(lambda _messages: scripted.pop(0),
+                                       [{'role': 'user', 'content': 'inspect'}],
+                                       T.REGISTRY.subset(['fs_survey']), ctx))
+        self.assertEqual([event['type'] for event in events], ['tool_result', 'final'])
+        self.assertEqual(events[-1]['text'], 'There are 2 files.')
+        self.assertTrue(any(kind == 'tool_call' for kind, _fields in calls))
+
+    def test_loop_exhaustion_never_returns_raw_tool_output_as_answer(self):
+        ctx = T.ToolContext(self.root, mode='preview')
+        events = list(T.iter_tool_loop(
+            lambda _messages: '{"samosa_tool":"fs_survey"}',
+            [{'role': 'user', 'content': 'inspect'}],
+            T.REGISTRY.subset(['fs_survey']), ctx, max_rounds=1))
+        self.assertEqual(events[-1]['type'], 'final')
+        self.assertEqual(events[-1]['text'], '')
+        self.assertTrue(events[-1]['exhausted'])
+
     def test_loop_truncates_large_tool_result_before_followup_prompt(self):
         big = 'x' * (T.MAX_TOOL_RESULT_PROMPT_CHARS + 50)
         tool = T.Tool('_big_result', 'big', [], lambda _a, _c: big, mutating=False)

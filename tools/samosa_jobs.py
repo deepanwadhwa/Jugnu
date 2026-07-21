@@ -28,6 +28,7 @@ The event stream (each event: {seq, ts, type, ...}):
 """
 
 import os
+import concurrent.futures
 import json
 import plistlib
 import platform
@@ -820,6 +821,86 @@ def _find_candidate_names(goal, items, limit=FIND_CANDIDATE_LIMIT):
     return [name for _score, _key, name in ranked[:limit]]
 
 
+def _find_search_terms(goal):
+    words = [w for w in re.findall(r'[a-z0-9]+', (goal or '').lower())
+             if len(w) > 1 and w not in _FIND_STOP_WORDS]
+    terms = set(words)
+    for word in words:
+        terms.update(_FIND_DOMAIN_TERMS.get(word, ()))
+    return words, terms
+
+
+def _read_search_text(item):
+    path = item.get('input_path')
+    media_type = item.get('media_type')
+    if media_type == 'text/plain':
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as handle:
+                return handle.read(), None
+        except OSError as error:
+            return '', str(error)
+    if media_type == 'application/pdf':
+        result, error = fs.extract_document(path)
+        return ((result or {}).get('text', ''), error)
+    return '', None
+
+
+def _search_all_files(goal, items, limit=FIND_CANDIDATE_LIMIT):
+    """Check every filename and all readable text, returning ranked evidence."""
+    words, terms = _find_search_terms(goal)
+    direct_terms = set(words)
+    related_terms = terms - direct_terms
+    searchable = [item for item in items or []
+                  if item.get('media_type') in ('text/plain', 'application/pdf')]
+    errors = 0
+    ranked = []
+
+    def score_item(item, content=''):
+        name = str(item.get('name') or os.path.basename(item.get('input_path') or ''))
+        name_text = re.sub(r'[^a-z0-9]+', ' ', name.lower())
+        content_lower = content.lower()
+        direct_name = sum(term in name_text for term in direct_terms)
+        related_name = sum(term in name_text for term in related_terms)
+        direct_text = sum(term in content_lower for term in direct_terms)
+        related_text = sum(term in content_lower for term in related_terms)
+        score = direct_name * 12 + related_name * 4 + direct_text * 5 + related_text
+        if not score:
+            return
+        evidence = []
+        if direct_name or related_name:
+            evidence.append('filename')
+        if direct_text or related_text:
+            evidence.append('document text')
+        ranked.append((-score, name.lower(), {
+            'name': name,
+            'media_type': item.get('media_type'),
+            'evidence': ' and '.join(evidence),
+        }))
+
+    searchable_ids = {id(item) for item in searchable}
+    for item in items or []:
+        if id(item) not in searchable_ids:
+            score_item(item)
+    if searchable:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(searchable))) as pool:
+            future_items = {pool.submit(_read_search_text, item): item for item in searchable}
+            for future in concurrent.futures.as_completed(future_items):
+                item = future_items.pop(future)
+                try:
+                    text, error = future.result()
+                except Exception:
+                    text, error = '', 'reader failed'
+                errors += bool(error or not text.strip())
+                score_item(item, text)
+    ranked.sort(key=lambda row: (row[0], row[1]))
+    return {
+        'total': len(items or []),
+        'content_checked': len(searchable),
+        'content_unreadable': errors,
+        'matches': [row[2] for row in ranked[:limit]],
+    }
+
+
 def _find_incomplete_question(goal):
     g = (goal or '').lower()
     if re.search(r'\b(cat|dog|pet)\b', g):
@@ -888,10 +969,20 @@ def run_job(goal, folder, mode='confirm', model_call=None, loop_model_call=None)
         ctx = ToolContext(folder, mode=ctx_mode, emit=emit_tool_event, job_dir=jdir,
                           stage_mutations=(mode == 'confirm'))
         tools = samosa_tools.REGISTRY.subset(FIND_TOOLS)
+        yield log.append('searching', total=total)
         indexed_items, _indexed_skips, index_error = fs.fs_sidecar_list(folder, recursive=False)
-        candidate_names = [] if index_error else _find_candidate_names(goal, indexed_items)
-        candidate_note = ("\nLikely filename candidates from the complete folder index:\n- " +
-                          "\n- ".join(candidate_names)) if candidate_names else ''
+        search = ({'total': 0, 'content_checked': 0, 'content_unreadable': 0, 'matches': []}
+                  if index_error else _search_all_files(goal, indexed_items))
+        yield log.append('search_complete', total=search['total'],
+                         content_checked=search['content_checked'],
+                         content_unreadable=search['content_unreadable'],
+                         matches=len(search['matches']))
+        candidate_lines = [f"{match['name']} ({match['evidence']})"
+                           for match in search['matches']]
+        candidate_note = ("\nBest matches from a complete scan of every filename and all "
+                          "extractable document text:\n- " + "\n- ".join(candidate_lines)) \
+                         if candidate_lines else ("\nThe complete scan found no filename or "
+                                                  "extractable-text matches.")
         messages = [
             {'role': 'system',
              'content': "You are running a local find job. Use metadata first, "
@@ -899,9 +990,9 @@ def run_job(goal, folder, mode='confirm', model_call=None, loop_model_call=None)
                         "with plain sentences that include the path and why it matches. "
                         "Always pass relative paths to filesystem tools: '.', 'sub/file.pdf', "
                         "or a filename from fs_list. Never pass '/' or an absolute path. "
-                        "A complete-folder filename shortlist may be included with the goal. "
-                        "Inspect those likely candidates first; use fs_list only when the "
-                        "shortlist is insufficient. If you need clarification, call "
+                        "The goal includes results from a complete scan of every filename and "
+                        "all extractable document text. Inspect likely candidates directly; "
+                        "do not use fs_list to repeat that scan. If you need clarification, call "
                         "ask_user with the question; do not end with a question as your final "
                         "answer. If the user's goal asks to move the matching file, confirm "
                         "the match first, then call fs_move with relative src and dst. In review "
@@ -935,7 +1026,7 @@ def run_job(goal, folder, mode='confirm', model_call=None, loop_model_call=None)
                 return
             if loop_event.get('type') == 'final':
                 final_text = (loop_event.get('text') or '').strip()
-                if not final_text:
+                if not final_text or '"samosa_tool"' in final_text:
                     question = _find_incomplete_question(goal)
                     call = {'samosa_tool': 'ask_user', 'question': question}
                     _write_convo(jdir, loop_event.get('convo') or messages, call, 0)
@@ -1050,7 +1141,7 @@ def answer_job(job_id, answer, loop_model_call=None):
             return
         if loop_event.get('type') == 'final':
             final_text = (loop_event.get('text') or '').strip()
-            if not final_text:
+            if not final_text or '"samosa_tool"' in final_text:
                 question = _find_incomplete_question(_job_goal(jdir))
                 call = {'samosa_tool': 'ask_user', 'question': question}
                 _write_convo(jdir, loop_event.get('convo') or convo, call, 0)

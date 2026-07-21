@@ -281,6 +281,8 @@
     .job-result { margin-top: 22px; padding: 15px 16px; border-left: 3px solid var(--brand); background: color-mix(in srgb, var(--brand-soft) 36%, var(--panel)); }
     .job-result.error { border-left-color: var(--danger); }
     .job-result-text { font-size: 15px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .job-result-text > :first-child { margin-top: 0; }
+    .job-result-text > :last-child { margin-bottom: 0; }
     .job-review { margin: 16px 0; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); overflow: hidden; }
     .job-review[hidden] { display: none; }
     .job-review-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
@@ -406,13 +408,13 @@
                 <textarea id="jobPublicUrls" rows="3" spellcheck="false" placeholder="https://example.com/jobs"></textarea>
               </div>
               <div class="job-field">
-                <label for="jobResumePath">Resume</label>
-                <input id="jobResumePath" spellcheck="false" autocapitalize="off" placeholder="/Users/you/resume.txt">
+                <label for="jobResumePath">CV or résumé file</label>
+                <input id="jobResumePath" spellcheck="false" autocapitalize="off" placeholder="/Users/you/cv.pdf">
               </div>
             </div>
             <div class="row">
               <button class="job-run" id="jobFetchPublic" type="button">Fetch URLs</button>
-              <button class="job-run" id="jobResumeWorkflow" type="button">Pair resume</button>
+              <button class="job-run" id="jobResumeWorkflow" type="button">Match CV to postings</button>
             </div>
           </section>
         </details>
@@ -812,7 +814,8 @@
       }
       function showJobResult(text, error = false) {
         jobEls.resultLabel.textContent = error ? "Could not finish" : "Result";
-        jobEls.resultText.textContent = text;
+        if (error) jobEls.resultText.textContent = text;
+        else jobEls.resultText.innerHTML = markdown(text);
         jobEls.result.classList.toggle("error", error);
         jobEls.result.hidden = false;
         jobEls.result.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -971,8 +974,21 @@
           case "intent":
             jobLine("›", evt.kind === "organize" ? "Preparing file organization" : (evt.kind === "find" ? "Searching for matching files" : "Reviewing the folder")); break;
           case "counting": {
-            const parts = Object.entries(evt.by_type || {}).map(([k, v]) => `${v} ${shortType(k)}`).join(", ");
-            const l = jobLine("▦", `${evt.total} files checked`, "step-done"); if (parts) addSub(l, parts); break;
+            const grouped = {};
+            for (const [kind, count] of Object.entries(evt.by_type || {})) grouped[shortType(kind)] = (grouped[shortType(kind)] || 0) + count;
+            const parts = Object.entries(grouped).map(([kind, count]) => `${count} ${kind}`).join(", ");
+            const l = jobLine("▦", `${evt.total} files found`, "step-done"); if (parts) addSub(l, parts); break;
+          }
+          case "searching":
+            ctx.searchLine = jobLine("·", `Searching all ${evt.total} files`); break;
+          case "search_complete": {
+            const l = ctx.searchLine || jobLine("✓", `Searched all ${evt.total} files`, "step-done");
+            l.querySelector(".dot").textContent = "✓";
+            l.querySelector(".title").textContent = `Searched all ${evt.total} files`;
+            l.classList.add("step-done");
+            if (evt.content_unreadable) addSub(l, `${evt.content_unreadable} document${evt.content_unreadable === 1 ? "" : "s"} had no searchable text.`);
+            ctx.searchLine = null;
+            break;
           }
           case "plan": {
             const n = evt.moves.length;
@@ -1124,14 +1140,14 @@
           const body = { job_id: job.job_id || "public-job", urls };
           let endpoint = "/v1/jobs/public-inputs/update";
           if (pairResume) {
-            if (!jobEls.resumePath.value.trim()) throw new Error("Add a resume path.");
+            if (!jobEls.resumePath.value.trim()) throw new Error("Add a CV or résumé file.");
             endpoint = "/v1/jobs/public-inputs/resume-workflow";
             body.resume_path = jobEls.resumePath.value.trim();
           }
           const resp = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
           const data = await resp.json();
           if (!resp.ok || !data.ok) throw new Error(data.error?.message || "Public input update failed");
-          jobLine("●", pairResume ? `Prepared ${data.pairs.length} resume/posting pair${data.pairs.length === 1 ? "" : "s"}` : `Fetched ${data.checked} URL${data.checked === 1 ? "" : "s"}, ${data.changed} changed`, "step-done");
+          jobLine("●", pairResume ? `Matched the CV with ${data.pairs.length} posting${data.pairs.length === 1 ? "" : "s"}` : `Fetched ${data.checked} URL${data.checked === 1 ? "" : "s"}, ${data.changed} changed`, "step-done");
         } catch (error) { jobLine("✗", error.message || String(error), "step-error"); }
         finally { jobRunning = false; }
       }

@@ -182,6 +182,17 @@ def classify_reply(text):
     check = re.sub(r"^```(?:json)?\s*", "", check)
     if not check:
         return "wait", None
+    # Models occasionally preface a real tool call with a sentence. Find a
+    # complete embedded JSON object so internal protocol text is executed,
+    # never shown to the user as a finished answer.
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r'\{', check):
+        try:
+            value, _end = decoder.raw_decode(check[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and isinstance(value.get("samosa_tool"), str):
+            return "tool", value
     if not check.startswith("{"):
         return "text", None
     for candidate in (re.sub(r"\s*```\s*$", "", check), check.split("\n", 1)[0]):
@@ -277,7 +288,7 @@ def iter_tool_loop(model_call, messages, tools, ctx, max_rounds=MAX_TOOL_ROUNDS,
         convo.append({'role': 'assistant', 'content': (text or '').strip()})
         convo.append({'role': 'user',
                       'content': f"SAMOSA_TOOL_RESULT {call.get('samosa_tool', '')}\n{prompt_result}{note}"})
-    yield {'type': 'final', 'text': last_result, 'convo': convo}
+    yield {'type': 'final', 'text': '', 'convo': convo, 'exhausted': True}
 
 
 def _tool_result_for_prompt(result):
