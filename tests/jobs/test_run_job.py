@@ -7,6 +7,7 @@ undo, and error handling. The model is mocked; no backend required.
 
 import os
 import json
+import plistlib
 import shutil
 import sys
 import tempfile
@@ -459,6 +460,96 @@ class JobsLayerTest(unittest.TestCase):
         self.assertEqual(first['status'], 'passed')
         self.assertTrue(first['reviewed'])
         self.assertEqual(first['extracted']['total'], 8.0)
+
+    # --- scheduler / daemon foundation ------------------------------------
+
+    def write_schedulable_job(self, name='overnight-job'):
+        job_path = os.path.join(self.work, f'{name}.json')
+        with open(job_path, 'w') as f:
+            json.dump({
+                'job_id': name,
+                'input': {'folder': self.inbox, 'recursive': False},
+                'resources': {'run_on_battery': False},
+                'output': {'dir': os.path.join(self.work, 'out')},
+            }, f)
+        return job_path
+
+    def test_arm_scheduled_job_freezes_definition_and_estimates(self):
+        job_path = self.write_schedulable_job()
+        result = J.arm_scheduled_job(job_path, window_start='22:00', window_end='06:00')
+        self.assertTrue(result['ok'], result)
+        self.assertTrue(os.path.exists(result['schedule_path']))
+        self.assertEqual(result['schedule']['window_start'], '22:00')
+        self.assertEqual(result['schedule']['window_end'], '06:00')
+        self.assertEqual(result['schedule']['review_required_policy'], 'queue')
+        self.assertEqual(result['estimate']['unit_count'], 4)
+
+        with open(job_path, 'w') as f:
+            json.dump({'job_id': 'overnight-job', 'input': {'folder': self.inbox},
+                       'name': 'changed'}, f)
+        changed = J.arm_scheduled_job(job_path)
+        self.assertFalse(changed['ok'])
+        self.assertIn('different definition', changed['reason'])
+
+    def test_scheduler_decision_cross_midnight_and_battery_policy(self):
+        schedule = {
+            'enabled': True,
+            'window_start': '22:00',
+            'window_end': '06:00',
+            'run_on_battery': False,
+        }
+        self.assertEqual(J.scheduler_decision(schedule, now_minutes=23 * 60,
+                                              power={'on_battery': False})['action'], 'run')
+        self.assertEqual(J.scheduler_decision(schedule, now_minutes=3 * 60,
+                                              power={'on_battery': False})['action'], 'run')
+        noon = J.scheduler_decision(schedule, now_minutes=12 * 60,
+                                    power={'on_battery': False})
+        self.assertEqual(noon['reason'], 'outside_window')
+        battery = J.scheduler_decision(schedule, now_minutes=23 * 60,
+                                       power={'on_battery': True})
+        self.assertEqual(battery['reason'], 'on_battery')
+
+    def test_missed_window_policy_can_run_next_start(self):
+        schedule = {
+            'window_start': '22:00',
+            'window_end': '06:00',
+            'missed_policy': 'run_next_start',
+            'run_on_battery': True,
+        }
+        missed = J.record_missed_window(schedule, now_minutes=12 * 60)
+        self.assertTrue(missed['missed'])
+        decision = J.scheduler_decision(missed, now_minutes=12 * 60,
+                                        power={'on_battery': False})
+        self.assertEqual(decision['action'], 'run')
+        self.assertEqual(decision['reason'], 'missed_window')
+
+    def test_caffeinate_and_launchd_helpers(self):
+        self.assertEqual(J.caffeinate_command(['samosa', 'jobsd-once'],
+                                              system_name='Darwin'),
+                         ['caffeinate', '-dimsu', 'samosa', 'jobsd-once'])
+        self.assertEqual(J.caffeinate_command(['samosa'], system_name='Linux'),
+                         ['samosa'])
+        plist = plistlib.loads(J.launchd_plist(['/bin/echo', 'hi']).encode('utf-8'))
+        self.assertEqual(plist['Label'], 'com.samosa.jobsd')
+        self.assertTrue(plist['RunAtLoad'])
+        self.assertEqual(plist['ProgramArguments'], ['/bin/echo', 'hi'])
+
+    def test_host_power_status_parses_pmset(self):
+        battery = J.host_power_status(system_name='Darwin',
+                                      pmset_output="Now drawing from 'Battery Power'\n")
+        self.assertTrue(battery['on_battery'])
+        ac = J.host_power_status(system_name='Darwin',
+                                 pmset_output="Now drawing from 'AC Power'\n")
+        self.assertTrue(ac['ac_power'])
+
+    def test_jobsd_once_scans_armed_schedules(self):
+        job_path = self.write_schedulable_job('daemon-job')
+        armed = J.arm_scheduled_job(job_path, window_start='22:00', window_end='06:00')
+        self.assertTrue(armed['ok'], armed)
+        result = J.jobsd_once(now_minutes=23 * 60, power={'on_battery': False})
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['decisions'][0]['job_id'], 'daemon-job')
+        self.assertEqual(result['decisions'][0]['action'], 'run')
 
 
 if __name__ == '__main__':

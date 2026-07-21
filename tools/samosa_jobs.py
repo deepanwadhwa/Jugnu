@@ -29,7 +29,10 @@ The event stream (each event: {seq, ts, type, ...}):
 
 import os
 import json
+import plistlib
+import platform
 import re
+import subprocess
 import sys
 import time
 
@@ -130,6 +133,8 @@ DEFAULT_PREFILL_TOKENS_PER_SECOND = float(os.environ.get('SAMOSA_JOB_PREFILL_TPS
 DEFAULT_DECODE_TOKENS_PER_SECOND = float(os.environ.get('SAMOSA_JOB_DECODE_TPS', '6'))
 DEFAULT_JOB_MAX_TOKENS = int(os.environ.get('SAMOSA_JOB_MAX_TOKENS', '512'))
 PREVIEW_SAMPLE_TARGET = 3
+DEFAULT_OVERNIGHT_WINDOW = ('22:00', '06:00')
+DEFAULT_MISSED_POLICY = 'skip'
 
 
 def _suggest_template(goal):
@@ -385,6 +390,174 @@ def preview_job(job, file_path=None, sample_count=1):
                     ''.join(json.dumps(r, separators=(',', ':'), sort_keys=True) + '\n'
                             for r in records))
     return manifest
+
+
+# --- Daemon / scheduler primitives ----------------------------------------
+
+def arm_scheduled_job(job_path, window_start=None, window_end=None,
+                      missed_policy=DEFAULT_MISSED_POLICY, keep_awake=True):
+    """Freeze a job definition and arm it for daemon pickup.
+
+    The frozen copy lives under the jobs root so later edits to the source
+    job.json do not silently alter an armed overnight run.
+    """
+    try:
+        with open(job_path, 'r', encoding='utf-8') as f:
+            job = json.load(f)
+    except (OSError, ValueError) as error:
+        return {'ok': False, 'reason': f'could not read job.json: {error}'}
+    if not isinstance(job, dict):
+        return {'ok': False, 'reason': 'job must be a JSON object'}
+    job_id = job.get('job_id') or slugify(os.path.splitext(os.path.basename(job_path))[0])
+    frozen = json.dumps(job, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    job_sha = fs.sha256_bytes(frozen)
+    jdir = job_dir_for(job_id)
+    os.makedirs(jdir, exist_ok=True)
+    frozen_path = os.path.join(jdir, 'job.json')
+    existing = _read_json_file(frozen_path)
+    if existing is not None:
+        existing_sha = fs.sha256_bytes(json.dumps(existing, sort_keys=True,
+                                                  separators=(',', ':')).encode('utf-8'))
+        if existing_sha != job_sha:
+            return {'ok': False, 'reason': f'job {job_id} already armed with a different definition'}
+    fs.atomic_write(frozen_path, json.dumps(job, indent=2, sort_keys=True) + '\n')
+
+    start = window_start or DEFAULT_OVERNIGHT_WINDOW[0]
+    end = window_end or DEFAULT_OVERNIGHT_WINDOW[1]
+    if _parse_hhmm(start) is None or _parse_hhmm(end) is None:
+        return {'ok': False, 'reason': 'window times must be HH:MM'}
+    if missed_policy not in ('skip', 'run_next_start'):
+        return {'ok': False, 'reason': 'missed_policy must be skip or run_next_start'}
+    resources = job.get('resources') if isinstance(job.get('resources'), dict) else {}
+    schedule = {
+        'schema_version': 1,
+        'job_id': job_id,
+        'job_path': frozen_path,
+        'job_sha256': job_sha,
+        'source_job_path': os.path.abspath(job_path),
+        'enabled': True,
+        'window_start': start,
+        'window_end': end,
+        'missed_policy': missed_policy,
+        'keep_awake': bool(keep_awake),
+        'run_on_battery': bool(resources.get('run_on_battery', False)),
+        'review_required_policy': 'queue',
+        'armed_at': fs.rfc3339_now(),
+    }
+    schedule_path = os.path.join(jdir, 'schedule.json')
+    fs.atomic_write(schedule_path, json.dumps(schedule, indent=2, sort_keys=True) + '\n')
+    estimate = estimate_job(job)
+    return {'ok': True, 'job_id': job_id, 'job_dir': jdir,
+            'schedule_path': schedule_path, 'schedule': schedule,
+            'estimate': estimate}
+
+
+def scheduler_decision(schedule, now_minutes=None, power=None):
+    """Return whether an armed schedule should run, defer, or record a miss."""
+    if not schedule.get('enabled', True):
+        return {'action': 'defer', 'reason': 'disabled'}
+    now = _now_minutes() if now_minutes is None else int(now_minutes)
+    power = power or {'on_battery': False, 'ac_power': True}
+    if power.get('on_battery') and not schedule.get('run_on_battery', False):
+        return {'action': 'defer', 'reason': 'on_battery'}
+    start = _parse_hhmm(schedule.get('window_start') or DEFAULT_OVERNIGHT_WINDOW[0])
+    end = _parse_hhmm(schedule.get('window_end') or DEFAULT_OVERNIGHT_WINDOW[1])
+    if start is None or end is None:
+        return {'action': 'defer', 'reason': 'invalid_window'}
+    if _minutes_in_window(now, start, end):
+        return {'action': 'run', 'reason': 'inside_window'}
+    if schedule.get('missed') and schedule.get('missed_policy') == 'run_next_start':
+        return {'action': 'run', 'reason': 'missed_window'}
+    return {'action': 'defer', 'reason': 'outside_window'}
+
+
+def record_missed_window(schedule, now_minutes=None):
+    """Mark a schedule missed after its window has elapsed."""
+    now = _now_minutes() if now_minutes is None else int(now_minutes)
+    start = _parse_hhmm(schedule.get('window_start') or DEFAULT_OVERNIGHT_WINDOW[0])
+    end = _parse_hhmm(schedule.get('window_end') or DEFAULT_OVERNIGHT_WINDOW[1])
+    if start is None or end is None or _minutes_in_window(now, start, end):
+        return dict(schedule)
+    updated = dict(schedule)
+    updated['missed'] = True
+    updated['missed_recorded_at_minutes'] = now
+    return updated
+
+
+def caffeinate_command(command, keep_awake=True, system_name=None):
+    """Wrap a command with macOS caffeinate when requested."""
+    if not keep_awake:
+        return list(command)
+    system_name = system_name or platform.system()
+    if system_name == 'Darwin':
+        return ['caffeinate', '-dimsu', *command]
+    return list(command)
+
+
+def host_power_status(system_name=None, pmset_output=None):
+    """Return {'ac_power': bool, 'on_battery': bool} for scheduler policy."""
+    system_name = system_name or platform.system()
+    if system_name != 'Darwin':
+        return {'ac_power': True, 'on_battery': False, 'source': 'default_ac'}
+    if pmset_output is None:
+        try:
+            pmset_output = subprocess.check_output(
+                ['pmset', '-g', 'batt'], text=True, stderr=subprocess.DEVNULL, timeout=3)
+        except (OSError, subprocess.SubprocessError):
+            return {'ac_power': False, 'on_battery': True, 'source': 'unknown'}
+    lowered = pmset_output.lower()
+    on_battery = 'battery power' in lowered
+    ac_power = 'ac power' in lowered or 'charged' in lowered
+    return {'ac_power': ac_power and not on_battery,
+            'on_battery': on_battery,
+            'source': 'pmset'}
+
+
+def launchd_plist(program_args, label='com.samosa.jobsd', interval_seconds=300,
+                  log_dir=None):
+    """Generate a launchd plist for polling the jobs daemon on macOS."""
+    log_dir = log_dir or os.path.join(os.path.expanduser('~'), '.samosa', 'logs')
+    payload = {
+        'Label': label,
+        'ProgramArguments': list(program_args),
+        'RunAtLoad': True,
+        'StartInterval': int(interval_seconds),
+        'StandardOutPath': os.path.join(log_dir, 'jobsd.out.log'),
+        'StandardErrorPath': os.path.join(log_dir, 'jobsd.err.log'),
+    }
+    return plistlib.dumps(payload, sort_keys=True).decode('utf-8')
+
+
+def list_armed_schedules():
+    root = get_jobs_root()
+    schedules = []
+    if not os.path.isdir(root):
+        return schedules
+    for entry in sorted(os.listdir(root)):
+        path = os.path.join(root, entry, 'schedule.json')
+        schedule = _read_json_file(path)
+        if schedule is not None:
+            schedule = dict(schedule)
+            schedule['schedule_path'] = path
+            schedules.append(schedule)
+    return schedules
+
+
+def jobsd_once(now_minutes=None, power=None):
+    """Evaluate armed schedules once.
+
+    This is the launchd-friendly polling unit.  It intentionally queues review
+    work instead of prompting: review-required items are represented by job
+    artifacts/events, never by a daemon-blocking question.
+    """
+    decisions = []
+    power = power or host_power_status()
+    for schedule in list_armed_schedules():
+        decision = scheduler_decision(schedule, now_minutes=now_minutes, power=power)
+        decisions.append({'job_id': schedule.get('job_id'),
+                          'schedule_path': schedule.get('schedule_path'),
+                          **decision})
+    return {'ok': True, 'decisions': decisions}
 
 
 def review_items(job_id):
@@ -1016,6 +1189,38 @@ def _preview_source_text(item):
     return '', f'preview_source_unavailable:{media_type}'
 
 
+def _read_json_file(path):
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            value = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _parse_hhmm(value):
+    if not isinstance(value, str):
+        return None
+    match = re.match(r'^([01]?\d|2[0-3]):([0-5]\d)$', value)
+    if not match:
+        return None
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
+def _now_minutes():
+    local = time.localtime()
+    return local.tm_hour * 60 + local.tm_min
+
+
+def _minutes_in_window(now, start, end):
+    now = int(now) % (24 * 60)
+    if start == end:
+        return True
+    if start < end:
+        return start <= now < end
+    return now >= start or now < end
+
+
 def _find_output_record(records, item):
     if isinstance(item, int):
         return item if 0 <= item < len(records) else None
@@ -1074,6 +1279,8 @@ def main(argv):
               "  samosa jobs suggest-job \"<goal>\" <folder> [--out <job.json>]\n"
               "  samosa jobs estimate <job.json>\n"
               "  samosa jobs preview <job.json> [--file <path>] [--expanded|--samples N]\n"
+              "  samosa jobs arm <job.json> [--overnight] [--window HH:MM-HH:MM]\n"
+              "  samosa jobs launchd-plist --print\n"
               "  samosa jobs run \"<goal>\" <folder> [--execute]\n"
               "  samosa jobs apply <job_id>\n"
               "  samosa jobs undo <job_id>", file=sys.stderr)
@@ -1153,6 +1360,57 @@ def main(argv):
         result = preview_job(job, file_path=file_path, sample_count=sample_count)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0 if result.get('ok') else 1
+    if cmd == 'arm':
+        rest = argv[1:]
+        window_start = None
+        window_end = None
+        missed_policy = DEFAULT_MISSED_POLICY
+        keep_awake = True
+        positional = []
+        i = 0
+        while i < len(rest):
+            arg = rest[i]
+            if arg == '--overnight':
+                window_start, window_end = DEFAULT_OVERNIGHT_WINDOW
+                i += 1
+            elif arg == '--window':
+                if i + 1 >= len(rest) or '-' not in rest[i + 1]:
+                    print("--window requires HH:MM-HH:MM", file=sys.stderr)
+                    return 2
+                window_start, window_end = rest[i + 1].split('-', 1)
+                i += 2
+            elif arg == '--missed-policy':
+                if i + 1 >= len(rest):
+                    print("--missed-policy requires skip or run_next_start", file=sys.stderr)
+                    return 2
+                missed_policy = rest[i + 1]
+                i += 2
+            elif arg == '--no-keep-awake':
+                keep_awake = False
+                i += 1
+            else:
+                positional.append(arg)
+                i += 1
+        if len(positional) != 1:
+            print("Usage: samosa jobs arm <job.json> [--overnight] [--window HH:MM-HH:MM]",
+                  file=sys.stderr)
+            return 2
+        result = arm_scheduled_job(positional[0], window_start=window_start,
+                                   window_end=window_end,
+                                   missed_policy=missed_policy,
+                                   keep_awake=keep_awake)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result.get('ok') else 1
+    if cmd == 'launchd-plist':
+        if argv[1:] != ['--print']:
+            print("Usage: samosa jobs launchd-plist --print", file=sys.stderr)
+            return 2
+        program = [sys.executable, os.path.abspath(__file__), 'jobsd-once']
+        print(launchd_plist(program), end='')
+        return 0
+    if cmd == 'jobsd-once':
+        print(json.dumps(jobsd_once(), indent=2, sort_keys=True))
+        return 0
     if cmd == 'run':
         rest = [a for a in argv[1:] if a != '--execute']
         mode = 'execute' if '--execute' in argv[1:] else 'confirm'
