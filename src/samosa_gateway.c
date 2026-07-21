@@ -26,6 +26,7 @@ typedef struct {
     SamosaHttpServer *server;
     pthread_mutex_t mu;
     pid_t backend_pid;
+    pid_t job_pids[16];
     int upstream_fd;
     atomic_int generating;
     atomic_int stopping;
@@ -114,7 +115,19 @@ static int write_small_file(const char *path, const char *text) {
     return ok;
 }
 
-static char *run_capture(const char *program, char *const argv[], size_t limit, int *status) {
+static void track_job_pid(Gateway *g, pid_t pid, int add) {
+    pthread_mutex_lock(&g->mu);
+    if (add) {
+        for (size_t i = 0; i < sizeof(g->job_pids) / sizeof(g->job_pids[0]); ++i)
+            if (!g->job_pids[i]) { g->job_pids[i] = pid; break; }
+    } else {
+        for (size_t i = 0; i < sizeof(g->job_pids) / sizeof(g->job_pids[0]); ++i)
+            if (g->job_pids[i] == pid) { g->job_pids[i] = 0; break; }
+    }
+    pthread_mutex_unlock(&g->mu);
+}
+
+static char *run_capture(Gateway *g, const char *program, char *const argv[], size_t limit, int *status) {
     int pipefd[2];
     if (pipe(pipefd)) return NULL;
     pid_t pid = fork();
@@ -123,16 +136,16 @@ static char *run_capture(const char *program, char *const argv[], size_t limit, 
         close(pipefd[0]); dup2(pipefd[1], STDOUT_FILENO); close(pipefd[1]);
         execv(program, argv); _Exit(127);
     }
-    close(pipefd[1]);
+    close(pipefd[1]); track_job_pid(g, pid, 1);
     char *output = malloc(limit + 1); size_t used = 0;
-    if (!output) { close(pipefd[0]); kill(pid, SIGKILL); waitpid(pid, NULL, 0); return NULL; }
+    if (!output) { close(pipefd[0]); kill(pid, SIGKILL); waitpid(pid, NULL, 0); track_job_pid(g, pid, 0); return NULL; }
     while (used < limit) {
         ssize_t n = read(pipefd[0], output + used, limit - used);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) break;
         used += (size_t)n;
     }
-    close(pipefd[0]); waitpid(pid, status, 0); output[used] = 0;
+    close(pipefd[0]); waitpid(pid, status, 0); track_job_pid(g, pid, 0); output[used] = 0;
     if (used == limit) { free(output); return NULL; }
     return output;
 }
@@ -202,6 +215,8 @@ static char *backend_json(Gateway *g, const char *payload) {
     if (!backend_probe(g)) return NULL;
     int fd = tcp_connect(g->backend_port);
     if (fd < 0) return NULL;
+    pthread_mutex_lock(&g->mu); g->upstream_fd = fd; pthread_mutex_unlock(&g->mu);
+    atomic_store(&g->generating, 1);
     char header[512];
     int n = snprintf(header, sizeof(header),
         "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
@@ -210,7 +225,8 @@ static char *backend_json(Gateway *g, const char *payload) {
     if (n <= 0 || (size_t)n >= sizeof(header) ||
         !samosa_send_all(fd, header, (size_t)n) ||
         !samosa_send_all(fd, payload, strlen(payload))) {
-        close(fd); return NULL;
+        pthread_mutex_lock(&g->mu); if (g->upstream_fd == fd) g->upstream_fd = -1; pthread_mutex_unlock(&g->mu);
+        atomic_store(&g->generating, 0); close(fd); return NULL;
     }
     TextBuffer response = {0}; char chunk[65536];
     while (response.len < SAMOSA_HTTP_MAX_BODY + SAMOSA_HTTP_MAX_HEADER) {
@@ -219,7 +235,8 @@ static char *backend_json(Gateway *g, const char *payload) {
         if (got <= 0) break;
         if (!text_add_n(&response, chunk, (size_t)got)) break;
     }
-    close(fd);
+    pthread_mutex_lock(&g->mu); if (g->upstream_fd == fd) g->upstream_fd = -1; pthread_mutex_unlock(&g->mu);
+    atomic_store(&g->generating, 0); close(fd);
     if (!response.data || !strstr(response.data, " 200 ")) {
         free(response.data); return NULL;
     }
@@ -335,7 +352,7 @@ static char *tool_result(Gateway *g, const char *folder, const char *name, jval 
         return strdup("That path is not a regular file inside the selected folder.");
     if (!strcmp(name, "fs_metadata")) {
         char *argv[] = {g->samosa_fs, "metadata", "--max-file-bytes", "104857600", absolute, NULL};
-        int status = 0; char *raw = run_capture(g->samosa_fs, argv, 1 << 20, &status);
+        int status = 0; char *raw = run_capture(g, g->samosa_fs, argv, 1 << 20, &status);
         if (!raw || !WIFEXITED(status) || WEXITSTATUS(status)) { free(raw); return strdup("File details could not be read."); }
         return raw;
     }
@@ -350,7 +367,7 @@ static char *tool_result(Gateway *g, const char *folder, const char *name, jval 
         snprintf(start_text, sizeof(start_text), "%d", start);
         snprintf(count_text, sizeof(count_text), "%d", pages);
         char *argv[] = {g->samosa_extract, "--json-pages", absolute, start_text, count_text, NULL};
-        int status = 0; char *raw = run_capture(g->samosa_extract, argv, 1 << 20, &status);
+        int status = 0; char *raw = run_capture(g, g->samosa_extract, argv, 1 << 20, &status);
         if (!raw || !WIFEXITED(status) || WEXITSTATUS(status)) { free(raw); return strdup("Those document pages could not be extracted."); }
         return raw;
     }
@@ -366,7 +383,7 @@ static const char *find_tools_json =
 static int jobs_find(Gateway *g, int fd, const char *goal, const char *folder,
                      jval *survey, const char *job_id, int start_seq) {
     char *argv[] = {g->samosa_fs, "list", "--max-file-bytes", "104857600", (char *)folder, NULL};
-    int status = 0; char *list_raw = run_capture(g->samosa_fs, argv, 16 << 20, &status);
+    int status = 0; char *list_raw = run_capture(g, g->samosa_fs, argv, 16 << 20, &status);
     char *arena = NULL; jval *listing = list_raw ? json_parse(list_raw, &arena) : NULL;
     jval *items = listing && listing->t == J_OBJ ? json_get(listing, "items") : NULL;
     if (!items || items->t != J_ARR || !WIFEXITED(status) || WEXITSTATUS(status)) {
@@ -493,7 +510,7 @@ static int jobs_report(Gateway *g, int fd, const char *goal, const char *folder)
     char *argv[] = {g->samosa_fs, "survey", "--max-file-bytes", "104857600",
                     (char *)folder, NULL};
     int status = 0;
-    char *raw = run_capture(g->samosa_fs, argv, 1 << 20, &status);
+    char *raw = run_capture(g, g->samosa_fs, argv, 1 << 20, &status);
     if (!raw || !WIFEXITED(status) || WEXITSTATUS(status)) {
         free(raw); return samosa_http_json_error(fd, 400, "folder_scan_failed", "The folder could not be inspected.");
     }
@@ -632,6 +649,16 @@ static void backend_stop(Gateway *g) {
     }
     kill(pid, SIGKILL);
     waitpid(pid, NULL, 0);
+}
+
+static void jobs_stop(Gateway *g) {
+    pid_t pids[16] = {0};
+    pthread_mutex_lock(&g->mu);
+    memcpy(pids, g->job_pids, sizeof(pids));
+    memset(g->job_pids, 0, sizeof(g->job_pids));
+    pthread_mutex_unlock(&g->mu);
+    for (size_t i = 0; i < sizeof(pids) / sizeof(pids[0]); ++i)
+        if (pids[i] > 0) kill(pids[i], SIGKILL);
 }
 
 static int backend_start(Gateway *g) {
@@ -813,6 +840,7 @@ static int gateway_handler(SamosaHttpServer *server, int fd,
         (!strcmp(request->path, "/v1/shutdown") || !strcmp(request->path, "/v1/kill"))) {
         atomic_store(&g->stopping, 1);
         samosa_http_response(fd, 200, "application/json", "{\"stopping\":true}", NULL);
+        jobs_stop(g);
         backend_stop(g);
         samosa_http_server_stop(server);
         return 1;
@@ -893,6 +921,7 @@ int main(void) {
     fprintf(stderr, "[gateway] compiled ready http://127.0.0.1:%d backend=%s\n",
             server.port, gateway.backend); fflush(stderr);
     int ok = samosa_http_server_run(&server);
+    jobs_stop(&gateway);
     backend_stop(&gateway);
     samosa_http_server_destroy(&server);
     pthread_mutex_destroy(&gateway.mu);

@@ -24,6 +24,14 @@ printf '<!doctype html><title>Compiled Samosa</title>\n' >"$TMP/app.html"
 printf 'png\n' >"$TMP/logo.png"
 /bin/mkdir "$TMP/files"
 printf "Titli vaccination record, rabies booster 2026.\n" >"$TMP/files/cat-medical-note.txt"
+/bin/mkdir "$TMP/slow"
+printf '%s\n' '#!/bin/sh' \
+  'last=""; for arg do last=$arg; done' \
+  'case "$last" in' \
+  '  */slow) printf "%s\\n" "$$" >"'$TMP'/slow-sidecar.pid"; exec /bin/sleep 30 ;;' \
+  'esac' \
+  'exec "'$ROOT'/samosa-fs" "$@"' >"$TMP/samosa-fs-wrapper"
+/bin/chmod +x "$TMP/samosa-fs-wrapper"
 
 # Deliberately expose no external executable through PATH. All utilities used
 # below have absolute paths; the gateway/backend receive the same environment.
@@ -42,7 +50,7 @@ SAMOSA_APP_HTML="$TMP/app.html" \
 SAMOSA_APP_LOGO="$TMP/logo.png" \
 SAMOSA_BONSAI_SERVER="$BACKEND" \
 SAMOSA_ORNITH_MODEL="$HOME_DIR/models/ornith-9b/Ornith-1.0-9B-Q4_K_M.gguf" \
-SAMOSA_FS="$ROOT/samosa-fs" \
+SAMOSA_FS="$TMP/samosa-fs-wrapper" \
 SAMOSA_EXTRACT="$ROOT/samosa-extract" \
 "$GATEWAY" >"$TMP/gateway.log" 2>&1 &
 PID=$!
@@ -78,7 +86,22 @@ if printf '%s' "$find" | /usr/bin/grep -q 'samosa_tool'; then
   echo "compiled find leaked tool protocol" >&2
   exit 1
 fi
-/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/shutdown" >/dev/null
+
+/usr/bin/curl -sS -X POST "http://127.0.0.1:$PORT/v1/jobs/run" \
+  -H 'Content-Type: application/json' \
+  --data-binary "{\"goal\":\"report what is here\",\"folder\":\"$TMP/slow\"}" \
+  >"$TMP/slow-result" 2>/dev/null &
+SLOW_CURL=$!
+i=0
+while [ "$i" -lt 100 ] && [ ! -s "$TMP/slow-sidecar.pid" ]; do /bin/sleep 0.02; i=$((i + 1)); done
+[ -s "$TMP/slow-sidecar.pid" ]
+SIDE_PID=$(/bin/cat "$TMP/slow-sidecar.pid")
+/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/kill" >/dev/null
+wait "$SLOW_CURL" 2>/dev/null || true
+if /bin/kill -0 "$SIDE_PID" 2>/dev/null; then
+  echo "kill route left a Jobs sidecar running" >&2
+  exit 1
+fi
 wait "$PID"
 PID=""
 echo "compiled gateway without python: PASS"
