@@ -28,6 +28,7 @@ SSRF, and provider config. `run_tool_loop` is the shared agent loop used by both
 chat (web tools) and jobs (fs + web tools).
 """
 
+import datetime
 import json
 import os
 import re
@@ -49,11 +50,12 @@ class ToolContext:
     emit  — callback(event_type, **fields) for the live action stream.
     """
 
-    def __init__(self, root, mode='preview', emit=None):
+    def __init__(self, root, mode='preview', emit=None, job_dir=None):
         self.root = os.path.realpath(root)
         if not os.path.isdir(self.root):
             raise ToolError(f"working directory does not exist: {root}")
         self.mode = mode
+        self.job_dir = job_dir
         self._emit = emit or (lambda *a, **k: None)
 
     def emit(self, event_type, **fields):
@@ -208,14 +210,13 @@ def execute_tool(call, ctx, tools):
         return f"tool {name} failed: {e}"
 
 
-def run_tool_loop(model_call, messages, tools, ctx, max_rounds=MAX_TOOL_ROUNDS):
-    """Drive a model through a tool-using conversation.
+def iter_tool_loop(model_call, messages, tools, ctx, max_rounds=MAX_TOOL_ROUNDS):
+    """Drive a model through a tool-using conversation, yielding loop events.
 
     model_call(messages) -> assistant_text. `messages` is an OpenAI-style list;
     the ability prompt is appended to the system message here. Each tool call
     fires ctx.emit('tool_call', ...) and, when it returns, is fed back as the
-    next user turn beginning SAMOSA_TOOL_RESULT. Returns the model's final
-    plain-text answer (or the last tool result if the round budget runs out).
+    next user turn beginning SAMOSA_TOOL_RESULT.
     """
     convo = [dict(m) for m in messages]
     system_add = ability_prompt(tools)
@@ -229,8 +230,10 @@ def run_tool_loop(model_call, messages, tools, ctx, max_rounds=MAX_TOOL_ROUNDS):
         text = model_call(convo)
         kind, call = classify_reply(text or '')
         if kind != 'tool':
-            return text
+            yield {'type': 'final', 'text': text}
+            return
         result = execute_tool(call, ctx, tools)
+        yield {'type': 'tool_result', 'call': call, 'result': result}
         last_result = result
         remaining = max_rounds - round_i - 1
         note = ("\n\n(No tool calls remain; answer now.)" if remaining <= 0
@@ -238,7 +241,16 @@ def run_tool_loop(model_call, messages, tools, ctx, max_rounds=MAX_TOOL_ROUNDS):
         convo.append({'role': 'assistant', 'content': (text or '').strip()})
         convo.append({'role': 'user',
                       'content': f"SAMOSA_TOOL_RESULT {call.get('samosa_tool', '')}\n{result}{note}"})
-    return last_result
+    yield {'type': 'final', 'text': last_result}
+
+
+def run_tool_loop(model_call, messages, tools, ctx, max_rounds=MAX_TOOL_ROUNDS):
+    """Compatibility wrapper returning only the final answer."""
+    final = ''
+    for event in iter_tool_loop(model_call, messages, tools, ctx, max_rounds=max_rounds):
+        if event.get('type') == 'final':
+            final = event.get('text') or ''
+    return final
 
 
 # --- Filesystem tools (backed by jobs_fs) ----------------------------------
@@ -254,34 +266,56 @@ def _read_header(path, n=16):
 def _tool_fs_survey(args, ctx):
     """Count files under the working folder, grouped by detected type."""
     recursive = bool(args.get('recursive', True))
-    items, skipped = fs.discover_files(
-        {'folder': ctx.root, 'recursive': recursive}, is_metadata_only=True)
-    summary = fs.count_by_type(items)
-    ctx.emit('survey', total=len(items), skipped=len(skipped),
-             by_type={k: v['count'] for k, v in summary.items()})
-    parts = [f"{v['count']} {k}" for k, v in sorted(summary.items())]
-    return f"{len(items)} files under the folder: " + (", ".join(parts) or "none")
+    payload, error = fs.fs_sidecar_survey(ctx.root, recursive=recursive)
+    if error:
+        raise ToolError(error)
+    by_type = payload.get('by_type', {})
+    counts = {k: v.get('count', 0) for k, v in by_type.items() if isinstance(v, dict)}
+    ctx.emit('survey', total=payload.get('total', 0), skipped=payload.get('skipped_count', 0),
+             by_type=counts)
+    parts = [f"{v} {k}" for k, v in sorted(counts.items())]
+    return f"{payload.get('total', 0)} files under the folder: " + (", ".join(parts) or "none")
 
 
 def _tool_fs_list(args, ctx):
-    """List entries in a folder (name + detected type), bounded."""
+    """List files in a folder with detected type, size, and mtime."""
     target = ctx.resolve(args.get('path', '.'), must_exist=True)
     limit = int(args.get('limit', 200))
+    recursive = bool(args.get('recursive', False))
+    items, skipped, error = fs.fs_sidecar_list(target, recursive=recursive)
+    if error:
+        raise ToolError(error)
     rows = []
-    try:
-        entries = sorted(os.scandir(target), key=lambda e: e.name)
-    except OSError as e:
-        raise ToolError(str(e))
-    for entry in entries[:limit]:
-        if entry.is_symlink():
-            kind = 'symlink'
-        elif entry.is_dir():
-            kind = 'dir'
-        else:
-            kind = fs.detect_media_type(_read_header(entry.path)) or 'file'
-        rows.append(f"{entry.name}\t{kind}")
-    more = '' if len(entries) <= limit else f"\n… {len(entries) - limit} more"
+    for item in items[:limit]:
+        rel = os.path.relpath(item['input_path'], ctx.root)
+        rows.append(f"{rel}\t{item['media_type']}\t{item['size']} bytes\t{_format_mtime(item.get('mtime'))}")
+    more = '' if len(items) <= limit else f"\n… {len(items) - limit} more"
+    if skipped:
+        more += f"\n… {len(skipped)} skipped"
     return "\n".join(rows) + more if rows else "(empty)"
+
+
+def _format_mtime(value):
+    try:
+        return datetime.datetime.fromtimestamp(float(value), datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    except (TypeError, ValueError, OSError):
+        return "mtime_unknown"
+
+
+def _tool_fs_metadata(args, ctx):
+    """Return metadata for one file."""
+    target = ctx.resolve(args.get('path'), must_exist=True)
+    payload, error = fs.fs_sidecar_metadata(target)
+    if error:
+        raise ToolError(error)
+    rel = os.path.relpath(payload.get('path', target), ctx.root)
+    return "\n".join([
+        f"path\t{rel}",
+        f"type\t{payload.get('media_type', 'application/octet-stream')}",
+        f"size\t{payload.get('size', 0)} bytes",
+        f"mtime\t{_format_mtime(payload.get('mtime'))}",
+        f"sha256\t{payload.get('input_sha256', '')}",
+    ])
 
 
 def _tool_fs_detect_type(args, ctx):
@@ -326,6 +360,59 @@ def _tool_fs_read_document(args, ctx):
     return header + body if body.strip() else header + "(no extractable text)"
 
 
+def _tool_fs_read_page(args, ctx):
+    """Read one page of a document, using the document sidecar."""
+    target = ctx.resolve(args.get('path'), must_exist=True)
+    try:
+        page_number = int(args.get('page', 1))
+    except (TypeError, ValueError):
+        raise ToolError("page must be an integer")
+    if page_number < 1:
+        raise ToolError("page must be 1 or greater")
+    max_chars = int(args.get('max_chars', 4000))
+    result, error = fs.extract_document(target)
+    if error:
+        raise ToolError(error)
+    pages = result['pages']
+    for page in pages:
+        if page.get('index') == page_number:
+            text = page.get('text', '')
+            body = text[:max_chars] + ("\n... (truncated)" if len(text) > max_chars else "")
+            return f"[page {page_number} of {len(pages)}]\n" + (body if body.strip() else "(no extractable text)")
+    raise ToolError(f"page out of range: {page_number}")
+
+
+def _notes_path(ctx):
+    job_dir = getattr(ctx, 'job_dir', None)
+    if not job_dir:
+        raise ToolError("notes are only available inside a job")
+    os.makedirs(job_dir, exist_ok=True)
+    return os.path.join(job_dir, 'notes.txt')
+
+
+def _tool_notes_append(args, ctx):
+    """Append a note to the job-local notes file."""
+    text = str(args.get('text', ''))[:4000]
+    if not text.strip():
+        raise ToolError("note text is required")
+    path = _notes_path(ctx)
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(text.rstrip() + "\n")
+    ctx.emit('notes', op='append', bytes=len(text.encode('utf-8')))
+    return "note saved"
+
+
+def _tool_notes_read(args, ctx):
+    """Read the job-local notes file."""
+    path = _notes_path(ctx)
+    try:
+        with open(path, encoding='utf-8') as f:
+            text = f.read(12000)
+    except OSError:
+        return "(no notes yet)"
+    return text if text.strip() else "(no notes yet)"
+
+
 def _tool_fs_mkdir(args, ctx):
     """Create a directory (and parents) inside the working folder."""
     if not is_valid_reldir(args.get('path')):
@@ -367,8 +454,13 @@ def register_fs_tools(registry=REGISTRY):
         _tool_fs_survey, mutating=False))
     registry.register(Tool(
         'fs_list', "list files in a folder with their types",
-        [('path', False, 'subfolder to list (default the working folder)')],
+        [('path', False, 'subfolder to list (default the working folder)'),
+         ('limit', False, 'maximum rows to return')],
         _tool_fs_list, mutating=False))
+    registry.register(Tool(
+        'fs_metadata', "inspect one file's size, modified time, SHA-256, and content type",
+        [('path', True, 'file to inspect')],
+        _tool_fs_metadata, mutating=False))
     registry.register(Tool(
         'fs_detect_type', "detect one file's type by its contents",
         [('path', True, 'file to inspect')],
@@ -381,6 +473,18 @@ def register_fs_tools(registry=REGISTRY):
         'fs_read_document', "read the text of a PDF (or other document) — extracts the content",
         [('path', True, 'file to read')],
         _tool_fs_read_document, mutating=False))
+    registry.register(Tool(
+        'fs_read_page', "read one page from a PDF or document",
+        [('path', True, 'file to read'), ('page', True, '1-based page number')],
+        _tool_fs_read_page, mutating=False))
+    registry.register(Tool(
+        'notes_append', "save a short note for this job",
+        [('text', True, 'note to save')],
+        _tool_notes_append, mutating=False))
+    registry.register(Tool(
+        'notes_read', "read notes saved during this job",
+        [],
+        _tool_notes_read, mutating=False))
     registry.register(Tool(
         'fs_mkdir', "create a folder",
         [('path', True, 'folder name to create')],

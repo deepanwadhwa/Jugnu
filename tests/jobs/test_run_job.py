@@ -54,6 +54,15 @@ class JobsLayerTest(unittest.TestCase):
         intent = J.decode_intent("how many files are in here?", self.inbox)
         self.assertEqual(intent['kind'], 'report')
 
+    def test_decode_find(self):
+        intent = J.decode_intent("find Titli's medical record", self.inbox)
+        self.assertEqual(intent['kind'], 'find')
+
+    def test_decode_find_file_path_is_not_organize(self):
+        intent = J.decode_intent("find Titli's vaccination medical record and tell me the file path",
+                                 self.inbox)
+        self.assertEqual(intent['kind'], 'find')
+
     def test_decode_ambiguous_defaults_to_report_without_model(self):
         intent = J.decode_intent("do something with these", self.inbox)
         self.assertEqual(intent['kind'], 'report')
@@ -63,10 +72,19 @@ class JobsLayerTest(unittest.TestCase):
                                  model_call=lambda msgs: "organize")
         self.assertEqual(intent['kind'], 'organize')
 
+    def test_decode_ambiguous_uses_model_for_find(self):
+        intent = J.decode_intent("Titli medical record", self.inbox,
+                                 model_call=lambda msgs: "find")
+        self.assertEqual(intent['kind'], 'find')
+
     def test_model_cannot_upgrade_report_to_organize(self):
         # An explicit report request stays read-only even if the model says organize.
         intent = J.decode_intent("count the files", self.inbox,
                                  model_call=lambda msgs: "organize")
+        self.assertEqual(intent['kind'], 'report')
+
+        intent = J.decode_intent("count the files", self.inbox,
+                                 model_call=lambda msgs: "find")
         self.assertEqual(intent['kind'], 'report')
 
     # --- report ------------------------------------------------------------
@@ -81,6 +99,33 @@ class JobsLayerTest(unittest.TestCase):
         # a report never plans or moves
         self.assertNotIn('plan', by)
         self.assertNotIn('action', by)
+
+    # --- find --------------------------------------------------------------
+
+    def test_find_runs_read_only_tool_loop(self):
+        scripted = [
+            '{"samosa_tool":"fs_list","path":"."}',
+            '{"samosa_tool":"fs_read_text","path":"a.txt"}',
+            'Found it at a.txt because the file contains hello world.',
+        ]
+
+        def loop_model_call(messages):
+            return scripted.pop(0)
+
+        events, by = drain(J.run_job("find the hello world note", self.inbox,
+                                     mode='confirm', loop_model_call=loop_model_call))
+        self.assertEqual(by['intent'][0]['kind'], 'find')
+        self.assertNotIn('plan', by)
+        self.assertNotIn('action', by)
+        self.assertEqual([e['tool'] for e in by['tool_call']], ['fs_list', 'fs_read_text'])
+        self.assertIn('a.txt', by['done'][0]['summary'])
+        self.assertTrue(os.path.exists(os.path.join(self.inbox, 'a.txt')))
+
+        job_id = by['decode_intent'][0]['job_id']
+        log_path = os.path.join(self.jobsroot, job_id, 'events.jsonl')
+        with open(log_path) as f:
+            logged = [line for line in f if '"type":"tool_call"' in line]
+        self.assertEqual(len(logged), 2)
 
     # --- organize: confirm then apply -------------------------------------
 

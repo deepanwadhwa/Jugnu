@@ -1086,6 +1086,17 @@ class Handler(BaseHTTPRequestHandler):
         is not available or busy, so the jobs layer falls back to its
         deterministic (and safe, read-only) default rather than blocking.
         """
+        return self._jobs_completion(messages, max_tokens=64)
+
+    def jobs_tool_loop_model_call(self, messages: list) -> str | None:
+        """Run one non-streaming completion for a Jobs tool-loop turn.
+
+        Same admission discipline as the 64-token classifier, but with a larger
+        answer budget so the model can emit a tool call or final find summary.
+        """
+        return self._jobs_completion(messages, max_tokens=512)
+
+    def _jobs_completion(self, messages: list, max_tokens: int) -> str | None:
         status = supervisor.status()
         if not status.get("ready"):
             return None
@@ -1097,7 +1108,7 @@ class Handler(BaseHTTPRequestHandler):
         response = None
         try:
             payload = {"messages": messages, "stream": False, "thinking": "off",
-                       "temperature": 0, "max_tokens": 64}
+                       "temperature": 0, "max_tokens": max_tokens}
             conn, response = self.backend_chat(payload)
             raw = response.read()
             if response.status != 200:
@@ -1133,7 +1144,8 @@ class Handler(BaseHTTPRequestHandler):
             if not goal or not folder:
                 self.json_response(400, {"error": {"message": "goal and folder are required"}})
                 return
-            gen = samosa_jobs.run_job(goal, folder, mode=mode, model_call=self.jobs_model_call)
+            gen = samosa_jobs.run_job(goal, folder, mode=mode, model_call=self.jobs_model_call,
+                                      loop_model_call=self.jobs_tool_loop_model_call)
         elif kind in ("apply", "undo"):
             job_id = str(data.get("job_id", "")).strip()
             if not job_id:

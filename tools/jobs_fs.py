@@ -81,6 +81,25 @@ def sha256_bytes(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def read_up_to(fd, limit):
+    """Read at most `limit` bytes from an open fd. Returns (data, truncated).
+
+    Chunks are joined once at the end rather than accumulated with repeated
+    `bytes +=` (which reallocates and copies the whole buffer on every append
+    — O(n^2) time and up to 2x peak memory for a large file).
+    """
+    chunks = []
+    total = 0
+    while total < limit:
+        chunk = os.read(fd, min(1 << 20, limit - total))
+        if not chunk:
+            return b''.join(chunks), False
+        chunks.append(chunk)
+        total += len(chunk)
+    truncated = bool(os.read(fd, 1))
+    return b''.join(chunks), truncated
+
+
 def fsync_dir(path):
     """fsync a directory so a rename inside it is durable."""
     fd = os.open(str(path), os.O_RDONLY)
@@ -176,6 +195,7 @@ _EXTRACTOR_ERROR_MESSAGES = {
 }
 
 _EXTRACTOR_TIMEOUT_S = 25
+_FS_SIDECAR_TIMEOUT_S = 15
 
 
 def find_extractor():
@@ -202,6 +222,102 @@ def find_extractor():
         return str(dev_tree)
 
     return shutil.which('samosa-extract')
+
+
+def find_fs_sidecar():
+    """Locate the samosa-fs sidecar binary, or None if unavailable."""
+    configured = os.environ.get('SAMOSA_FS')
+    if configured and os.path.isfile(configured) and os.access(configured, os.X_OK):
+        return configured
+
+    here = Path(__file__).resolve().parent
+    sibling = here / 'samosa-fs'
+    if sibling.is_file() and os.access(str(sibling), os.X_OK):
+        return str(sibling)
+
+    dev_tree = here.parent / 'samosa-fs'
+    if dev_tree.is_file() and os.access(str(dev_tree), os.X_OK):
+        return str(dev_tree)
+
+    dist_tree = here.parent / 'dist' / 'samosa-fs'
+    if dist_tree.is_file() and os.access(str(dist_tree), os.X_OK):
+        return str(dist_tree)
+
+    return shutil.which('samosa-fs')
+
+
+def run_fs_sidecar(args, timeout=_FS_SIDECAR_TIMEOUT_S):
+    """Run samosa-fs and return its JSON payload or (None, reason)."""
+    binary = find_fs_sidecar()
+    if not binary:
+        return None, "the filesystem sidecar is not installed in this release"
+    try:
+        proc = subprocess.Popen(
+            [binary, *args],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
+        try:
+            stdout, _stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            proc.communicate()
+            return None, "filesystem metadata scan took too long and was stopped"
+    except OSError as e:
+        return None, f"the filesystem sidecar could not be run: {e}"
+
+    try:
+        payload = json.loads(stdout)
+    except (TypeError, ValueError):
+        return None, "the filesystem sidecar returned an unexpected response"
+    if not isinstance(payload, dict):
+        return None, "the filesystem sidecar returned an unexpected response"
+    if not payload.get('ok'):
+        code = payload.get('error') if isinstance(payload.get('error'), str) else 'unknown error'
+        return None, code
+    return payload, None
+
+
+def fs_sidecar_list(folder, recursive=False, max_file_bytes=MAX_FILE_BYTES_DEFAULT):
+    args = ['list']
+    if recursive:
+        args.append('--recursive')
+    args.extend(['--max-file-bytes', str(max_file_bytes), folder])
+    payload, error = run_fs_sidecar(args)
+    if error:
+        return None, None, error
+    items = [{
+        'input_path': item.get('path'),
+        'input_sha256': item.get('input_sha256'),
+        'media_type': item.get('media_type'),
+        'size': item.get('size'),
+        'mtime': item.get('mtime'),
+        'name': item.get('name'),
+    } for item in payload.get('items', []) if isinstance(item, dict)]
+    skipped = [(s.get('path'), s.get('reason')) for s in payload.get('skipped', [])
+               if isinstance(s, dict)]
+    return items, skipped, None
+
+
+def fs_sidecar_survey(folder, recursive=False, max_file_bytes=MAX_FILE_BYTES_DEFAULT):
+    args = ['survey']
+    if recursive:
+        args.append('--recursive')
+    args.extend(['--max-file-bytes', str(max_file_bytes), folder])
+    payload, error = run_fs_sidecar(args)
+    if error:
+        return None, error
+    return payload, None
+
+
+def fs_sidecar_metadata(path, max_file_bytes=MAX_FILE_BYTES_DEFAULT):
+    payload, error = run_fs_sidecar(['metadata', '--max-file-bytes', str(max_file_bytes), path])
+    if error:
+        return None, error
+    return payload, None
 
 
 def extract_document(path, extractor=None, timeout=_EXTRACTOR_TIMEOUT_S):
@@ -320,12 +436,16 @@ def discover_files(input_config, allowed_types=None, is_metadata_only=False):
                 skipped.append((path, "empty file"))
                 continue
 
-            data = b''
-            while True:
-                chunk = os.read(fd, 1 << 20)
-                if not chunk:
-                    break
-                data += chunk
+            # Metadata-only scans (a read-only "report" job's folder survey)
+            # used to read arbitrarily large files in full just to sniff their
+            # type — one big file in the scanned folder (a disk image, a
+            # video, a VM export: normal contents for a Downloads folder)
+            # pulled its whole size into memory for what's supposed to be a
+            # lightweight count. Cap the read at max_bytes always; a
+            # truncated file still gets a magic-byte type and its real size
+            # from stat, it just skips full-content UTF-8 sniffing and is
+            # hashed (for dedup) over the truncated prefix instead.
+            data, truncated = read_up_to(fd, max_bytes)
 
             # Re-fstat to detect a change during the read.
             st2 = os.fstat(fd)
@@ -335,7 +455,8 @@ def discover_files(input_config, allowed_types=None, is_metadata_only=False):
         finally:
             os.close(fd)
 
-        file_hash = sha256_bytes(data)
+        digest_input = data if not truncated else data + b'\0truncated\0' + str(st.st_size).encode()
+        file_hash = sha256_bytes(digest_input)
         if file_hash in seen_hashes:
             skipped.append((path, "duplicate content (same SHA-256 as earlier file)"))
             continue
@@ -343,7 +464,7 @@ def discover_files(input_config, allowed_types=None, is_metadata_only=False):
 
         media_type = detect_media_type(data[:8])
         if media_type is None:
-            if is_valid_utf8_text(data):
+            if not truncated and is_valid_utf8_text(data):
                 media_type = 'text/plain'
             elif is_metadata_only:
                 media_type = 'application/octet-stream'
@@ -359,7 +480,7 @@ def discover_files(input_config, allowed_types=None, is_metadata_only=False):
             'input_path': path,
             'input_sha256': file_hash,
             'media_type': media_type,
-            'size': len(data),
+            'size': st.st_size,
         })
 
     return items, skipped

@@ -34,6 +34,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import jobs_fs as fs
+import samosa_tools
 from samosa_tools import ToolContext
 
 
@@ -61,23 +62,29 @@ def job_dir_for(job_id):
 
 # --- Intent decode ---------------------------------------------------------
 
-_ORGANIZE_RE = re.compile(r'\b(organi[sz]e|sort|arrange|tidy|group|file)\b')
+_ORGANIZE_RE = re.compile(r'\b(organi[sz]e|sort|arrange|tidy|group)\b')
 _BY_TYPE_RE = re.compile(r'\b(type|types|kind|extension|extensions|format|formats|file type)\b')
 _REPORT_RE = re.compile(r'\b(report|count|how many|summar|inventory|breakdown|what.?s in)\b')
+_FIND_RE = re.compile(r'\b(find|locate|search|look for|where is|which file)\b')
 
 
 def decode_intent(goal, folder, model_call=None):
     """Map a natural-language goal to a structured, deterministic intent.
 
-    Returns {kind, rule?, explain}. `kind` is 'organize' (moves files) or
-    'report' (read-only). Keyword rules resolve the common cases with no model;
-    `model_call`, when given, is used only to refine an ambiguous goal and can
-    never turn a report into a destructive move on its own.
+    Returns {kind, rule?, explain}. `kind` is 'organize' (moves files),
+    'report' (read-only), or 'find' (read-only tool loop). Keyword rules
+    resolve the common cases with no model; `model_call`, when given, is used
+    only to refine an ambiguous goal and can never turn an explicit read-only
+    request into a destructive move on its own.
     """
     g = (goal or '').lower()
     if _REPORT_RE.search(g) and not _ORGANIZE_RE.search(g):
         return {'kind': 'report',
                 'explain': "Look through the folder and report what is there, by file type."}
+
+    if _FIND_RE.search(g) and not _ORGANIZE_RE.search(g):
+        return {'kind': 'find',
+                'explain': "Search through the folder using read-only tools and report the matching path."}
 
     if _ORGANIZE_RE.search(g):
         # "by type"/"by extension" → the deterministic extension rule.
@@ -93,12 +100,17 @@ def decode_intent(goal, folder, model_call=None):
                 {'role': 'system',
                  'content': "Classify a file-management request. Reply with ONE word: "
                             "'organize' if the user wants files sorted/moved into folders "
-                            "by type, otherwise 'report'. No other words."},
+                            "by type; 'find' if the user wants to locate a specific file "
+                            "or record; otherwise 'report'. No other words."},
                 {'role': 'user', 'content': goal},
             ])
-            if reply and 'organize' in reply.strip().lower()[:20]:
+            label = (reply or '').strip().lower()[:20]
+            if 'organize' in label:
                 return {'kind': 'organize', 'rule': {'by': 'extension'},
                         'explain': "Sort the files into folders named for their type."}
+            if 'find' in label:
+                return {'kind': 'find',
+                        'explain': "Search through the folder using read-only tools and report the matching path."}
         except Exception:
             pass
 
@@ -120,7 +132,12 @@ class _Emitter:
         return evt
 
 
-def run_job(goal, folder, mode='confirm', model_call=None):
+FIND_TOOLS = ['fs_survey', 'fs_list', 'fs_metadata', 'fs_detect_type',
+              'fs_read_text', 'fs_read_document', 'fs_read_page',
+              'notes_append', 'notes_read']
+
+
+def run_job(goal, folder, mode='confirm', model_call=None, loop_model_call=None):
     """Run a job, yielding event dicts as it goes.
 
     mode:
@@ -149,15 +166,56 @@ def run_job(goal, folder, mode='confirm', model_call=None):
     yield log.append('intent', kind=intent['kind'], rule=intent.get('rule'),
                      explain=intent['explain'])
 
-    # Survey / count — the same for every kind.
-    items, skipped = fs.discover_files({'folder': folder, 'recursive': False},
-                                       is_metadata_only=True)
-    by_type = {k: v['count'] for k, v in fs.count_by_type(items).items()}
-    yield log.append('counting', total=len(items), skipped=len(skipped), by_type=by_type)
+    # Survey / count — the same for every kind. This uses the compiled
+    # metadata sidecar so large-file scans are contained outside the gateway.
+    survey, survey_error = fs.fs_sidecar_survey(folder, recursive=False)
+    if survey_error:
+        yield log.append('error', message=survey_error)
+        return
+    by_type = {k: v.get('count', 0) for k, v in survey.get('by_type', {}).items()
+               if isinstance(v, dict)}
+    total = int(survey.get('total', 0))
+    skipped_count = int(survey.get('skipped_count', 0))
+    yield log.append('counting', total=total, skipped=skipped_count, by_type=by_type)
 
     if intent['kind'] == 'report':
-        yield log.append('report', total=len(items), by_type=by_type)
-        yield log.append('done', summary=_report_summary(len(items), by_type))
+        yield log.append('report', total=total, by_type=by_type)
+        yield log.append('done', summary=_report_summary(total, by_type))
+        return
+
+    if intent['kind'] == 'find':
+        call_model = loop_model_call or model_call
+        if call_model is None:
+            yield log.append('error', message="the model is not available for find jobs")
+            return
+        pending = []
+
+        def emit_tool_event(event_type, **fields):
+            pending.append(log.append(event_type, **fields))
+
+        ctx = ToolContext(folder, mode='preview', emit=emit_tool_event, job_dir=jdir)
+        tools = samosa_tools.REGISTRY.subset(FIND_TOOLS)
+        messages = [
+            {'role': 'system',
+             'content': "You are running a read-only local find job. Use metadata first, "
+                        "read only likely candidates, save notes when useful, and answer "
+                        "with plain sentences that include the path and why it matches. "
+                        "Always pass relative paths to filesystem tools: '.', 'sub/file.pdf', "
+                        "or a filename from fs_list. Never pass '/' or an absolute path. "
+                        "Start with fs_list on '.' using a limit large enough to see likely "
+                        "candidates before reading files. You must not ask to move, delete, "
+                        "rename, email, or upload files."},
+            {'role': 'user',
+             'content': f"Goal: {goal}\nThe working folder is already selected; use relative paths only."},
+        ]
+        for loop_event in samosa_tools.iter_tool_loop(call_model, messages, tools, ctx):
+            while pending:
+                yield pending.pop(0)
+            if loop_event.get('type') == 'final':
+                yield log.append('done', summary=(loop_event.get('text') or '').strip()
+                                 or "Find job completed without a summary.")
+                return
+        yield log.append('done', summary="Find job completed without a summary.")
         return
 
     # Organize: compile the deterministic plan.

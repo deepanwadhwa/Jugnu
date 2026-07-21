@@ -49,6 +49,9 @@ samosa-extract: src/samosa_extract.c src/tok.h src/tok_unicode.h src/json.h $(PD
 	  install_name_tool -change ./libpdfium.dylib @rpath/libpdfium.dylib samosa-extract; \
 	fi
 
+samosa-fs: src/samosa_fs.c
+	$(CC) -O2 -Wall -Wextra -Werror -std=c11 src/samosa_fs.c -o samosa-fs
+
 extract-test: samosa-extract tests/test_samosa_extract.sh tests/fixtures/documents/hello.pdf
 	SAMOSA_EXTRACT=./samosa-extract sh tests/test_samosa_extract.sh
 
@@ -118,10 +121,12 @@ test: pagecache-residency-test tests/test_expert_cache.c tests/test_kv_cache.c t
 	@if [ -n "$(NUMPY_PYTHON)" ]; then $(NUMPY_PYTHON) tests/test_converter_quant.py; \
 	else echo "converter quant tests: SKIP (NumPy environment unavailable)"; fi
 
-jobs-test: tools/jobs_fs.py tools/samosa_tools.py tools/samosa_jobs.py tools/samosa_gateway.py
+jobs-test: samosa-fs tools/jobs_fs.py tools/samosa_tools.py tools/samosa_jobs.py tools/samosa_gateway.py
 	python3 -m unittest discover -s tests/jobs -v
 	python3 tests/test_gateway_jobs.py
+	python3 tests/test_gateway_jobs_find.py
+	python3 tests/test_gateway_jobs_model_call.py
 	python3 tests/test_gateway_chat_tools.py
 
 clean:
-	rm -f qwen36b qwen36b-metal qwen36b-sched-runtime metal-spike samosa-extract pagecache-residency test_expert_cache test_kv_cache test_repetition_guard test_thinking_budget test_groupwise_q4 test_samosa_serve
+	rm -f qwen36b qwen36b-metal qwen36b-sched-runtime metal-spike samosa-extract samosa-fs pagecache-residency test_expert_cache test_kv_cache test_repetition_guard test_thinking_budget test_groupwise_q4 test_samosa_serve

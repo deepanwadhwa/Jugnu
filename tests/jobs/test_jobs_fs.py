@@ -7,8 +7,10 @@ pure module. No model, no network.
 """
 
 import inspect
+import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,6 +18,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tools'))
 import jobs_fs as fs
+
+
+SAMOSA_FS = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'samosa-fs'))
 
 
 class TestMoveEngine(unittest.TestCase):
@@ -204,6 +209,111 @@ class TestDiscoveryAndTyping(unittest.TestCase):
         reasons = {os.path.basename(p): r for p, r in skipped}
         self.assertIn('exceeds max_file_bytes', reasons['big.txt'])
         self.assertEqual(reasons['empty.txt'], 'empty file')
+
+    def test_metadata_only_scan_caps_oversized_reads(self):
+        # A read-only "report" job (is_metadata_only=True) must never pull an
+        # oversized file (a disk image, video, VM export — normal contents
+        # for a Downloads folder) fully into memory just to sniff its type.
+        self._w('huge.bin', b'\xff' * 200)  # magic-byte-less "binary" content
+        self._w('normal.txt', 'hello world')
+        items, skipped = fs.discover_files({'folder': self.inp, 'max_file_bytes': 50},
+                                           is_metadata_only=True)
+        by_name = {os.path.basename(i['input_path']): i for i in items}
+        self.assertEqual(by_name['huge.bin']['media_type'], 'application/octet-stream')
+        self.assertEqual(by_name['huge.bin']['size'], 200)  # real size, not the capped read
+        self.assertEqual(by_name['normal.txt']['media_type'], 'text/plain')
+
+    def test_read_up_to_caps_memory_and_reports_truncation(self):
+        self._w('small.bin', b'a' * 10)
+        self._w('big.bin', b'b' * 100)
+        for name, limit, expect_truncated, expect_len in (
+            ('small.bin', 50, False, 10),
+            ('big.bin', 50, True, 50),
+        ):
+            fd = os.open(os.path.join(self.inp, name), os.O_RDONLY)
+            try:
+                data, truncated = fs.read_up_to(fd, limit)
+            finally:
+                os.close(fd)
+            self.assertEqual(len(data), expect_len)
+            self.assertEqual(truncated, expect_truncated)
+
+
+class TestSamosaFsSidecar(unittest.TestCase):
+    def setUp(self):
+        if not os.path.exists(SAMOSA_FS):
+            self.skipTest('samosa-fs sidecar not built')
+        self.tmpdir = tempfile.mkdtemp()
+        self.inp = os.path.join(self.tmpdir, 'inputs')
+        os.mkdir(self.inp)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _w(self, name, data):
+        p = os.path.join(self.inp, name)
+        mode = 'wb' if isinstance(data, bytes) else 'w'
+        with open(p, mode) as f:
+            f.write(data)
+        return p
+
+    def _run(self, *args):
+        proc = subprocess.run([SAMOSA_FS, *args], text=True, capture_output=True, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload.get('ok'), payload)
+        return payload
+
+    def test_list_matches_python_discovery_core(self):
+        self._w('a.txt', 'hello world')
+        self._w('dup.txt', 'hello world')
+        self._w('b.pdf', b'%PDF-1.4 body')
+        self._w('c.jpg', b'\xff\xd8\xff\xe0 jpeg')
+        os.symlink(os.path.join(self.inp, 'a.txt'), os.path.join(self.inp, 'link.txt'))
+
+        py_items, py_skipped = fs.discover_files({'folder': self.inp}, is_metadata_only=True)
+        payload = self._run('list', self.inp)
+        c_items = payload['items']
+        self.assertEqual(
+            sorted((os.path.basename(i['input_path']), i['media_type'], i['size']) for i in py_items),
+            sorted((i['name'], i['media_type'], i['size']) for i in c_items),
+        )
+        self.assertEqual(
+            sorted(os.path.basename(p) for p, _r in py_skipped),
+            sorted(os.path.basename(s['path']) for s in payload['skipped']),
+        )
+        c_hashes = {i['name']: i['input_sha256'] for i in c_items}
+        py_hashes = {os.path.basename(i['input_path']): i['input_sha256'] for i in py_items}
+        self.assertEqual(c_hashes['a.txt'], py_hashes['a.txt'])
+
+    def test_survey_counts_by_type(self):
+        self._w('a.txt', 'hello')
+        self._w('b.pdf', b'%PDF-1.4')
+        self._w('c.jpg', b'\xff\xd8\xff\xe0')
+
+        payload = self._run('survey', self.inp)
+        self.assertEqual(payload['total'], 3)
+        self.assertEqual(payload['by_type']['text/plain']['count'], 1)
+        self.assertEqual(payload['by_type']['application/pdf']['count'], 1)
+        self.assertEqual(payload['by_type']['image/jpeg']['count'], 1)
+
+    def test_metadata_only_scan_caps_oversized_reads(self):
+        self._w('huge.bin', b'\xff' * 200)
+        self._w('normal.txt', 'hello world')
+
+        payload = self._run('list', '--max-file-bytes', '50', self.inp)
+        by_name = {i['name']: i for i in payload['items']}
+        self.assertEqual(by_name['huge.bin']['media_type'], 'application/octet-stream')
+        self.assertEqual(by_name['huge.bin']['size'], 200)
+        self.assertEqual(by_name['normal.txt']['media_type'], 'text/plain')
+
+    def test_metadata_one_file(self):
+        path = self._w('note.txt', 'hello')
+        payload = self._run('metadata', path)
+        self.assertEqual(payload['name'], 'note.txt')
+        self.assertEqual(payload['media_type'], 'text/plain')
+        self.assertEqual(payload['size'], 5)
+        self.assertEqual(payload['input_sha256'], fs.sha256_bytes(b'hello'))
 
 
 class TestOrganizePlan(unittest.TestCase):

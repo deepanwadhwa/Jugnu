@@ -700,7 +700,7 @@
             ctx.jobId = evt.job_id;
             jobLine("●", `Decoding intent: “${evt.goal}”`, "step-done"); break;
           case "intent":
-            addSub(jobLine("›", evt.kind === "organize" ? "Sort files into type folders" : "Read the folder and report"), evt.explain); break;
+            addSub(jobLine("›", evt.kind === "organize" ? "Sort files into type folders" : (evt.kind === "find" ? "Find matching files" : "Read the folder and report")), evt.explain); break;
           case "counting": {
             const parts = Object.entries(evt.by_type || {}).map(([k, v]) => `${v} ${shortType(k)}`).join(", ");
             const l = jobLine("▦", `Counting files: ${evt.total} found`); if (parts) addSub(l, parts); break;
@@ -726,6 +726,15 @@
             ctx.progress.querySelector(".title").textContent = `${verb} ${evt.i}/${evt.n}: ${baseName(evt.src)}` + (evt.ok ? "" : ` — skipped (${evt.reason})`);
             break;
           }
+          case "tool_call": {
+            const args = evt.args || {};
+            const path = args.path || args.src || args.dst || "";
+            const suffix = path ? ` ${path}` : "";
+            jobLine("·", `${evt.tool}${suffix}`);
+            break;
+          }
+          case "notes":
+            jobLine("·", evt.op === "append" ? "Saved a job note" : "Read job notes"); break;
           case "applied":
             if (ctx.progress) { ctx.progress.querySelector(".dot").textContent = "●"; ctx.progress.classList.add("step-done"); ctx.progress = null; }
             ctx.moved = evt.applied > 0;

@@ -120,6 +120,28 @@ class TestFsTools(unittest.TestCase):
         self.assertEqual(survey['total'], 3)
         self.assertEqual(survey['by_type']['text/plain'], 1)
 
+    def test_metadata_reports_size_mtime_and_type(self):
+        ctx = T.ToolContext(self.root, mode='preview')
+        out = T.REGISTRY.get('fs_metadata').run({'path': 'a.txt'}, ctx)
+        self.assertIn('path\ta.txt', out)
+        self.assertIn('type\ttext/plain', out)
+        self.assertIn('size\t5 bytes', out)
+        self.assertIn('mtime\t', out)
+        self.assertIn('sha256\t', out)
+
+    def test_notes_are_jailed_to_job_dir(self):
+        job_dir = tempfile.mkdtemp()
+        try:
+            ctx = T.ToolContext(self.root, mode='preview', job_dir=job_dir)
+            out = T.REGISTRY.get('notes_append').run({'text': 'candidate: a.txt'}, ctx)
+            self.assertIn('saved', out)
+            self.assertFalse(os.path.exists(os.path.join(self.root, 'notes.txt')))
+            self.assertTrue(os.path.exists(os.path.join(job_dir, 'notes.txt')))
+            out = T.REGISTRY.get('notes_read').run({}, ctx)
+            self.assertIn('candidate: a.txt', out)
+        finally:
+            shutil.rmtree(job_dir)
+
     def test_move_is_jailed_and_atomic(self):
         events = []
         ctx = T.ToolContext(self.root, mode='execute', emit=lambda t, **k: events.append((t, k)))
