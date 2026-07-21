@@ -1,6 +1,8 @@
 qwen36b
 samosa-extract
 samosa-fs
+samosa-gateway
+test_fake_openai_backend
 test_expert_cache
 test_kv_cache
 *.qws

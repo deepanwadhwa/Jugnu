@@ -52,6 +52,18 @@ samosa-extract: src/samosa_extract.c src/tok.h src/tok_unicode.h src/json.h $(PD
 samosa-fs: src/samosa_fs.c
 	$(CC) -O2 -Wall -Wextra -Werror -std=c11 src/samosa_fs.c -o samosa-fs
 
+samosa-gateway: src/samosa_gateway.c src/samosa_http.h src/json.h
+	$(CC) -O2 -Wall -Wextra -Werror -Wno-unused-function -std=c11 -pthread -Isrc \
+	  src/samosa_gateway.c -o samosa-gateway
+
+test_fake_openai_backend: tests/fake_openai_backend.c src/samosa_http.h
+	$(CC) -O2 -Wall -Wextra -Werror -Wno-unused-function -std=c11 -pthread -Isrc \
+	  tests/fake_openai_backend.c -o test_fake_openai_backend
+
+compiled-gateway-test: samosa-gateway test_fake_openai_backend tests/test_compiled_gateway.sh
+	SAMOSA_COMPILED_GATEWAY="$$PWD/samosa-gateway" \
+	SAMOSA_FAKE_BACKEND="$$PWD/test_fake_openai_backend" sh tests/test_compiled_gateway.sh
+
 extract-test: samosa-extract tests/test_samosa_extract.sh tests/fixtures/documents/hello.pdf
 	SAMOSA_EXTRACT=./samosa-extract sh tests/test_samosa_extract.sh
 
