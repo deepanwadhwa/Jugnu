@@ -259,7 +259,6 @@
     .job-advanced > summary { padding: 11px 2px; color: var(--muted); cursor: pointer; font-size: 12px; font-weight: 650; }
     .job-tools { display: grid; gap: 12px; margin: 0; padding: 4px 0 16px; }
     .job-tools textarea { min-height: 92px; font-family: var(--mono, ui-monospace, "SF Mono", Menlo, monospace); font-size: 12px; }
-    .job-tools .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .job-run { min-height: 40px; border: 0; border-radius: 8px; background: var(--brand); color: #fff; font-weight: 700; padding: 9px 17px; cursor: pointer; }
     .job-run:disabled { opacity: .55; cursor: default; }
     .job-mode { color: var(--muted); font-size: 12px; display: inline-flex; align-items: center; gap: 7px; }
@@ -305,7 +304,6 @@
     @media (max-width: 640px) {
       .job-review-row { grid-template-columns: 1fr; gap: 6px; }
       .job-review-arrow { display: none; }
-      .job-tools .split { grid-template-columns: 1fr; }
     }
     .job-bar { position: sticky; bottom: 0; margin-top: 16px; display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 13px 15px; border-radius: 14px; background: var(--brand-soft); border: 1px solid var(--line); }
     .job-bar .txt { font-size: 13.5px; color: var(--ink); }
@@ -401,20 +399,6 @@
                 <button class="job-run" id="jobPreviewDef" type="button">Preview</button>
                 <button class="job-run" id="jobRunDef" type="button">Run definition</button>
               </span>
-            </div>
-            <div class="split">
-              <div class="job-field">
-                <label for="jobPublicUrls">Public URLs</label>
-                <textarea id="jobPublicUrls" rows="3" spellcheck="false" placeholder="https://example.com/jobs"></textarea>
-              </div>
-              <div class="job-field">
-                <label for="jobResumePath">CV or résumé file</label>
-                <input id="jobResumePath" spellcheck="false" autocapitalize="off" placeholder="/Users/you/cv.pdf">
-              </div>
-            </div>
-            <div class="row">
-              <button class="job-run" id="jobFetchPublic" type="button">Fetch URLs</button>
-              <button class="job-run" id="jobResumeWorkflow" type="button">Match CV to postings</button>
             </div>
           </section>
         </details>
@@ -770,8 +754,6 @@
         progress: $("jobProgress"), result: $("jobResult"), resultLabel: $("jobResultLabel"), resultText: $("jobResultText"),
         definition: $("jobDefinition"), previewExpanded: $("jobPreviewExpanded"),
         previewDef: $("jobPreviewDef"), runDef: $("jobRunDef"),
-        publicUrls: $("jobPublicUrls"), resumePath: $("jobResumePath"),
-        fetchPublic: $("jobFetchPublic"), resumeWorkflow: $("jobResumeWorkflow"),
         barText: $("jobBarText"), barActions: $("jobBarActions"),
         review: $("jobReview"), reviewTitle: $("jobReviewTitle"), reviewMeta: $("jobReviewMeta"), reviewList: $("jobReviewList"),
         tabChat: $("tabChat"), tabJobs: $("tabJobs"),
@@ -1101,9 +1083,6 @@
           return null;
         }
       }
-      function publicUrlList() {
-        return jobEls.publicUrls.value.split(/\n+/).map(s => s.trim()).filter(Boolean);
-      }
       async function previewDefinitionJob() {
         if (jobRunning) return;
         const job = parseJobDefinition(); if (!job) return;
@@ -1130,28 +1109,6 @@
         catch (e) { renderJobEvent({ type: "error", message: String(e) }, { folder }); }
         finally { jobRunning = false; }
       }
-      async function fetchPublicInputs(pairResume) {
-        if (jobRunning) return;
-        const job = parseJobDefinition(); if (!job) return;
-        const urls = publicUrlList();
-        if (!urls.length) { jobLine("✗", "Add at least one public URL.", "step-error"); return; }
-        jobRunning = true;
-        try {
-          const body = { job_id: job.job_id || "public-job", urls };
-          let endpoint = "/v1/jobs/public-inputs/update";
-          if (pairResume) {
-            if (!jobEls.resumePath.value.trim()) throw new Error("Add a CV or résumé file.");
-            endpoint = "/v1/jobs/public-inputs/resume-workflow";
-            body.resume_path = jobEls.resumePath.value.trim();
-          }
-          const resp = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-          const data = await resp.json();
-          if (!resp.ok || !data.ok) throw new Error(data.error?.message || "Public input update failed");
-          jobLine("●", pairResume ? `Matched the CV with ${data.pairs.length} posting${data.pairs.length === 1 ? "" : "s"}` : `Fetched ${data.checked} URL${data.checked === 1 ? "" : "s"}, ${data.changed} changed`, "step-done");
-        } catch (error) { jobLine("✗", error.message || String(error), "step-error"); }
-        finally { jobRunning = false; }
-      }
-
       async function runJob() {
         if (jobRunning) return;
         const folder = jobEls.folder.value.trim(), goal = jobEls.goal.value.trim();
@@ -1214,8 +1171,6 @@
       jobEls.goal.onkeydown=e=>{if(e.key==="Enter"&&(e.metaKey||e.ctrlKey)){e.preventDefault();runJob();}};
       jobEls.previewDef.onclick=previewDefinitionJob;
       jobEls.runDef.onclick=runDefinitionJob;
-      jobEls.fetchPublic.onclick=()=>fetchPublicInputs(false);
-      jobEls.resumeWorkflow.onclick=()=>fetchPublicInputs(true);
       els.webAction.onclick=internetAction; els.webInput.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();internetAction();}};
       els.composer.onsubmit=e=>{e.preventDefault();sendPrompt(els.prompt.value)};
       els.messages.addEventListener("scroll",()=>{followOutput=nearBottom();els.jump.hidden=followOutput},{passive:true});

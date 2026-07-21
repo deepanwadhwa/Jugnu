@@ -1233,8 +1233,8 @@ Per the program's rule (experiments resize tasks — [ISSUE_TASKS.md](ISSUE_TASK
 - **J3 — Public-web job input (folds in #4).** Scheduled input on the reused SSRF
   fetcher + extractor ([TASKS_INTERNET.md](TASKS_INTERNET.md)); user-provided
   public URLs (HR-1/2); polite fetch, extract, change-detect, feed only new items.
-  The resume-vs-public-postings screen lands here. Out of scope: search engines,
-  crawling, discovery, login.
+  Keep Jobs general-purpose: domain-specific workflows and screens do not belong
+  in this surface. Out of scope: search engines, crawling, discovery, login.
 
 ## First release — deliberately narrow
 

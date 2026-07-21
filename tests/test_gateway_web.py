@@ -213,24 +213,4 @@ with tempfile.TemporaryDirectory() as temp:
     assert changed["changed_items"][0]["status"] == "changed"
     assert "Role C" in Path(changed["changed_items"][0]["text_path"]).read_text()
 
-    resume = root / "resume.txt"
-    resume.write_text("Deepa Resume\nPython\n")
-    page_v3 = {
-        "url": "https://example.com/new-role",
-        "title": "New Role",
-        "text": "Python job posting",
-        "truncated": False,
-    }
-    with mock.patch.object(gateway, "readable_page", return_value=page_v3):
-        workflow = gateway.prepare_resume_public_workflow(
-            "resume-job", str(resume), ["https://example.com/new-role"])
-        unchanged_workflow = gateway.prepare_resume_public_workflow(
-            "resume-job", str(resume), ["https://example.com/new-role"])
-    assert workflow["changed"] == 1
-    assert len(workflow["pairs"]) == 1
-    assert Path(workflow["pairs"][0]["resume_path"]).read_text() == "Deepa Resume\nPython\n"
-    assert "Python job posting" in Path(workflow["pairs"][0]["posting_text_path"]).read_text()
-    assert unchanged_workflow["changed"] == 0
-    assert unchanged_workflow["pairs"] == []
-
 print("gateway web/search checks: PASS (32 SSRF cases + tool protocol + search providers)")
