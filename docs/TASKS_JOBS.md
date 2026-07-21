@@ -1289,3 +1289,270 @@ prompts, code-repo jobs, tool/action adapters, agents.
   Scheduler.
 - **Product packaging** — embed the Python runner in the C binary vs. ship
   alongside (J2).
+
+---
+
+## Phase JF — model-driven "find" jobs (owner-approved direction, 2026-07-21)
+
+> **Status: SPEC — nothing below is built.** Approved by the owner on
+> 2026-07-21 after dogfooding: "find my cat's medical record… his name is
+> Titli" against a real ~/Downloads (508 files) fell through `decode_intent`'s
+> two-kind vocabulary (organize | report) to a useless type count. The owner's
+> stated model: give the model a goal and the *lowest-level* tools (count,
+> metadata, read, read-a-page, notes, ask-the-user), and let it compose them
+> freely — metadata-first to filter candidates, content reads only to confirm.
+>
+> **This supersedes the "no model-initiated tool calls" non-goal above** — for
+> read-only tools only. The human-approval boundary moves from "the model may
+> not call tools" to "the model may not *mutate* without approval," which is
+> the boundary `samosa_tools.ToolContext` already enforces mechanically
+> (mutating tools refuse to run in `preview` mode).
+
+### What already exists (verified in code, 2026-07-21)
+
+The rebuild on `issue-7-jobs` means most of this phase is wiring, not building:
+
+| Owner's tool ask | Status |
+|---|---|
+| count files | `fs_survey` — exists |
+| metadata of all files in a folder | `fs_list` — exists; **extend** rows with size + mtime so the metadata-first filter pass works |
+| metadata of one file | **new** `fs_metadata` (size, dates, magic-byte type) — trivial over `os.stat` + `detect_media_type` |
+| read a file | `fs_read_text`, `fs_read_document` (PDF via samosa-extract) — exist |
+| read a particular page | **new** `fs_read_page` — `extract_document()` already returns per-page text; this is a slice, and it is the main prefill-cost mitigation |
+| write notes in a tmp file | **new** `notes_append`/`notes_read` — jailed to the *job dir* (`<job_dir>/notes.txt`), never the user's folder |
+| ask the user a clarifying question | **new** `ask_user` — the one genuinely new mechanism (below) |
+| the agent loop itself | `run_tool_loop` — exists (registry, ability prompt, `SAMOSA_TOOL_RESULT` protocol, `MAX_TOOL_ROUNDS = 8`, per-round budget notes to the model) |
+| jail + read-only enforcement | `ToolContext` — exists (realpath jail, preview/execute gating, `tool_call` emit) |
+
+### JF.1 — third intent kind: `find`
+
+`decode_intent` gains `_FIND_RE` (find / locate / search / look for / where is
+/ which file) → `{'kind': 'find'}`, and the ambiguous-goal model classifier
+becomes three-way (organize | report | find). Safety invariant preserved and
+extended: the model classifier can *choose* `find`, but `find` always runs a
+`preview`-mode ToolContext, so escalation to file mutation remains impossible
+by construction — same shape as today's "model cannot upgrade report to
+organize" test.
+
+### JF.2 — run_job routes `find` through run_tool_loop
+
+`ToolContext(root=folder, mode='preview', emit=log.append)`; toolset = the
+read-only fs tools + notes + ask_user (never fs_mkdir/fs_move in v1);
+system prompt = the job framing + goal; every `tool_call` event lands in the
+existing events.jsonl → SSE → Jobs-tab feed, so the user watches "reading
+titli_vaccination_2025.pdf …" live. Final model text becomes the `done`
+summary (bakery test applies: plain sentences, paths, why).
+
+The gateway needs a second model entrypoint: `jobs_model_call` is a one-shot
+64-token classifier; the loop variant needs ~512 tokens/turn, same
+lock/busy-fallback discipline.
+
+### JF.3 — ask_user (pause/resume)
+
+`ask_user` emits `await_user {question}`, persists the loop conversation to
+`<job_dir>/convo.json`, and the generator returns — the same
+stop-and-persist shape as `await_apply`. New endpoint `/v1/jobs/answer
+{job_id, answer}` reloads the conversation, appends the answer as the tool
+result, and re-enters the loop. UI: question + one text input in the feed.
+**This is the phase's only real mechanism risk** — everything else is
+registration and routing.
+
+### JF.4 — honest constraints (measure, then claim)
+
+- **Prefill is the binding constraint, again.** Every loop round re-prefills
+  the growing conversation at ~14–24 tok/s on the reference M3. A bounded
+  508-file listing is thousands of tokens; each document read is hundreds to
+  thousands more. A realistic find job is **minutes, not seconds** — the
+  cloud-model transcript that motivated this phase describes the *strategy*,
+  not the local latency. Page-level reads (`fs_read_page`), bounded listings
+  (`fs_list` limit), and notes-instead-of-context are the mitigations; the
+  24,576-token cap is the wall.
+- **Verification gate:** "works" means the real 24 GB Qwen model, through the
+  app's Jobs tab, finds a real planted file in a real cluttered folder and
+  answers with its path — evidence under `docs/regressions/jobs/`. The
+  existing real-model evidence (decode_intent round trip, chat tool loop)
+  makes this plausible, not proven.
+- **v2, not v1:** find→act combos ("find X and move it into Y") — mutating
+  tools in `execute` mode behind an Apply-style confirmation. Keep v1
+  strictly read-only.
+
+---
+
+## Tool runtime decision — compiled sidecars, not Python (owner, 2026-07-21)
+
+> **Owner's architecture statement:** Samosa's execution layer is
+> `LLM → structured tool call → small compiled executable` (Rust, C, Swift, or
+> Go; stable JSON or binary interface; one constrained operation per tool —
+> `pdf.extract`, `files.rename`, `image.convert`, …). Python may remain an
+> *optional compatibility layer* for third-party extensions, but the
+> lowest-level tools must not rely on it and Samosa must not ship a Python
+> runtime as its primary execution environment. Samosa should resemble a
+> compact operating environment for AI agents, not a Python distribution.
+>
+> **Product frame (owner):** most boring laptop work reduces to five
+> operations, and jobs should cover all five —
+> **retrieve → compare/classify → transform → enter/send → escalate to a
+> person.** "Enter/send" is outward action and sits behind the same approval
+> boundary as file mutation; "escalate" is JF.3's `ask_user`.
+
+### What is already true vs. what actually depends on Python (audited 2026-07-21)
+
+Being precise about the starting point, per the evidence bar:
+
+- **The protocol half of the target architecture already exists.** The model
+  never generates or executes Python — it emits one line of structured JSON
+  (`{"samosa_tool": …}`) and the app runs a named, constrained tool
+  (`samosa_tools.classify_reply`/`execute_tool`). Nothing about the
+  model-facing contract changes.
+- **The pattern for the implementation half already exists too:**
+  `samosa-extract` ([src/samosa_extract.c](../src/samosa_extract.c)) is a
+  compiled C sidecar — one operation, `--json` out, its own CPU/memory
+  sandbox, `@rpath`-linked libpdfium. `fs_read_document` already dispatches
+  to it. This is the template, not a research question.
+- **The current Python layer is stdlib-only** (gateway + tools + jobs ≈ 2,900
+  lines, zero pip dependencies) — the "fragile package/version management"
+  critique does not bite *today's code*, and honesty requires saying so. What
+  **does** bite: the release hard-requires the host's `python3`
+  (`dist/install.sh:150` fails install without it); version drift is already
+  observable in-tree (both `cpython-310` and `cpython-314` bytecode in
+  `__pycache__/`); in-process Python tools have no OS-enforced resource
+  limits. The 2026-07-21 15 GB memory spike was a logic bug any language
+  could have written — but a sidecar under rlimits would have been *contained*
+  by the OS instead of eating 15 GB + swap. That containment argument, not
+  "Python is slow," is the strongest concrete case for this decision.
+
+### The sidecar contract (freeze before building more tools)
+
+- One binary, one domain; subcommands for operations
+  (`samosa-fs survey|list|metadata|move|undo …`), namespaced registry names
+  (`fs.list`, `pdf.extract`, `image.convert`).
+- Interface: args via argv/flags, JSON envelope on stdout —
+  `{"ok": true, …}` / `{"ok": false, "error": "<stable_code>"}` — exactly the
+  `samosa-extract` convention (`jobs_fs.extract_document` shows the caller
+  side, including the wall-clock watchdog + `killpg`).
+- Every sidecar sets its own rlimits (CPU, address space, output size), as
+  `samosa-extract` does. C is the default implementation language (the
+  toolchain the repo already builds with); Rust/Swift/Go are acceptable where
+  they pay for themselves.
+
+### Migration order (JF does not stall)
+
+1. **JF tools are born against the contract, not added to Python.**
+   `fs_read_page` *is* `samosa-extract` (per-page output already exists).
+   `samosa-fs` starts with the metadata-first trio JF leans on: `survey`,
+   `list` (with size/mtime), `metadata` — the deterministic logic ports from
+   `jobs_fs.py`, whose tests become the port's acceptance tests.
+2. **Port the mutation core** (`move` with atomic no-clobber rename, `undo`,
+   the journal) into `samosa-fs`. During transition the Python `Tool` entries
+   become thin dispatch shims (build subprocess argv, parse envelope) — the
+   registry, jail, and preview/execute gating stay where they are.
+3. **The gateway shrinks to orchestration glue** (HTTP/SSE, agent loop,
+   backend supervision) — still Python for now, explicitly *not* load-bearing
+   for any tool. Long-term option, separate decision: fold orchestration into
+   the C engine (it already serves HTTP) or a compiled gateway, at which
+   point the installer's `python3` requirement disappears and Python is
+   genuinely optional.
+
+Non-goal, restated from the owner's framing: the model composing *tools* is
+the feature; the model generating *programs* (arbitrary Python/shell) stays
+out — a tool is a constrained verb, not an interpreter.
+
+---
+
+## Execution order — Phase JF + samosa-fs handoff (2026-07-21)
+
+Owner-assigned sequencing for the work specced in §Phase JF and §Tool runtime
+decision. **Read [ISSUE_TASKS.md](ISSUE_TASKS.md)'s Working agreement first**;
+branch is `issue-7-jobs`; agent shells have no push credentials — commit and
+stop. The evidence bar applies to every task: paste commands + output, log
+runs under `docs/regressions/jobs/`, and never claim "works" above what was
+actually run.
+
+Two independent tracks until T6 joins them. A single agent does T0→T10 in
+numeric order.
+
+### T0 — Preflight (blocking, 30 min)
+Confirm the branch already contains the 2026-07-21 session work: the
+`discover_files` memory-cap fix in `tools/jobs_fs.py` (`read_up_to`, capped
+metadata-only reads) + its two tests, and this spec's JF/runtime/order
+sections. Then prove the baseline: `make jobs-test` green **and** `make`
+compiles the C engine. If either fails, stop and report — do not build on a
+red baseline.
+
+### Track A — the compiled tools
+
+**T1 — Freeze the sidecar contract (doc-only).** Write
+`docs/SIDECAR_CONTRACT.md` by *codifying what `samosa-extract` already does*
+(JSON envelope `{"ok": …}` / `{"ok": false, "error": "<stable_code>"}`,
+argv conventions, self-applied rlimits, exit codes, versioning) — do not
+invent a divergent scheme. The caller-side pattern to preserve is
+`jobs_fs.extract_document` (watchdog + `killpg`).
+
+**T2 — `samosa-fs` v1 in C: `survey`, `list`, `metadata`.** Port the
+deterministic logic from `jobs_fs.py` — including O_NOFOLLOW symlink
+rejection, magic-byte typing, dedup hashing, and **the capped-read behavior
+from the 2026-07-21 fix** (max-bytes cap in metadata-only scans; truncated
+files hashed over prefix+size, typed by magic bytes, sized by stat). `list`
+gains size + mtime columns (JF's metadata-first pass needs them). Makefile
+target + a test target. Acceptance: the discovery/typing scenarios of
+`tests/jobs/test_jobs_fs.py` re-run against the binary with matching results
+— the Python tests are the port's spec.
+
+**T3 — Python tools become shims.** `fs_survey`/`fs_list`/new `fs_metadata`
+dispatch to `samosa-fs` via subprocess (copy the `extract_document` caller
+pattern); `run_job`'s internal folder survey switches too. Registry, path
+jail, preview/execute gating: untouched. Acceptance: `make jobs-test` green
+end-to-end through the shims, plus one containment demo: a folder with a
+deliberately huge file shows the sidecar bounded by its rlimits instead of
+the gateway's memory growing.
+
+### Track B — the find-job plumbing (no sidecar dependency)
+
+**T4 — JF.1, the `find` intent.** `_FIND_RE` + three-way model classifier in
+`decode_intent`; `find` can never map to a mutating context (extend the
+existing "model cannot upgrade report to organize" test to cover it).
+
+**T5 — Gateway loop entrypoint.** A ~512-token variant of the 64-token
+`jobs_model_call`, same lock/busy-fallback discipline. Test with the fake
+backend (the `tests/test_gateway_chat_tools.py` pattern).
+
+### Joined
+
+**T6 — JF.2, route `find` through `run_tool_loop`.** Preview-mode
+`ToolContext`; toolset = read-only fs tools + `fs_read_page` (a page slice
+of `extract_document` output — no new binary) + `notes_append`/`notes_read`
+(jailed to the job dir — job state, like `events.jsonl`, so Python is fine
+here); `tool_call` events → events.jsonl → SSE; model's final text = the
+`done` summary (bakery test). UI: render tool events live in the Jobs feed.
+Acceptance: an integration test with a scripted fake model, then a live
+app run on a scratch folder.
+
+**T7 — Real-model checkpoint 1 (gate for calling find "working").** Plant a
+plausible record (e.g. `titli_vaccination_2025.pdf` with a text layer) in a
+cluttered scratch folder; the real 24 GB model, through the app's Jobs tab,
+must find it and answer with the path. Evidence doc under
+`docs/regressions/jobs/`. Machine-safety rules apply (never while the owner
+is chatting; watch memory pressure + swap delta before/after).
+
+**T8 — JF.3, `ask_user`.** Persist the loop conversation to
+`<job_dir>/convo.json`, emit `await_user`, stop the generator; new
+`/v1/jobs/answer {job_id, answer}` resumes; UI question + input box. This is
+the phase's highest-risk mechanism — do it after T7 proves the loop, not
+before. Acceptance: fake-model pause/resume integration test + live resume.
+
+**T9 — Real-model checkpoint 2.** An ambiguous goal → the model asks a
+clarifying question → answer → job completes. Evidence doc.
+
+**T10 — Packaging.** `samosa-fs` ships alongside `samosa-extract` in
+`dist/install.sh` + `tools/package_hf.py --gateway` (the `--pdfium-dir`
+opt-in pattern), and a full local package→install→serve dry run — the step
+that caught the two real release bugs on 2026-07-20.
+
+### Explicitly deferred (do not start without the owner)
+- Porting the mutation core (`move`/`undo`/journal) to `samosa-fs` — wave 2,
+  alongside find→act (`execute` mode behind Apply).
+- `enter/send` tools (email, forms) — outward actions, need their own
+  approval-boundary spec.
+- Rewriting the gateway/orchestration in a compiled language.
+- Anything touching the HF release itself (owner publishes; H1 README defect
+  is a separate owner decision).
