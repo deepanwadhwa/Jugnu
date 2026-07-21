@@ -530,6 +530,30 @@ def launchd_plist(program_args, label='com.samosa.jobsd', interval_seconds=300,
     return plistlib.dumps(payload, sort_keys=True).decode('utf-8')
 
 
+def install_launchd_plist(dest_path=None, program_args=None):
+    """Write the macOS launchd plist; loading it is an explicit user action."""
+    dest = dest_path or os.path.join(os.path.expanduser('~'), 'Library',
+                                     'LaunchAgents', 'com.samosa.jobsd.plist')
+    args = program_args or [sys.executable, os.path.abspath(__file__), 'jobsd-once']
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    fs.atomic_write(dest, launchd_plist(args), mode=0o644)
+    return {'ok': True, 'path': dest, 'label': 'com.samosa.jobsd',
+            'load_command': ['launchctl', 'load', dest],
+            'unload_command': ['launchctl', 'unload', dest]}
+
+
+def arm_overnight_job(job_path, missed_policy=DEFAULT_MISSED_POLICY):
+    """Manual overnight flow: freeze the job and return the daemon commands."""
+    result = arm_scheduled_job(job_path, window_start=DEFAULT_OVERNIGHT_WINDOW[0],
+                               window_end=DEFAULT_OVERNIGHT_WINDOW[1],
+                               missed_policy=missed_policy, keep_awake=True)
+    if not result.get('ok'):
+        return result
+    command = caffeinate_command([sys.executable, os.path.abspath(__file__), 'jobsd-once'],
+                                 keep_awake=result['schedule'].get('keep_awake', True))
+    return {**result, 'overnight': True, 'manual_run_command': command}
+
+
 def list_armed_schedules():
     root = get_jobs_root()
     schedules = []
@@ -1370,7 +1394,9 @@ def main(argv):
               "  samosa jobs estimate <job.json>\n"
               "  samosa jobs preview <job.json> [--file <path>] [--expanded|--samples N]\n"
               "  samosa jobs arm <job.json> [--overnight] [--window HH:MM-HH:MM]\n"
+              "  samosa jobs overnight <job.json>\n"
               "  samosa jobs launchd-plist --print\n"
+              "  samosa jobs launchd-install [--path <plist>]\n"
               "  samosa jobs run \"<goal>\" <folder> [--execute]\n"
               "  samosa jobs apply <job_id>\n"
               "  samosa jobs undo <job_id>", file=sys.stderr)
@@ -1498,6 +1524,24 @@ def main(argv):
         program = [sys.executable, os.path.abspath(__file__), 'jobsd-once']
         print(launchd_plist(program), end='')
         return 0
+    if cmd == 'launchd-install':
+        rest = argv[1:]
+        dest = None
+        if rest:
+            if len(rest) == 2 and rest[0] == '--path':
+                dest = rest[1]
+            else:
+                print("Usage: samosa jobs launchd-install [--path <plist>]", file=sys.stderr)
+                return 2
+        print(json.dumps(install_launchd_plist(dest_path=dest), indent=2, sort_keys=True))
+        return 0
+    if cmd == 'overnight':
+        if len(argv) != 2:
+            print("Usage: samosa jobs overnight <job.json>", file=sys.stderr)
+            return 2
+        result = arm_overnight_job(argv[1])
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result.get('ok') else 1
     if cmd == 'jobsd-once':
         print(json.dumps(jobsd_once(), indent=2, sort_keys=True))
         return 0

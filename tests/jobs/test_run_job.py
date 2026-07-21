@@ -535,6 +535,14 @@ class JobsLayerTest(unittest.TestCase):
         self.assertTrue(plist['RunAtLoad'])
         self.assertEqual(plist['ProgramArguments'], ['/bin/echo', 'hi'])
 
+        dest = os.path.join(self.work, 'LaunchAgents', 'com.samosa.jobsd.plist')
+        installed = J.install_launchd_plist(dest_path=dest, program_args=['/bin/echo', 'hi'])
+        self.assertTrue(installed['ok'])
+        self.assertEqual(installed['load_command'], ['launchctl', 'load', dest])
+        with open(dest, 'rb') as f:
+            installed_plist = plistlib.loads(f.read())
+        self.assertEqual(installed_plist['ProgramArguments'], ['/bin/echo', 'hi'])
+
     def test_host_power_status_parses_pmset(self):
         battery = J.host_power_status(system_name='Darwin',
                                       pmset_output="Now drawing from 'Battery Power'\n")
@@ -576,6 +584,15 @@ class JobsLayerTest(unittest.TestCase):
             events = [json.loads(line) for line in f if line.strip()]
         self.assertEqual(events[0]['type'], 'scheduled_job_start')
         self.assertEqual(events[-1]['type'], 'scheduled_job_complete')
+
+    def test_manual_overnight_flow_arms_and_returns_command(self):
+        job_path = self.write_schedulable_job('manual-overnight')
+        result = J.arm_overnight_job(job_path)
+        self.assertTrue(result['ok'], result)
+        self.assertTrue(result['overnight'])
+        self.assertEqual(result['schedule']['window_start'], '22:00')
+        self.assertEqual(result['schedule']['window_end'], '06:00')
+        self.assertIn('jobsd-once', result['manual_run_command'])
 
 
 if __name__ == '__main__':
