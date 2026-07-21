@@ -137,6 +137,21 @@ printf '%s' "$run" | /usr/bin/grep -q '"type":"done"'
 [ -f "$TMP/definition-out/output.jsonl" ]
 /usr/bin/grep -q '"merchant":"Cafe"' "$TMP/definition-out/output.jsonl"
 
+move_plan=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/run" \
+  -H 'Content-Type: application/json' \
+  --data-binary "{\"goal\":\"find cat medical record and move it to Archive\",\"folder\":\"$TMP/files\"}")
+printf '%s' "$move_plan" | /usr/bin/grep -q '"type":"await_apply"'
+MOVE_JOB=$(printf '%s' "$move_plan" | /usr/bin/sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p' | /usr/bin/tail -1)
+applied=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/apply" \
+  -H 'Content-Type: application/json' --data-binary "{\"job_id\":\"$MOVE_JOB\"}")
+printf '%s' "$applied" | /usr/bin/grep -q '"applied":1'
+[ -f "$TMP/files/Archive/cat-medical-note.txt" ]
+[ ! -f "$TMP/files/cat-medical-note.txt" ]
+undone=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/undo" \
+  -H 'Content-Type: application/json' --data-binary "{\"job_id\":\"$MOVE_JOB\"}")
+printf '%s' "$undone" | /usr/bin/grep -q '"undone":1'
+[ -f "$TMP/files/cat-medical-note.txt" ]
+
 /usr/bin/curl -sS -X POST "http://127.0.0.1:$PORT/v1/jobs/run" \
   -H 'Content-Type: application/json' \
   --data-binary "{\"goal\":\"report what is here\",\"folder\":\"$TMP/slow\"}" \

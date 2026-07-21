@@ -481,7 +481,8 @@ static const char *find_tools_json =
     "[{\"type\":\"function\",\"function\":{\"name\":\"fs_metadata\",\"description\":\"Check one candidate file's type, size and metadata without reading its content\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}},"
     "{\"type\":\"function\",\"function\":{\"name\":\"fs_read_text\",\"description\":\"Read at most 8192 characters from one selected plain text candidate\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}},"
     "{\"type\":\"function\",\"function\":{\"name\":\"fs_read_pages\",\"description\":\"Read 1 to 5 consecutive pages from one selected PDF; request another range only if needed\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"start\":{\"type\":\"integer\",\"minimum\":1},\"count\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":5}},\"required\":[\"path\",\"start\",\"count\"]}}},"
-    "{\"type\":\"function\",\"function\":{\"name\":\"ask_user\",\"description\":\"Ask one clarifying question when the indexed candidates are not reliable\",\"parameters\":{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\"}},\"required\":[\"question\"]}}}]";
+    "{\"type\":\"function\",\"function\":{\"name\":\"ask_user\",\"description\":\"Ask one clarifying question when the indexed candidates are not reliable\",\"parameters\":{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\"}},\"required\":[\"question\"]}}},"
+    "{\"type\":\"function\",\"function\":{\"name\":\"fs_move\",\"description\":\"Stage one confirmed matching file to move after user approval\",\"parameters\":{\"type\":\"object\",\"properties\":{\"src\":{\"type\":\"string\"},\"dst\":{\"type\":\"string\"}},\"required\":[\"src\",\"dst\"]}}}]";
 
 static int jobs_find(Gateway *g, int fd, const char *goal, const char *folder,
                      jval *survey, const char *job_id, int start_seq) {
@@ -503,7 +504,7 @@ static int jobs_find(Gateway *g, int fd, const char *goal, const char *folder,
     if (!sse_json(fd, event)) { free(candidates.data); goto fail; }
 
     TextBuffer messages = {0};
-    const char *system = "You are completing a local file-finding job. The gateway has checked every filename and supplied the strongest candidates. Inspect only plausible candidates. Use metadata before content. Read plain text only with fs_read_text. Read PDFs only with fs_read_pages in chunks of no more than 5 pages, beginning with the most relevant range and continuing only when required. Never ask to read an entire document. Return a plain-language answer naming the matching relative path and the evidence. If no candidate is reliable, call ask_user. Never print tool JSON or tool names in the answer.";
+    const char *system = "You are completing a local file-finding job. The gateway has checked every filename and supplied the strongest candidates. Inspect only plausible candidates. Use metadata before content. Read plain text only with fs_read_text. Read PDFs only with fs_read_pages in chunks of no more than 5 pages, beginning with the most relevant range and continuing only when required. Never ask to read an entire document. Return a plain-language answer naming the matching relative path and the evidence. If the request also asks to move the confirmed match, call fs_move with relative source and destination paths; the gateway will pause for approval. If no candidate is reliable, call ask_user. Never print tool JSON or tool names in the answer.";
     TextBuffer user = {0};
     if (!text_add(&user, "Goal: ") || !text_add(&user, goal) || !text_add(&user, "\n") ||
         !text_add(&user, candidates.data)) { free(candidates.data); free(user.data); goto fail; }
@@ -566,6 +567,28 @@ final_fail:
             text_json_string(&paused, job_id); text_add(&paused, ",\"question\":"); text_json_string(&paused, question->str); text_add(&paused, "}");
             int ok = sse_json(fd, paused.data) && samosa_send_all(fd, "data: [DONE]\n\n", 14);
             free(paused.data); json_free(args); free(args_arena); json_free(reply); free(reply_arena); free(reply_raw); free(messages.data);
+            json_free(listing); free(arena); free(list_raw); return ok;
+        }
+        if (!strcmp(name->str, "fs_move")) {
+            jval *src = json_get(args, "src"), *dst = json_get(args, "dst"); char src_abs[PATH_MAX], dst_abs[PATH_MAX];
+            int valid_dst = dst && dst->t == J_STR && dst->str[0] != '/' && !strstr(dst->str, "../") && strcmp(dst->str, "..") &&
+                            snprintf(dst_abs, sizeof(dst_abs), "%s/%s", folder, dst->str) < (int)sizeof(dst_abs);
+            if (!src || src->t != J_STR || !safe_job_path(folder, src->str, src_abs) || !valid_dst) {
+                json_free(args); free(args_arena); json_free(reply); free(reply_arena); free(reply_raw); free(messages.data); goto ask;
+            }
+            char plan_path[PATH_MAX]; TextBuffer plan = {0};
+            if (!job_state_path(g, job_id, "plan.jsonl", plan_path, 1) || !text_add(&plan, "{\"src\":") ||
+                !text_json_string(&plan, src_abs) || !text_add(&plan, ",\"dst\":") || !text_json_string(&plan, dst_abs) ||
+                !text_add(&plan, "}\n") || !write_small_file(plan_path, plan.data)) {
+                free(plan.data); json_free(args); free(args_arena); json_free(reply); free(reply_arena); free(reply_raw); free(messages.data); goto fail;
+            }
+            free(plan.data); TextBuffer event = {0};
+            text_add(&event, "{\"type\":\"plan\",\"moves\":[{\"src\":"); text_json_string(&event, src_abs);
+            text_add(&event, ",\"dst\":"); text_json_string(&event, dst_abs); text_add(&event, "}],\"skips\":[],\"dest_root\":");
+            text_json_string(&event, folder); text_add(&event, "}"); int ok = sse_json(fd, event.data); free(event.data);
+            TextBuffer waiting = {0}; text_add(&waiting, "{\"type\":\"await_apply\",\"job_id\":"); text_json_string(&waiting, job_id);
+            text_add(&waiting, ",\"moves\":1}"); ok = ok && sse_json(fd, waiting.data) && samosa_send_all(fd, "data: [DONE]\n\n", 14); free(waiting.data);
+            json_free(args); free(args_arena); json_free(reply); free(reply_arena); free(reply_raw); free(messages.data);
             json_free(listing); free(arena); free(list_raw); return ok;
         }
         jval *path = json_get(args, "path");
@@ -959,6 +982,47 @@ definition_fail:
     return preview ? samosa_http_json_error(fd, 500, "definition_failed", "The definition could not be run.") : 0;
 }
 
+static int jobs_apply_or_undo(Gateway *g, int fd, const SamosaHttpRequest *request,
+                              int undo) {
+    char *arena = NULL; jval *body = json_parse(request->body, &arena);
+    jval *id = body && body->t == J_OBJ ? json_get(body, "job_id") : NULL;
+    if (!id || id->t != J_STR) { json_free(body); free(arena); return samosa_http_json_error(fd, 400, "invalid_job", "job_id is required."); }
+    char job_id[128]; path_copy(job_id, sizeof(job_id), id->str); json_free(body); free(arena);
+    char *goal = NULL, *folder = NULL; if (!load_job_state(g, job_id, &goal, &folder)) {
+        free(goal); free(folder); return samosa_http_json_error(fd, 404, "job_not_found", "That job is unavailable.");
+    }
+    free(goal); char plan_path[PATH_MAX], applied_path[PATH_MAX];
+    if (!job_state_path(g, job_id, undo ? "applied.jsonl" : "plan.jsonl", plan_path, 0) ||
+        !job_state_path(g, job_id, "applied.jsonl", applied_path, 1)) { free(folder); return 0; }
+    char *raw = read_file_limit(plan_path, 1 << 20); if (!raw) { free(folder); return samosa_http_json_error(fd, 404, "plan_not_found", "There is no pending move plan."); }
+    if (!samosa_http_stream_headers(fd)) { free(raw); free(folder); return 0; }
+    int moved = 0, total = 0; char *save = NULL;
+    for (char *line = strtok_r(raw, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        char *line_arena = NULL; jval *move = json_parse(line, &line_arena);
+        jval *src = json_get(move, "src"), *dst = json_get(move, "dst");
+        if (!src || src->t != J_STR || !dst || dst->t != J_STR) { json_free(move); free(line_arena); continue; }
+        char *argv[] = {g->samosa_fs, undo ? "undo" : "move", "--root", folder, src->str, dst->str, NULL};
+        int status = 0; char *result = run_capture(g, g->samosa_fs, argv, 65536, &status); ++total;
+        int ok_move = result && WIFEXITED(status) && !WEXITSTATUS(status) && strstr(result, "\"moved\":true");
+        if (ok_move) ++moved;
+        TextBuffer event = {0}; char number[32]; snprintf(number, sizeof(number), "%d", total);
+        text_add(&event, "{\"type\":\"action\",\"op\":"); text_json_string(&event, undo ? "revert" : "move");
+        text_add(&event, ",\"i\":"); text_add(&event, number); text_add(&event, ",\"n\":1,\"src\":"); text_json_string(&event, src->str);
+        text_add(&event, ",\"dst\":"); text_json_string(&event, dst->str); text_add(&event, ok_move ? ",\"ok\":true}" : ",\"ok\":false,\"reason\":\"move_refused\"}");
+        sse_json(fd, event.data); free(event.data); free(result); json_free(move); free(line_arena);
+    }
+    if (!undo && moved > 0) write_small_file(applied_path, raw);
+    if (undo && moved == total && total > 0) unlink(applied_path);
+    char event[256];
+    if (undo) snprintf(event, sizeof(event), "{\"type\":\"undone\",\"undone\":%d,\"skipped\":%d}", moved, total - moved);
+    else snprintf(event, sizeof(event), "{\"type\":\"applied\",\"applied\":%d,\"skipped\":%d}", moved, total - moved);
+    int ok = sse_json(fd, event);
+    snprintf(event, sizeof(event), "{\"type\":\"done\",\"job_id\":\"%s\",\"summary\":\"%s %d file%s.\"}",
+             job_id, undo ? "Restored" : "Moved", moved, moved == 1 ? "" : "s");
+    ok = ok && sse_json(fd, event) && samosa_send_all(fd, "data: [DONE]\n\n", 14);
+    free(raw); free(folder); return ok;
+}
+
 static int backend_available(Gateway *g, const char *name) {
     if (!strcmp(name, "qwen")) {
         char experts[PATH_MAX];
@@ -1227,6 +1291,10 @@ static int gateway_handler(SamosaHttpServer *server, int fd,
         return definition_request(g, fd, request, 1);
     if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/jobs/definition/run"))
         return definition_request(g, fd, request, 0);
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/jobs/apply"))
+        return jobs_apply_or_undo(g, fd, request, 0);
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/jobs/undo"))
+        return jobs_apply_or_undo(g, fd, request, 1);
     if (!strcmp(request->path, "/v1/chat/completions") ||
         !strcmp(request->path, "/v1/models"))
         return proxy_request(g, fd, request);

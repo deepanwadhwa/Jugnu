@@ -51,6 +51,13 @@ static int handler(SamosaHttpServer *server, int fd,
             "\"id\":\"call_compiled_find\",\"type\":\"function\",\"function\":{"
             "\"name\":\"fs_read_text\",\"arguments\":\"{\\\"path\\\":\\\"cat-medical-note.txt\\\"}\"}}]}}]}", NULL);
     if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
+        strstr(request->body, "move it to Archive") && strstr(request->body, "\"role\":\"tool\""))
+        return samosa_http_response(fd, 200, "application/json",
+            "{\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\","
+            "\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{"
+            "\"id\":\"call_compiled_move\",\"type\":\"function\",\"function\":{"
+            "\"name\":\"fs_move\",\"arguments\":\"{\\\"src\\\":\\\"cat-medical-note.txt\\\",\\\"dst\\\":\\\"Archive/cat-medical-note.txt\\\"}\"}}]}}]}", NULL);
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
         strstr(request->body, "\"role\":\"tool\""))
         return samosa_http_response(fd, 200, "application/json",
             "{\"choices\":[{\"index\":0,\"finish_reason\":\"stop\","
