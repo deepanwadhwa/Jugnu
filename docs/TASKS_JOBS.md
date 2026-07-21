@@ -1556,3 +1556,95 @@ that caught the two real release bugs on 2026-07-20.
 - Rewriting the gateway/orchestration in a compiled language.
 - Anything touching the HF release itself (owner publishes; H1 README defect
   is a separate owner decision).
+
+---
+
+## Native Jobs completion estimate (2026-07-21)
+
+This section supersedes the older statement above that compiled gateway
+orchestration was deferred. The compiled gateway now ships and runs without a
+Python runtime. The remaining gap is specifically the **native background
+scheduler** and **native public-URL input pipeline**, followed by deletion of
+the obsolete Python orchestration implementation.
+
+### Current compiled baseline
+
+Implemented and tested in the compiled gateway:
+
+- persisted Find clarification and continuation;
+- native Ornith tool calls with metadata-first candidate selection;
+- PDF reads limited to explicit ranges of 1–5 pages;
+- editable review items with corrections persisted atomically to
+  `output.jsonl`, including accept-as-is completion;
+- one-sample preview by default and deterministic expanded preview of up to
+  three samples, with artifacts isolated under `preview/`;
+- definition execution and reviewable output generation;
+- reviewed move plans, Apply, Undo, and process-wide Kill;
+- compiled installation and packaging with no shipped Python runtime;
+- all generated build outputs under `build/`, not the repository root.
+
+Relevant commits: `57d96d9`, `be6057b`, `cf61342`, `2cf5bd8`, `e544ac8`,
+and `7e97a4c`. The locally installed acceptance release at the time this
+section was written is `dev-6d62f84ec2a4`.
+
+### Remaining work and effort
+
+This is an engineering estimate, not a deadline. It assumes one engineer who
+already understands this repository and includes implementation, focused
+tests, real acceptance checks, packaging, and cleanup.
+
+| Work item | Scope | Estimate |
+| --- | --- | ---: |
+| Native scheduler state and commands | Freeze/arm a definition, manual overnight command, persisted schedule state, idempotent one-shot polling | 1.5–2.5 days |
+| macOS `launchd` integration | Compiled `samosa-jobsd`, plist install/uninstall/status, logs, `caffeinate`, no hidden duplicate daemon | 1–1.5 days |
+| Scheduling policy | Cross-midnight windows, missed-window behavior, AC/battery policy, host checks, queued review instead of blocking prompts | 1–1.5 days |
+| Native public fetch boundary | HTTP(S), DNS and redirect SSRF checks, robots.txt, response limits, per-host rate limiting, readable extraction, stable errors | 2–3 days |
+| Public input change state | User-supplied URL list, content hashes, first-seen/changed/unchanged records, atomic state, feed only new or changed pages | 1–1.5 days |
+| General comparison workflow | Pair a local document with changed public pages without adding search, crawling, login, credentials, or job-board-specific UI | 0.5–1 day |
+| End-to-end hardening | Real public-site check, sleep/wake and missed-window checks, Kill behavior, package/install test, documentation | 1–1.5 days |
+
+Expected total for the missing native functionality: **7–11 focused
+engineering days**. Removing the superseded Python gateway/Jobs modules and
+consolidating duplicate tests after native parity is proven adds approximately
+**1–2 days**. A realistic completion range is therefore **8–13 focused days**.
+
+The public fetch boundary is the largest uncertainty. It must preserve the
+existing security behavior across DNS resolution and every redirect; invoking
+`curl` and trusting the initial URL is not an acceptable implementation.
+
+### Required acceptance gates
+
+The work is complete only when all of the following are true:
+
+1. `samosa-jobsd` is a compiled executable and runs with `python3` unavailable.
+2. Arming the same definition is idempotent; arming a changed definition under
+   the same job ID is rejected instead of silently replacing it.
+3. Overnight windows work across midnight, and missed windows follow the
+   configured `skip` or `run_next_start` policy.
+4. Battery/AC policy is enforced before work starts. On macOS, keep-awake uses
+   `caffeinate` only for the lifetime of an active run.
+5. Review-required records are persisted and queued. The daemon never waits on
+   an interactive question.
+6. The Kill control terminates the daemon's active job, model request,
+   sidecars, and keep-awake process without leaving listeners or child PIDs.
+7. Public URLs are explicitly supplied by the user. There is no discovery,
+   crawling, search-engine integration, login, credential use, or paywall
+   handling.
+8. SSRF checks cover resolved addresses and every redirect; robots.txt,
+   per-host rate limits, byte/time limits, and readable extraction are tested.
+9. A repeated unchanged fetch produces no job unit. A changed page produces
+   exactly one new unit and updates state atomically.
+10. The installed release passes scheduler and public-input integration tests
+    with Python unavailable, followed by one real public-page change check.
+11. Only after gates 1–10 pass are `tools/samosa_gateway.py`,
+    `tools/samosa_jobs.py`, and their runtime-only helpers removed or reduced to
+    non-shipping historical fixtures.
+
+### Deliberate non-goals
+
+- search engines or URL discovery;
+- crawling a site beyond an explicitly supplied page and its robots policy;
+- authenticated, credentialed, private, or paywalled pages;
+- email, form submission, or other outward actions;
+- job-board-specific fields or UI. Public URLs remain general-purpose job
+  inputs.
