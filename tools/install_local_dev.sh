@@ -10,8 +10,9 @@ SNAPSHOT=${SAMOSA_SNAPSHOT:-"$MODEL_ROOT/qwen36_group32_i8"}
 TOKENIZER=${SAMOSA_TOKENIZER:-"$MODEL_ROOT/tokenizer_qwen36.json"}
 HOME_DIR=${SAMOSA_HOME:-"$HOME/.samosa"}
 ENGINE="$ROOT/qwen36b"
+FS_SIDECAR="$ROOT/samosa-fs"
 
-for path in "$ENGINE" "$ROOT/assets/app.html" "$ROOT/assets/samosa-chat.png" \
+for path in "$ENGINE" "$FS_SIDECAR" "$ROOT/assets/app.html" "$ROOT/assets/samosa-chat.png" \
   "$ROOT/dist/samosa" "$ROOT/tools/samosa_gateway.py" \
   "$ROOT/tools/samosa_jobs.py" "$ROOT/tools/jobs_fs.py" "$ROOT/tools/samosa_tools.py" \
   "$SNAPSHOT/experts.bin" "$SNAPSHOT/resident.safetensors" \
@@ -20,7 +21,7 @@ for path in "$ENGINE" "$ROOT/assets/app.html" "$ROOT/assets/samosa-chat.png" \
   [ -f "$path" ] || { echo "missing local development input: $path" >&2; exit 1; }
 done
 
-release_hash=$(shasum -a 256 "$ENGINE" "$ROOT/assets/app.html" "$ROOT/dist/samosa" \
+release_hash=$(shasum -a 256 "$ENGINE" "$FS_SIDECAR" "$ROOT/assets/app.html" "$ROOT/dist/samosa" \
   "$ROOT/tools/samosa_gateway.py" "$ROOT/tools/samosa_jobs.py" \
   "$ROOT/tools/jobs_fs.py" "$ROOT/tools/samosa_tools.py" |
   shasum -a 256 | awk '{print substr($1,1,12)}')
@@ -41,6 +42,7 @@ ln "$TOKENIZER" "$stage/tokenizer_qwen36.json" || {
   exit 1
 }
 cp "$ENGINE" "$stage/bin/qwen36b"
+cp "$FS_SIDECAR" "$stage/bin/samosa-fs"
 cp "$ROOT/dist/samosa" "$stage/bin/samosa"
 cp "$ROOT/tools/samosa_gateway.py" "$stage/bin/samosa-gateway"
 # The jobs layer imports its siblings by directory, so keep all three in bin/
@@ -50,7 +52,7 @@ cp "$ROOT/tools/jobs_fs.py" "$stage/bin/jobs_fs.py"
 cp "$ROOT/tools/samosa_tools.py" "$stage/bin/samosa_tools.py"
 cp "$ROOT/assets/app.html" "$stage/app.html"
 cp "$ROOT/assets/samosa-chat.png" "$stage/samosa-chat.png"
-chmod +x "$stage/bin/qwen36b" "$stage/bin/samosa" "$stage/bin/samosa-gateway"
+chmod +x "$stage/bin/qwen36b" "$stage/bin/samosa-fs" "$stage/bin/samosa" "$stage/bin/samosa-gateway"
 
 # Document extraction (PDF text via libpdfium, docs/TASKS_DOCUMENTS.md) is an
 # optional capability, not a hard dependency of this installer: most dev

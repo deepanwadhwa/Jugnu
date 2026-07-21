@@ -134,7 +134,7 @@ class _Emitter:
 
 FIND_TOOLS = ['fs_survey', 'fs_list', 'fs_metadata', 'fs_detect_type',
               'fs_read_text', 'fs_read_document', 'fs_read_page',
-              'notes_append', 'notes_read']
+              'notes_append', 'notes_read', 'ask_user']
 
 
 def run_job(goal, folder, mode='confirm', model_call=None, loop_model_call=None):
@@ -203,17 +203,29 @@ def run_job(goal, folder, mode='confirm', model_call=None, loop_model_call=None)
                         "Always pass relative paths to filesystem tools: '.', 'sub/file.pdf', "
                         "or a filename from fs_list. Never pass '/' or an absolute path. "
                         "Start with fs_list on '.' using a limit large enough to see likely "
-                        "candidates before reading files. You must not ask to move, delete, "
-                        "rename, email, or upload files."},
+                        "candidates before reading files. If you need clarification, call "
+                        "ask_user with the question; do not end with a question as your final "
+                        "answer. You must not ask to move, delete, rename, email, or upload files."},
             {'role': 'user',
              'content': f"Goal: {goal}\nThe working folder is already selected; use relative paths only."},
         ]
         for loop_event in samosa_tools.iter_tool_loop(call_model, messages, tools, ctx):
             while pending:
                 yield pending.pop(0)
+            if loop_event.get('type') == 'await_user':
+                _write_convo(jdir, loop_event['convo'], loop_event['call'],
+                             loop_event.get('round_i', 0))
+                yield log.append('await_user', job_id=job_id,
+                                 question=loop_event.get('question', ''))
+                return
             if loop_event.get('type') == 'final':
-                yield log.append('done', summary=(loop_event.get('text') or '').strip()
-                                 or "Find job completed without a summary.")
+                final_text = (loop_event.get('text') or '').strip()
+                if _looks_like_question(final_text):
+                    call = {'samosa_tool': 'ask_user', 'question': final_text}
+                    _write_convo(jdir, loop_event.get('convo') or messages, call, 0)
+                    yield log.append('await_user', job_id=job_id, question=final_text)
+                    return
+                yield log.append('done', summary=final_text or "Find job completed without a summary.")
                 return
         yield log.append('done', summary="Find job completed without a summary.")
         return
@@ -259,6 +271,58 @@ def apply_job(job_id, emit_only_new=True):
         return
     for evt in _apply(jdir, log, moves):
         yield evt
+
+
+def answer_job(job_id, answer, loop_model_call=None):
+    """Resume a paused find job after an ask_user answer."""
+    jdir = job_dir_for(job_id)
+    log = fs.EventLog(os.path.join(jdir, 'events.jsonl'))
+    log.load()
+    state = _read_convo(jdir)
+    if not state:
+        yield log.append('error', message=f"no paused conversation for job {job_id}")
+        return
+    if loop_model_call is None:
+        yield log.append('error', message="the model is not available to resume this job")
+        return
+    folder = _job_folder(jdir)
+    if not folder or not os.path.isdir(folder):
+        yield log.append('error', message=f"folder for job {job_id} is unavailable")
+        return
+    call = state.get('call') or {'samosa_tool': 'ask_user'}
+    convo = list(state.get('convo') or [])
+    convo.append({'role': 'assistant', 'content': _dumps(call)})
+    convo.append({'role': 'user',
+                  'content': f"SAMOSA_TOOL_RESULT ask_user\n{answer}\n\n(Continue the job now.)"})
+    pending = []
+
+    def emit_tool_event(event_type, **fields):
+        pending.append(log.append(event_type, **fields))
+
+    ctx = ToolContext(folder, mode='preview', emit=emit_tool_event, job_dir=jdir)
+    tools = samosa_tools.REGISTRY.subset(FIND_TOOLS)
+    for loop_event in samosa_tools.iter_tool_loop(
+            loop_model_call, convo, tools, ctx, add_ability_prompt=False):
+        while pending:
+            yield pending.pop(0)
+        if loop_event.get('type') == 'await_user':
+            _write_convo(jdir, loop_event['convo'], loop_event['call'],
+                         loop_event.get('round_i', 0))
+            yield log.append('await_user', job_id=job_id,
+                             question=loop_event.get('question', ''))
+            return
+        if loop_event.get('type') == 'final':
+            final_text = (loop_event.get('text') or '').strip()
+            if _looks_like_question(final_text):
+                call = {'samosa_tool': 'ask_user', 'question': final_text}
+                _write_convo(jdir, loop_event.get('convo') or convo, call, 0)
+                yield log.append('await_user', job_id=job_id, question=final_text)
+                return
+            _clear_convo(jdir)
+            yield log.append('done', summary=final_text or "Find job completed without a summary.")
+            return
+    _clear_convo(jdir)
+    yield log.append('done', summary="Find job completed without a summary.")
 
 
 def undo_job(job_id):
@@ -351,6 +415,35 @@ def _clear_plan(jdir):
         pass
 
 
+def _convo_path(jdir):
+    return os.path.join(jdir, 'convo.json')
+
+
+def _write_convo(jdir, convo, call, round_i):
+    fs.atomic_write(_convo_path(jdir), _dumps({
+        'convo': convo,
+        'call': call,
+        'round_i': round_i,
+    }))
+
+
+def _read_convo(jdir):
+    import json
+    try:
+        with open(_convo_path(jdir)) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _clear_convo(jdir):
+    try:
+        os.unlink(_convo_path(jdir))
+    except OSError:
+        pass
+
+
 def _job_folder(jdir):
     import json
     try:
@@ -363,6 +456,10 @@ def _job_folder(jdir):
 def _dumps(obj):
     import json
     return json.dumps(obj, separators=(',', ':'))
+
+
+def _looks_like_question(text):
+    return bool(text and text.rstrip().endswith('?'))
 
 
 # --- Minimal terminal CLI --------------------------------------------------

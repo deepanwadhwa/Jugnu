@@ -143,7 +143,7 @@ fi
 # unchanged — this installer behaves exactly as it did before either existed.
 GATEWAY_ENABLED=0
 if manifest_field "samosa-gateway" 1 >/dev/null 2>&1; then
-  INSTALL_FILES="$INSTALL_FILES samosa-gateway samosa_jobs.py jobs_fs.py samosa_tools.py"
+  INSTALL_FILES="$INSTALL_FILES samosa-gateway samosa_jobs.py jobs_fs.py samosa_tools.py engine/samosa_fs.c"
   GATEWAY_ENABLED=1
   # serve/app run through the gateway (Python) once it's staged, not just the
   # `jobs` subcommand as before — check before spending any bandwidth.
@@ -253,6 +253,13 @@ if [ "$DOCUMENTS_ENABLED" = 1 ]; then
       fail "could not set the staged PDFium runtime path"
   fi
   chmod +x "$STAGE/bin/samosa-extract"
+fi
+
+if [ "$GATEWAY_ENABLED" = 1 ]; then
+  $COMPILER -O2 -Wall -Wextra -Werror -std=c11 \
+    "$STAGE/engine/samosa_fs.c" -o "$STAGE/bin/samosa-fs" ||
+    fail "staged filesystem sidecar compilation failed; live release was not changed"
+  chmod +x "$STAGE/bin/samosa-fs"
 fi
 
 if [ "${SAMOSA_INSTALL_TEST:-0}" != 1 ]; then

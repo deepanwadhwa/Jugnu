@@ -127,6 +127,46 @@ class JobsLayerTest(unittest.TestCase):
             logged = [line for line in f if '"type":"tool_call"' in line]
         self.assertEqual(len(logged), 2)
 
+    def test_find_ask_user_pauses_and_resumes(self):
+        def first_model(_messages):
+            return '{"samosa_tool":"ask_user","question":"Which pet name should I look for?"}'
+
+        events, by = drain(J.run_job("find the vaccination record", self.inbox,
+                                     mode='confirm', loop_model_call=first_model))
+        self.assertEqual(by['intent'][0]['kind'], 'find')
+        self.assertIn('await_user', by)
+        self.assertEqual(by['await_user'][0]['question'], 'Which pet name should I look for?')
+        job_id = by['await_user'][0]['job_id']
+        self.assertTrue(os.path.exists(os.path.join(self.jobsroot, job_id, 'convo.json')))
+
+        seen_answer = []
+
+        def resume_model(messages):
+            seen_answer.append(messages[-1]['content'])
+            return 'Found it at titli_vaccination_2025.pdf.'
+
+        _, resumed = drain(J.answer_job(job_id, 'Titli', loop_model_call=resume_model))
+        self.assertIn('Titli', seen_answer[0])
+        self.assertIn('done', resumed)
+        self.assertIn('titli_vaccination_2025.pdf', resumed['done'][0]['summary'])
+        self.assertFalse(os.path.exists(os.path.join(self.jobsroot, job_id, 'convo.json')))
+
+    def test_find_final_question_pauses_for_answer(self):
+        def first_model(_messages):
+            return 'Which pet name should I use?'
+
+        _, by = drain(J.run_job("find the vaccination record", self.inbox,
+                                mode='confirm', loop_model_call=first_model))
+        self.assertIn('await_user', by)
+        job_id = by['await_user'][0]['job_id']
+
+        def resume_model(_messages):
+            return 'Found it at titli_vaccination_2025.pdf.'
+
+        _, resumed = drain(J.answer_job(job_id, 'Titli', loop_model_call=resume_model))
+        self.assertIn('done', resumed)
+        self.assertIn('titli_vaccination_2025.pdf', resumed['done'][0]['summary'])
+
     # --- organize: confirm then apply -------------------------------------
 
     def test_confirm_pauses_then_apply_and_undo(self):

@@ -68,6 +68,10 @@ GATEWAY_FILES = [
     "samosa_tools.py",
 ]
 
+GATEWAY_SOURCE_FILES = [
+    "samosa_fs.c",
+]
+
 def sha256_file(path: pathlib.Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -136,6 +140,13 @@ def main() -> int:
             staged.append(out / "pdfium" / name)
 
     if args.gateway:
+        for name in GATEWAY_SOURCE_FILES:
+            src = ROOT / "src" / name
+            if not src.exists():
+                print(f"missing gateway source file: {src}", file=sys.stderr)
+                return 1
+            place(src, out / "engine" / name, link=False)
+            staged.append(out / "engine" / name)
         for name in GATEWAY_FILES:
             src = ROOT / "tools" / name
             if not src.exists():

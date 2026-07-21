@@ -720,6 +720,20 @@
             ctx.jobId = evt.job_id; lastJobId = evt.job_id;
             showBar(`${evt.moves} file${evt.moves === 1 ? "" : "s"} ready to move.`, [["Apply moves", "apply", () => applyJob(evt.job_id, ctx)]]);
             break;
+          case "await_user": {
+            ctx.jobId = evt.job_id; lastJobId = evt.job_id;
+            const l = jobLine("?", evt.question || "I need one detail to continue");
+            const box = document.createElement("div"); box.className = "job-plan";
+            const input = document.createElement("input");
+            input.type = "text"; input.placeholder = "Answer"; input.autocomplete = "off";
+            const button = document.createElement("button");
+            button.type = "button"; button.textContent = "Continue";
+            button.onclick = () => answerJob(evt.job_id, input.value, ctx);
+            input.onkeydown = e => { if (e.key === "Enter") button.click(); };
+            box.appendChild(input); box.appendChild(button); l.querySelector(".body").appendChild(box);
+            input.focus();
+            break;
+          }
           case "action": {
             if (!ctx.progress) ctx.progress = jobLine("⟳", "");
             const verb = evt.op === "revert" ? "Restoring" : "Moving";
@@ -794,6 +808,12 @@
         const uctx = { folder: ctx.folder, jobId };
         try { await streamJob("/v1/jobs/undo", { job_id: jobId }, uctx); }
         catch (e) { renderJobEvent({ type: "error", message: String(e) }, uctx); }
+        finally { jobRunning = false; }
+      }
+      async function answerJob(jobId, answer, ctx) {
+        if (jobRunning || !answer.trim()) return; jobRunning = true; jobEls.bar.hidden = true;
+        try { await streamJob("/v1/jobs/answer", { job_id: jobId, answer }, ctx); }
+        catch (e) { renderJobEvent({ type: "error", message: String(e) }, ctx); }
         finally { jobRunning = false; }
       }
 

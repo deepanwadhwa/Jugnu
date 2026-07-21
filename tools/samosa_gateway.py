@@ -962,6 +962,8 @@ class Handler(BaseHTTPRequestHandler):
             self.jobs_stream(self.body(), "apply")
         elif path == "/v1/jobs/undo":
             self.jobs_stream(self.body(), "undo")
+        elif path == "/v1/jobs/answer":
+            self.jobs_stream(self.body(), "answer")
         elif path == "/v1/cancel":
             self.json_response(200, {"cancelled": supervisor.cancel()})
         elif path == "/v1/shutdown":
@@ -1153,6 +1155,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             gen = (samosa_jobs.apply_job(job_id) if kind == "apply"
                    else samosa_jobs.undo_job(job_id))
+        elif kind == "answer":
+            job_id = str(data.get("job_id", "")).strip()
+            answer = str(data.get("answer", "")).strip()
+            if not job_id or not answer:
+                self.json_response(400, {"error": {"message": "job_id and answer are required"}})
+                return
+            gen = samosa_jobs.answer_job(job_id, answer,
+                                         loop_model_call=self.jobs_tool_loop_model_call)
         else:
             self.json_response(404, {"error": {"message": "unknown jobs action"}})
             return

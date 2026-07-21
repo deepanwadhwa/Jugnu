@@ -42,6 +42,14 @@ class ToolError(Exception):
     """A tool refused to run (bad path, wrong mode, missing arg)."""
 
 
+class AwaitUser(Exception):
+    """A tool paused the loop until the user provides an answer."""
+
+    def __init__(self, question):
+        super().__init__(question)
+        self.question = question
+
+
 class ToolContext:
     """Execution context for a run of tools.
 
@@ -204,13 +212,16 @@ def execute_tool(call, ctx, tools):
             ctx.emit('tool_call', tool=name, args={k: v for k, v in call.items() if k != 'samosa_tool'})
         result = tool.run(call, ctx)
         return result if isinstance(result, str) else json.dumps(result)
+    except AwaitUser:
+        raise
     except ToolError as e:
         return f"tool {name} refused: {e}"
     except Exception as e:  # defensive: a tool bug must not crash the job
         return f"tool {name} failed: {e}"
 
 
-def iter_tool_loop(model_call, messages, tools, ctx, max_rounds=MAX_TOOL_ROUNDS):
+def iter_tool_loop(model_call, messages, tools, ctx, max_rounds=MAX_TOOL_ROUNDS,
+                   add_ability_prompt=True):
     """Drive a model through a tool-using conversation, yielding loop events.
 
     model_call(messages) -> assistant_text. `messages` is an OpenAI-style list;
@@ -219,20 +230,26 @@ def iter_tool_loop(model_call, messages, tools, ctx, max_rounds=MAX_TOOL_ROUNDS)
     next user turn beginning SAMOSA_TOOL_RESULT.
     """
     convo = [dict(m) for m in messages]
-    system_add = ability_prompt(tools)
-    if convo and convo[0].get('role') == 'system':
-        convo[0]['content'] = str(convo[0].get('content', '')) + system_add
-    else:
-        convo.insert(0, {'role': 'system', 'content': system_add.lstrip()})
+    if add_ability_prompt:
+        system_add = ability_prompt(tools)
+        if convo and convo[0].get('role') == 'system':
+            convo[0]['content'] = str(convo[0].get('content', '')) + system_add
+        else:
+            convo.insert(0, {'role': 'system', 'content': system_add.lstrip()})
 
     last_result = ''
     for round_i in range(max_rounds):
         text = model_call(convo)
         kind, call = classify_reply(text or '')
         if kind != 'tool':
-            yield {'type': 'final', 'text': text}
+            yield {'type': 'final', 'text': text, 'convo': convo}
             return
-        result = execute_tool(call, ctx, tools)
+        try:
+            result = execute_tool(call, ctx, tools)
+        except AwaitUser as pause:
+            yield {'type': 'await_user', 'question': pause.question, 'call': call,
+                   'convo': convo, 'round_i': round_i}
+            return
         yield {'type': 'tool_result', 'call': call, 'result': result}
         last_result = result
         remaining = max_rounds - round_i - 1
@@ -241,7 +258,7 @@ def iter_tool_loop(model_call, messages, tools, ctx, max_rounds=MAX_TOOL_ROUNDS)
         convo.append({'role': 'assistant', 'content': (text or '').strip()})
         convo.append({'role': 'user',
                       'content': f"SAMOSA_TOOL_RESULT {call.get('samosa_tool', '')}\n{result}{note}"})
-    yield {'type': 'final', 'text': last_result}
+    yield {'type': 'final', 'text': last_result, 'convo': convo}
 
 
 def run_tool_loop(model_call, messages, tools, ctx, max_rounds=MAX_TOOL_ROUNDS):
@@ -413,6 +430,14 @@ def _tool_notes_read(args, ctx):
     return text if text.strip() else "(no notes yet)"
 
 
+def _tool_ask_user(args, ctx):
+    """Pause the job and ask the user a clarifying question."""
+    question = str(args.get('question', '')).strip()
+    if not question:
+        raise ToolError("question is required")
+    raise AwaitUser(question[:1000])
+
+
 def _tool_fs_mkdir(args, ctx):
     """Create a directory (and parents) inside the working folder."""
     if not is_valid_reldir(args.get('path')):
@@ -485,6 +510,10 @@ def register_fs_tools(registry=REGISTRY):
         'notes_read', "read notes saved during this job",
         [],
         _tool_notes_read, mutating=False))
+    registry.register(Tool(
+        'ask_user', "ask the user one clarifying question and pause this job",
+        [('question', True, 'question to ask the user')],
+        _tool_ask_user, mutating=False))
     registry.register(Tool(
         'fs_mkdir', "create a folder",
         [('path', True, 'folder name to create')],
