@@ -183,17 +183,23 @@ def execute_tool(call, ctx, tools):
     """Execute one tool call against the registry, enforcing the boundary.
 
     Returns a text result for the model. Errors are returned as text (never
-    raised) so a single bad call does not abort the loop.
+    raised) so a single bad call does not abort the loop. `ctx` may be None
+    when `tools` is known to contain no mutating (filesystem) tools — chat's
+    web-only toolset has no working folder to jail, so it calls with no
+    context rather than faking one.
     """
     name = str(call.get("samosa_tool", ""))
     available = {t.name: t for t in tools}
     tool = available.get(name)
     if tool is None:
         return f"unknown tool {name!r}; available tools: {', '.join(available) or 'none'}"
+    if tool.mutating and ctx is None:
+        return f"tool {name} is not allowed here; it changes files"
     if tool.mutating and ctx.mode != 'execute':
         return f"tool {name} is not allowed in preview mode; it changes files"
     try:
-        ctx.emit('tool_call', tool=name, args={k: v for k, v in call.items() if k != 'samosa_tool'})
+        if ctx is not None:
+            ctx.emit('tool_call', tool=name, args={k: v for k, v in call.items() if k != 'samosa_tool'})
         result = tool.run(call, ctx)
         return result if isinstance(result, str) else json.dumps(result)
     except ToolError as e:

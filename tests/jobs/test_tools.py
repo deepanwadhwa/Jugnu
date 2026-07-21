@@ -85,6 +85,19 @@ class TestModeGating(unittest.TestCase):
         out = T.execute_tool({'samosa_tool': 'nope'}, ctx, T.REGISTRY.subset(['fs_survey']))
         self.assertIn('unknown tool', out)
 
+    def test_ctx_none_runs_nonmutating_tools_but_refuses_mutating(self):
+        # Chat's toolset has no working folder to jail (ctx=None); a
+        # non-mutating tool still runs fine, a mutating one is refused rather
+        # than crashing on ctx.mode.
+        register = T.Tool('_test_stateless_echo', 'echo', [], lambda a, c: 'ok', mutating=False)
+        T.REGISTRY.register(register)
+        out = T.execute_tool({'samosa_tool': '_test_stateless_echo'}, None, [register])
+        self.assertEqual(out, 'ok')
+
+        out = T.execute_tool({'samosa_tool': 'fs_mkdir', 'path': 'x'}, None,
+                             T.REGISTRY.subset(['fs_mkdir']))
+        self.assertIn('not allowed here', out)
+
 
 class TestFsTools(unittest.TestCase):
     def setUp(self):

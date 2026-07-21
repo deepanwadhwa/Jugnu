@@ -31,6 +31,7 @@ import xml.etree.ElementTree as ET
 # it pulls in — import from either location.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import samosa_jobs
+import samosa_tools
 
 
 HOST = "127.0.0.1"
@@ -726,51 +727,43 @@ def ability_prompt(locality: str) -> str:
     )
 
 
-def classify_reply(text: str) -> tuple[str, dict | None]:
-    """Classify streamed assistant text: a tool call, ordinary text, or undecided."""
-    check = text.strip()
-    check = re.sub(r"^```(?:json)?\s*", "", check)
-    if not check:
-        return "wait", None
-    if not check.startswith("{"):
-        return "text", None
-    for candidate in (re.sub(r"\s*```\s*$", "", check), check.split("\n", 1)[0]):
-        try:
-            value = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict) and isinstance(value.get("samosa_tool"), str):
-            return "tool", value
-        return "text", None
-    if '"samosa_tool"' not in check[:40] and len(check) > 40:
-        return "text", None
-    if len(check) > 700:
-        return "text", None
-    return "wait", None
+# classify_reply is generic tool-call-protocol parsing with no gateway-specific
+# behavior, so chat and jobs share exactly one implementation from the Tool
+# layer rather than two copies that could quietly drift apart. Bound to a
+# module-level name (not just used inline) so tests can still call
+# gateway.classify_reply(...) directly.
+classify_reply = samosa_tools.classify_reply
 
 
-def execute_tool(call: dict) -> str:
-    name = str(call.get("samosa_tool", ""))
-    try:
-        if name == "web_search":
-            rows = search_web(str(call.get("query", "")))
-            sections = []
-            for index, row in enumerate(rows[:5]):
-                lead = ""
-                if index < 2:
-                    try:
-                        lead = "\n" + readable_page(row["url"])["text"][:600]
-                    except (ValueError, PermissionError, OSError, subprocess.SubprocessError):
-                        pass
-                sections.append(f"{row['title']}\n{row['url']}\n{row['description']}{lead}".strip())
-            return "\n\n---\n\n".join(sections) or "the search returned no results"
-        if name == "open_url":
-            page = readable_page(str(call.get("url", "")))
-            return f"{page['title']}\n{page['url']}\n\n{page['text'][:4000]}"
-        return f"unknown tool {name!r}; available tools: web_search, open_url"
-    except (ValueError, PermissionError, OSError, json.JSONDecodeError,
-            subprocess.SubprocessError, TypeError) as error:
-        return f"tool {name} failed: {error}"
+def _web_search_tool_text(query: str) -> str:
+    """web_search's result formatting for chat: top hits, with the first two
+    pages opportunistically fetched for extra context. Registered as a Tool
+    layer tool below; kept here (not in samosa_tools) because it calls
+    search_web/readable_page, whose network/SSRF/provider config is
+    gateway-owned."""
+    rows = search_web(query)
+    sections = []
+    for index, row in enumerate(rows[:5]):
+        lead = ""
+        if index < 2:
+            try:
+                lead = "\n" + readable_page(row["url"])["text"][:600]
+            except (ValueError, PermissionError, OSError, subprocess.SubprocessError):
+                pass
+        sections.append(f"{row['title']}\n{row['url']}\n{row['description']}{lead}".strip())
+    return "\n\n---\n\n".join(sections) or "the search returned no results"
+
+
+def _open_url_tool_text(url: str) -> str:
+    page = readable_page(url)
+    return f"{page['title']}\n{page['url']}\n\n{page['text'][:4000]}"
+
+
+samosa_tools.register_web_tools(_web_search_tool_text, _open_url_tool_text)
+# Chat's toolset: web only. It has no working folder to jail (unlike a job),
+# so its tool calls run with ctx=None — execute_tool() treats that as "no
+# mutating tools apply here", which is true: web_search/open_url are read-only.
+CHAT_TOOLS = samosa_tools.REGISTRY.subset(["web_search", "open_url"])
 
 
 def request_location(payload: dict) -> tuple[float, float, str] | None:
@@ -1189,7 +1182,7 @@ class Handler(BaseHTTPRequestHandler):
             if kind != "tool" or round_index >= MAX_TOOL_ROUNDS:
                 self.send_raw_json(200, data)
                 return
-            result = execute_tool(call)
+            result = samosa_tools.execute_tool(call, None, CHAT_TOOLS)
             payload = followup_payload(payload, content, call, result,
                                        remaining=MAX_TOOL_ROUNDS - 1 - round_index)
 
@@ -1244,7 +1237,7 @@ class Handler(BaseHTTPRequestHandler):
                 ensure_ascii=False,
             )[:160]
             self.emit_chunk({"reasoning_content": f"\n[Samosa runs {name} {arguments}]\n"})
-            result = execute_tool(call)
+            result = samosa_tools.execute_tool(call, None, CHAT_TOOLS)
             self.emit_chunk({"reasoning_content": f"[{name} returned {len(result)} characters; reading]\n"})
             payload = followup_payload(payload, raw_text, call, result,
                                        remaining=MAX_TOOL_ROUNDS - 1 - round_index)
