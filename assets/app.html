@@ -988,7 +988,13 @@
             jobLine("●", `Restored ${evt.reverted} file${evt.reverted === 1 ? "" : "s"}`, "step-done");
             break;
           case "done": {
-            jobLine("✓", evt.summary, "step-done");
+            const summary = (evt.summary || "").trim();
+            if (!summary || summary === "Find job completed without a summary.") {
+              jobLine("✗", "This job did not produce an answer. Run it again.", "step-error");
+              jobEls.bar.hidden = true;
+              break;
+            }
+            jobLine("✓", summary, "step-done");
             loadReviewQueue(ctx.jobId || lastJobId, ctx);
             if (ctx.moved && !ctx.undone) showBar("Done — files were moved.", [["Undo", "undo", () => undoJob(ctx.jobId || lastJobId, ctx)]]);
             else jobEls.bar.hidden = true;

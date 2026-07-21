@@ -784,6 +784,48 @@ FIND_TOOLS = ['fs_survey', 'fs_list', 'fs_metadata', 'fs_detect_type',
               'fs_read_text', 'fs_read_document', 'fs_read_page',
               'notes_append', 'notes_read', 'ask_user', 'fs_move']
 TOOL_RESULT_EVENT_PREVIEW_CHARS = 2000
+FIND_CANDIDATE_LIMIT = 40
+
+_FIND_STOP_WORDS = {
+    'a', 'all', 'an', 'and', 'can', 'could', 'file', 'files', 'find', 'folder',
+    'for', 'from', 'i', 'in', 'is', 'it', 'locate', 'look', 'matching', 'me',
+    'my', 'of', 'on', 'please', 'record', 'records', 'search', 'show', 'tell',
+    'the', 'this', 'to', 'where', 'you',
+}
+_FIND_DOMAIN_TERMS = {
+    'cat': ('cat', 'kitten', 'pet', 'vet', 'veterinary', 'medical', 'vaccination',
+            'vaccine', 'rabies', 'prescription', 'lab', 'bill', 'invoice'),
+    'medical': ('medical', 'health', 'doctor', 'hospital', 'clinic', 'visit', 'lab',
+                'test', 'prescription', 'vaccination', 'vaccine', 'bill', 'invoice'),
+    'pet': ('pet', 'cat', 'dog', 'vet', 'veterinary', 'vaccination', 'vaccine',
+            'rabies', 'prescription', 'lab', 'bill', 'invoice'),
+}
+
+
+def _find_candidate_names(goal, items, limit=FIND_CANDIDATE_LIMIT):
+    """Rank names from the complete folder index before model tool use."""
+    words = [w for w in re.findall(r'[a-z0-9]+', (goal or '').lower())
+             if len(w) > 1 and w not in _FIND_STOP_WORDS]
+    terms = set(words)
+    for word in words:
+        terms.update(_FIND_DOMAIN_TERMS.get(word, ()))
+    ranked = []
+    for item in items or []:
+        name = str(item.get('name') or os.path.basename(item.get('input_path') or ''))
+        haystack = re.sub(r'[^a-z0-9]+', ' ', name.lower())
+        score = sum(4 if term in words else 1 for term in terms if term in haystack)
+        if score:
+            ranked.append((-score, name.lower(), name))
+    ranked.sort()
+    return [name for _score, _key, name in ranked[:limit]]
+
+
+def _find_incomplete_question(goal):
+    g = (goal or '').lower()
+    if re.search(r'\b(cat|dog|pet)\b', g):
+        return "I couldn't identify the right record yet. What is your pet's name?"
+    return ("I couldn't identify a reliable match yet. What filename, name, date, "
+            "or phrase should I search for?")
 
 
 def run_job(goal, folder, mode='confirm', model_call=None, loop_model_call=None):
@@ -846,6 +888,10 @@ def run_job(goal, folder, mode='confirm', model_call=None, loop_model_call=None)
         ctx = ToolContext(folder, mode=ctx_mode, emit=emit_tool_event, job_dir=jdir,
                           stage_mutations=(mode == 'confirm'))
         tools = samosa_tools.REGISTRY.subset(FIND_TOOLS)
+        indexed_items, _indexed_skips, index_error = fs.fs_sidecar_list(folder, recursive=False)
+        candidate_names = [] if index_error else _find_candidate_names(goal, indexed_items)
+        candidate_note = ("\nLikely filename candidates from the complete folder index:\n- " +
+                          "\n- ".join(candidate_names)) if candidate_names else ''
         messages = [
             {'role': 'system',
              'content': "You are running a local find job. Use metadata first, "
@@ -853,15 +899,17 @@ def run_job(goal, folder, mode='confirm', model_call=None, loop_model_call=None)
                         "with plain sentences that include the path and why it matches. "
                         "Always pass relative paths to filesystem tools: '.', 'sub/file.pdf', "
                         "or a filename from fs_list. Never pass '/' or an absolute path. "
-                        "Start with fs_list on '.' using a limit large enough to see likely "
-                        "candidates before reading files. If you need clarification, call "
+                        "A complete-folder filename shortlist may be included with the goal. "
+                        "Inspect those likely candidates first; use fs_list only when the "
+                        "shortlist is insufficient. If you need clarification, call "
                         "ask_user with the question; do not end with a question as your final "
                         "answer. If the user's goal asks to move the matching file, confirm "
                         "the match first, then call fs_move with relative src and dst. In review "
                         "mode that move will pause for the user to apply. You must not delete, "
                         "rename, email, or upload files."},
             {'role': 'user',
-             'content': f"Goal: {goal}\nThe working folder is already selected; use relative paths only."},
+             'content': (f"Goal: {goal}\nThe working folder is already selected; use relative "
+                         f"paths only.{candidate_note}")},
         ]
         for loop_event in samosa_tools.iter_tool_loop(call_model, messages, tools, ctx):
             while pending:
@@ -887,14 +935,22 @@ def run_job(goal, folder, mode='confirm', model_call=None, loop_model_call=None)
                 return
             if loop_event.get('type') == 'final':
                 final_text = (loop_event.get('text') or '').strip()
+                if not final_text:
+                    question = _find_incomplete_question(goal)
+                    call = {'samosa_tool': 'ask_user', 'question': question}
+                    _write_convo(jdir, loop_event.get('convo') or messages, call, 0)
+                    yield log.append('await_user', job_id=job_id, question=question)
+                    return
                 if _looks_like_question(final_text):
                     call = {'samosa_tool': 'ask_user', 'question': final_text}
                     _write_convo(jdir, loop_event.get('convo') or messages, call, 0)
                     yield log.append('await_user', job_id=job_id, question=final_text)
                     return
-                yield log.append('done', summary=final_text or "Find job completed without a summary.")
+                yield log.append('done', summary=final_text)
                 return
-        yield log.append('done', summary="Find job completed without a summary.")
+        question = _find_incomplete_question(goal)
+        _write_convo(jdir, messages, {'samosa_tool': 'ask_user', 'question': question}, 0)
+        yield log.append('await_user', job_id=job_id, question=question)
         return
 
     # Organize: compile the deterministic plan.
@@ -994,16 +1050,24 @@ def answer_job(job_id, answer, loop_model_call=None):
             return
         if loop_event.get('type') == 'final':
             final_text = (loop_event.get('text') or '').strip()
+            if not final_text:
+                question = _find_incomplete_question(_job_goal(jdir))
+                call = {'samosa_tool': 'ask_user', 'question': question}
+                _write_convo(jdir, loop_event.get('convo') or convo, call, 0)
+                yield log.append('await_user', job_id=job_id, question=question)
+                return
             if _looks_like_question(final_text):
                 call = {'samosa_tool': 'ask_user', 'question': final_text}
                 _write_convo(jdir, loop_event.get('convo') or convo, call, 0)
                 yield log.append('await_user', job_id=job_id, question=final_text)
                 return
             _clear_convo(jdir)
-            yield log.append('done', summary=final_text or "Find job completed without a summary.")
+            yield log.append('done', summary=final_text)
             return
-    _clear_convo(jdir)
-    yield log.append('done', summary="Find job completed without a summary.")
+    question = _find_incomplete_question(_job_goal(jdir))
+    call = {'samosa_tool': 'ask_user', 'question': question}
+    _write_convo(jdir, convo, call, 0)
+    yield log.append('await_user', job_id=job_id, question=question)
 
 
 def undo_job(job_id):
@@ -1164,6 +1228,15 @@ def _job_folder(jdir):
             return json.load(f).get('folder')
     except (OSError, ValueError):
         return None
+
+
+def _job_goal(jdir):
+    import json
+    try:
+        with open(os.path.join(jdir, 'job.json')) as f:
+            return json.load(f).get('goal') or ''
+    except (OSError, ValueError):
+        return ''
 
 
 def _dumps(obj):

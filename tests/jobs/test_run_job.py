@@ -277,6 +277,39 @@ class JobsLayerTest(unittest.TestCase):
         self.assertIn('preview', result_events[0])
         self.assertIn('chars', result_events[0])
 
+    def test_find_uses_candidates_from_complete_folder_index(self):
+        for i in range(60):
+            with open(os.path.join(self.inbox, f'archive-{i:02d}.pdf'), 'wb') as f:
+                f.write(b'%PDF-1.4 archive')
+        target = 'Bill_Titli_3-17.pdf'
+        with open(os.path.join(self.inbox, target), 'wb') as f:
+            f.write(b'%PDF-1.4 veterinary bill')
+
+        seen = []
+
+        def loop_model_call(messages):
+            seen.append(messages[-1]['content'])
+            return f'Found a likely medical record at {target}.'
+
+        _, by = drain(J.run_job("find my cat's medical records", self.inbox,
+                                mode='confirm', loop_model_call=loop_model_call))
+        self.assertIn(target, seen[0])
+        self.assertIn(target, by['done'][0]['summary'])
+
+    def test_find_empty_model_response_pauses_instead_of_completing(self):
+        scripted = [
+            '{"samosa_tool":"fs_list","path":".","limit":"1"}',
+            '',
+        ]
+
+        _, by = drain(J.run_job("find my cat's medical records", self.inbox,
+                                mode='confirm', loop_model_call=lambda _messages: scripted.pop(0)))
+        self.assertNotIn('done', by)
+        self.assertIn('await_user', by)
+        self.assertIn("pet's name", by['await_user'][0]['question'])
+        job_id = by['await_user'][0]['job_id']
+        self.assertTrue(os.path.exists(os.path.join(self.jobsroot, job_id, 'convo.json')))
+
     def test_find_ask_user_pauses_and_resumes(self):
         def first_model(_messages):
             return '{"samosa_tool":"ask_user","question":"Which pet name should I look for?"}'
