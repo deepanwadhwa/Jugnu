@@ -469,6 +469,7 @@ class JobsLayerTest(unittest.TestCase):
             json.dump({
                 'job_id': name,
                 'input': {'folder': self.inbox, 'recursive': False},
+                'organize': {'rule': {'by': 'extension'}},
                 'resources': {'run_on_battery': False},
                 'output': {'dir': os.path.join(self.work, 'out')},
             }, f)
@@ -550,6 +551,31 @@ class JobsLayerTest(unittest.TestCase):
         self.assertTrue(result['ok'])
         self.assertEqual(result['decisions'][0]['job_id'], 'daemon-job')
         self.assertEqual(result['decisions'][0]['action'], 'run')
+        self.assertEqual(result['decisions'][0]['run']['status'], 'complete')
+        self.assertTrue(os.path.exists(os.path.join(self.inbox, 'Organized', 'TXT', 'a.txt')))
+
+        schedule = J._read_json_file(armed['schedule_path'])
+        self.assertFalse(schedule['enabled'])
+        self.assertEqual(schedule['last_status'], 'complete')
+        second = J.jobsd_once(now_minutes=23 * 60, power={'on_battery': False})
+        self.assertEqual(second['decisions'][0]['reason'], 'disabled')
+
+    def test_jobsd_once_runs_report_job_without_prompting(self):
+        job_path = os.path.join(self.work, 'report-job.json')
+        with open(job_path, 'w') as f:
+            json.dump({
+                'job_id': 'report-job',
+                'input': {'folder': self.inbox, 'recursive': False},
+                'resources': {'run_on_battery': True},
+            }, f)
+        armed = J.arm_scheduled_job(job_path, window_start='22:00', window_end='06:00')
+        result = J.jobsd_once(now_minutes=23 * 60, power={'on_battery': True})
+        self.assertEqual(result['decisions'][0]['run']['result']['kind'], 'report')
+        log_path = os.path.join(self.jobsroot, 'report-job', 'events.jsonl')
+        with open(log_path) as f:
+            events = [json.loads(line) for line in f if line.strip()]
+        self.assertEqual(events[0]['type'], 'scheduled_job_start')
+        self.assertEqual(events[-1]['type'], 'scheduled_job_complete')
 
 
 if __name__ == '__main__':

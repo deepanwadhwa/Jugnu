@@ -456,6 +456,8 @@ def scheduler_decision(schedule, now_minutes=None, power=None):
     """Return whether an armed schedule should run, defer, or record a miss."""
     if not schedule.get('enabled', True):
         return {'action': 'defer', 'reason': 'disabled'}
+    if schedule.get('last_status') == 'complete':
+        return {'action': 'defer', 'reason': 'complete'}
     now = _now_minutes() if now_minutes is None else int(now_minutes)
     power = power or {'on_battery': False, 'ac_power': True}
     if power.get('on_battery') and not schedule.get('run_on_battery', False):
@@ -554,10 +556,37 @@ def jobsd_once(now_minutes=None, power=None):
     power = power or host_power_status()
     for schedule in list_armed_schedules():
         decision = scheduler_decision(schedule, now_minutes=now_minutes, power=power)
+        if decision.get('action') == 'run':
+            run_result = run_scheduled_job(schedule)
+            decision = {**decision, 'run': run_result}
+        elif decision.get('reason') == 'outside_window':
+            updated = record_missed_window(schedule, now_minutes=now_minutes)
+            if updated != schedule:
+                _write_json_file(schedule.get('schedule_path'), updated)
         decisions.append({'job_id': schedule.get('job_id'),
                           'schedule_path': schedule.get('schedule_path'),
                           **decision})
     return {'ok': True, 'decisions': decisions}
+
+
+def run_scheduled_job(schedule):
+    """Execute one due frozen job definition."""
+    job_path = schedule.get('job_path')
+    job = _read_json_file(job_path)
+    if job is None:
+        return _finish_schedule(schedule, 'failed', reason='job_unavailable')
+    job_id = schedule.get('job_id') or job.get('job_id') or slugify('scheduled-job')
+    jdir = os.path.dirname(schedule.get('schedule_path') or job_dir_for(job_id))
+    log = fs.EventLog(os.path.join(jdir, 'events.jsonl'))
+    log.load()
+    log.append('scheduled_job_start', job_id=job_id, job_path=job_path)
+    try:
+        result = _run_job_definition(job, jdir, log)
+    except Exception as error:
+        log.append('error', message=str(error))
+        return _finish_schedule(schedule, 'failed', reason=str(error))
+    log.append('scheduled_job_complete', job_id=job_id, **result)
+    return _finish_schedule(schedule, 'complete', result=result)
 
 
 def review_items(job_id):
@@ -1196,6 +1225,67 @@ def _read_json_file(path):
     except (OSError, ValueError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _write_json_file(path, value):
+    if not path:
+        return
+    fs.atomic_write(path, json.dumps(value, indent=2, sort_keys=True) + '\n')
+
+
+def _finish_schedule(schedule, status, result=None, reason=None):
+    updated = dict(schedule)
+    updated['last_status'] = status
+    updated['last_finished_at'] = fs.rfc3339_now()
+    updated['enabled'] = False if status == 'complete' else schedule.get('enabled', True)
+    if reason:
+        updated['last_reason'] = reason
+    if result is not None:
+        updated['last_result'] = result
+    _write_json_file(updated.get('schedule_path'), updated)
+    out = {'status': status}
+    if reason:
+        out['reason'] = reason
+    if result is not None:
+        out['result'] = result
+    return out
+
+
+def _run_job_definition(job, jdir, log):
+    input_cfg = job.get('input') if isinstance(job.get('input'), dict) else {}
+    folder = os.path.abspath(input_cfg.get('folder') or '')
+    if not os.path.isdir(folder):
+        raise ValueError(f'input folder does not exist: {folder}')
+    org = job.get('organize') if isinstance(job.get('organize'), dict) else None
+    if not org:
+        items, skipped = fs.discover_files(input_cfg, is_metadata_only=True)
+        by_type = {k: v['count'] for k, v in fs.count_by_type(items).items()}
+        log.append('counting', total=len(items), skipped=len(skipped), by_type=by_type)
+        log.append('report', total=len(items), by_type=by_type)
+        summary = _report_summary(len(items), by_type)
+        log.append('done', summary=summary)
+        return {'kind': 'report', 'total': len(items), 'skipped': len(skipped)}
+
+    plan, err = fs.build_organize_plan(job, jdir)
+    if err:
+        raise ValueError(err)
+    moves = [m for m in plan if 'dst' in m]
+    skips = [m for m in plan if 'skip' in m]
+    log.append('plan',
+               moves=[{'src': m['src'], 'dst': m['dst']} for m in moves],
+               skips=[{'src': s['src'], 'reason': s['skip']} for s in skips],
+               dest_root=os.path.abspath(org.get('dest_root') or os.path.join(folder, 'Organized')))
+    applied = 0
+    skipped = len(skips)
+    for i, move in enumerate(moves, 1):
+        ok, reason = fs.apply_move(move, input_folder=folder)
+        applied += 1 if ok else 0
+        skipped += 0 if ok else 1
+        log.append('action', op='move', i=i, n=len(moves), src=move['src'],
+                   dst=move['dst'], ok=ok, reason=reason)
+    log.append('applied', applied=applied, skipped=skipped)
+    log.append('done', summary=f"Scheduled job moved {applied} file{'' if applied == 1 else 's'}.")
+    return {'kind': 'organize', 'planned': len(moves), 'applied': applied, 'skipped': skipped}
 
 
 def _parse_hhmm(value):
