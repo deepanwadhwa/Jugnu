@@ -97,7 +97,8 @@ class TestMoveEngine(unittest.TestCase):
             f.write('valid doc')
         dst = os.path.join(self.input_folder, 'TEXT', 'doc.txt')
         plan = {'src': src, 'dst': dst, 'size': 9, 'mtime': os.path.getmtime(src)}
-        with patch('jobs_fs.atomic_no_clobber_rename', return_value=(False, 'cross_device')):
+        with patch('jobs_fs.find_fs_sidecar', return_value=None), \
+             patch('jobs_fs.atomic_no_clobber_rename', return_value=(False, 'cross_device')):
             ok, reason = fs.apply_move(plan, input_folder=self.input_folder)
         self.assertFalse(ok)
         self.assertEqual(reason, 'cross_device')

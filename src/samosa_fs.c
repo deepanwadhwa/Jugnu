@@ -1,12 +1,16 @@
 /*
  * samosa-fs -- short-lived filesystem metadata sidecar for Jobs.
  *
- * v1 is intentionally read-only: survey, list, metadata. It ports the
- * discovery semantics from tools/jobs_fs.py into a bounded process:
+ * v1 started read-only: survey, list, metadata. It ports the discovery
+ * semantics from tools/jobs_fs.py into a bounded process:
  * symlinks rejected, regular files only, magic-byte typing, UTF-8 fallback,
  * metadata-only capped reads, and SHA-256 dedup over full bytes or
  * prefix+"\0truncated\0"+size when the scan cap is hit.
+ *
+ * v2 adds the mutation core: move and undo. The gateway still owns the
+ * approval boundary; this sidecar performs one constrained filesystem verb.
  */
+#define _DARWIN_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include <dirent.h>
@@ -22,6 +26,10 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 #define DEFAULT_MAX_FILE_BYTES (25UL * 1024UL * 1024UL)
 #define MAX_SCAN_OUTPUT_BYTES (16UL * 1024UL * 1024UL)
@@ -324,6 +332,112 @@ static int join_path(char *out, size_t cap, const char *dir, const char *name) {
     return n >= 0 && (size_t)n < cap;
 }
 
+static int has_dotdot_component(const char *path) {
+    const char *p = path;
+    while (*p) {
+        while (*p == '/') p++;
+        if (p[0] == '.' && p[1] == '.' && (p[2] == '/' || p[2] == '\0'))
+            return 1;
+        while (*p && *p != '/') p++;
+    }
+    return 0;
+}
+
+static int inside_root_abs(const char *root_abs, const char *path) {
+    size_t n = strlen(root_abs);
+    if (strcmp(root_abs, "/") == 0)
+        return path[0] == '/';
+    return strncmp(root_abs, path, n) == 0 && (path[n] == '/' || path[n] == '\0');
+}
+
+static int make_absolute_path(char *out, size_t cap, const char *path) {
+    char cwd[PATH_MAX];
+    int n;
+    if (!path || !*path) return 0;
+    if (path[0] == '/') {
+        n = snprintf(out, cap, "%s", path);
+    } else {
+        if (!getcwd(cwd, sizeof(cwd))) return 0;
+        n = snprintf(out, cap, "%s/%s", cwd, path);
+    }
+    return n >= 0 && (size_t)n < cap;
+}
+
+static int canonicalize_parent_path(char *out, size_t cap, const char *path) {
+    char abs_path[PATH_MAX];
+    char probe[PATH_MAX];
+    char suffix[PATH_MAX] = "";
+    char *slash;
+    char real[PATH_MAX];
+    int n;
+    if (!make_absolute_path(abs_path, sizeof(abs_path), path))
+        return 0;
+    snprintf(probe, sizeof(probe), "%s", abs_path);
+    for (;;) {
+        if (realpath(probe, real)) {
+            if (suffix[0])
+                n = snprintf(out, cap, "%s/%s", real, suffix);
+            else
+                n = snprintf(out, cap, "%s", real);
+            return n >= 0 && (size_t)n < cap;
+        }
+        slash = strrchr(probe, '/');
+        if (!slash)
+            return 0;
+        {
+            char next_suffix[PATH_MAX];
+            const char *name = slash + 1;
+            if (suffix[0]) n = snprintf(next_suffix, sizeof(next_suffix), "%s/%s", name, suffix);
+            else n = snprintf(next_suffix, sizeof(next_suffix), "%s", name);
+            if (n < 0 || (size_t)n >= sizeof(next_suffix))
+                return 0;
+            snprintf(suffix, sizeof(suffix), "%s", next_suffix);
+        }
+        if (slash == probe) {
+            probe[1] = '\0';
+        } else {
+            *slash = '\0';
+        }
+    }
+}
+
+static int ensure_parent_dirs(const char *path, const char *root_abs) {
+    char tmp[PATH_MAX];
+    char *slash;
+    char *p;
+    if (!make_absolute_path(tmp, sizeof(tmp), path)) return 0;
+    slash = strrchr(tmp, '/');
+    if (!slash) return 0;
+    if (slash == tmp) return 1;
+    *slash = '\0';
+    if (has_dotdot_component(tmp) || !inside_root_abs(root_abs, tmp))
+        return 0;
+    for (p = tmp + 1; *p; ++p) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (strcmp(tmp, root_abs) != 0 && inside_root_abs(root_abs, tmp)) {
+            struct stat st;
+            if (lstat(tmp, &st) != 0) {
+                if (errno != ENOENT || mkdir(tmp, 0777) != 0)
+                    return 0;
+            } else if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) {
+                return 0;
+            }
+        }
+        *p = '/';
+    }
+    {
+        struct stat st;
+        if (lstat(tmp, &st) != 0) {
+            if (errno != ENOENT || mkdir(tmp, 0777) != 0)
+                return 0;
+        } else if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int collect_paths(const char *root, int recursive, PathList *paths) {
     DIR *dir = opendir(root);
     struct dirent *de;
@@ -396,7 +510,13 @@ static int is_valid_utf8_text(const unsigned char *data, size_t len) {
 }
 
 static double stat_mtime(const struct stat *st) {
+#if defined(__APPLE__) && defined(__MACH__)
+    return (double)st->st_mtimespec.tv_sec + (double)st->st_mtimespec.tv_nsec / 1000000000.0;
+#elif defined(_BSD_SOURCE) || defined(_SVID_SOURCE) || defined(_DEFAULT_SOURCE) || defined(_POSIX_C_SOURCE)
+    return (double)st->st_mtim.tv_sec + (double)st->st_mtim.tv_nsec / 1000000000.0;
+#else
     return (double)st->st_mtime;
+#endif
 }
 
 static int read_up_to(int fd, size_t limit, ReadBuf *out) {
@@ -737,10 +857,201 @@ static int emit_metadata(const FileItem *it) {
     return 0;
 }
 
+static void fsync_parent_dir(const char *path) {
+    char tmp[PATH_MAX];
+    char *slash;
+    int fd;
+    if (!make_absolute_path(tmp, sizeof(tmp), path)) return;
+    slash = strrchr(tmp, '/');
+    if (!slash) return;
+    if (slash == tmp) slash[1] = '\0';
+    else *slash = '\0';
+    fd = open(tmp, O_RDONLY);
+    if (fd >= 0) {
+        (void)fsync(fd);
+        close(fd);
+    }
+}
+
+static int atomic_no_clobber_move(const char *src, const char *dst, const char **reason) {
+    struct stat src_st, dst_st;
+    if (lstat(dst, &dst_st) == 0) {
+        *reason = "dest_exists";
+        return 0;
+    }
+    if (errno != ENOENT) {
+        *reason = "dest_stat_failed";
+        return 0;
+    }
+    if (link(src, dst) != 0) {
+        if (errno == EEXIST) *reason = "dest_exists";
+        else if (errno == EXDEV) *reason = "cross_device";
+        else *reason = "link_failed";
+        return 0;
+    }
+    if (stat(src, &src_st) != 0 || stat(dst, &dst_st) != 0 ||
+        src_st.st_ino != dst_st.st_ino || src_st.st_dev != dst_st.st_dev) {
+        (void)unlink(dst);
+        *reason = "inode_mismatch";
+        return 0;
+    }
+    if (unlink(src) != 0) {
+        (void)unlink(dst);
+        *reason = "unlink_failed";
+        return 0;
+    }
+    fsync_parent_dir(dst);
+    fsync_parent_dir(src);
+    return 1;
+}
+
+static int validate_move_source(const char *src, off_t expected_size, int have_size,
+                                double expected_mtime, int have_mtime,
+                                const char *expected_hash, const char **reason) {
+    struct stat path_st, st;
+    int flags = O_RDONLY;
+    int fd;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    if (lstat(src, &path_st) != 0) {
+        *reason = "cannot_open_src";
+        return 0;
+    }
+    if (S_ISLNK(path_st.st_mode)) {
+        *reason = "cannot_open_src";
+        return 0;
+    }
+    fd = open(src, flags);
+    if (fd < 0) {
+        *reason = "cannot_open_src";
+        return 0;
+    }
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_dev != path_st.st_dev || st.st_ino != path_st.st_ino) {
+        close(fd);
+        *reason = "not_regular_file";
+        return 0;
+    }
+    if ((have_size && st.st_size != expected_size) ||
+        (have_mtime && (stat_mtime(&st) - expected_mtime > 0.0001 ||
+                        expected_mtime - stat_mtime(&st) > 0.0001))) {
+        close(fd);
+        *reason = "changed_since_scan";
+        return 0;
+    }
+    if (expected_hash) {
+        Sha256 sha;
+        unsigned char digest[32];
+        char hex[65];
+        unsigned char block[1 << 20];
+        sha256_init(&sha);
+        for (;;) {
+            ssize_t n = read(fd, block, sizeof(block));
+            if (n < 0) {
+                close(fd);
+                *reason = "cannot_read_src";
+                return 0;
+            }
+            if (n == 0) break;
+            sha256_update(&sha, block, (size_t)n);
+        }
+        sha256_final(&sha, digest);
+        sha256_hex(digest, hex);
+        if (strcmp(hex, expected_hash) != 0) {
+            close(fd);
+            *reason = "changed_since_scan";
+            return 0;
+        }
+    }
+    close(fd);
+    return 1;
+}
+
+static int emit_move_result(int ok, const char *reason) {
+    Buffer out = {0};
+    int good = buf_put(&out, "{\"ok\":true,\"moved\":") &&
+               buf_put(&out, ok ? "true" : "false");
+    if (!ok) {
+        good = good && buf_put(&out, ",\"reason\":") &&
+               buf_json_string(&out, reason ? reason : "unknown");
+    }
+    good = good && buf_put(&out, "}\n");
+    if (!good) {
+        free(out.data);
+        put_error("output_too_large");
+        return 65;
+    }
+    fputs(out.data, stdout);
+    free(out.data);
+    return 0;
+}
+
+static int command_move(const char *root, const char *src, const char *dst,
+                        off_t expected_size, int have_size,
+                        double expected_mtime, int have_mtime,
+                        const char *expected_hash) {
+    char root_abs[PATH_MAX], src_abs[PATH_MAX], dst_abs[PATH_MAX], src_real[PATH_MAX];
+    const char *reason = NULL;
+    if (!root || !src || !dst || has_dotdot_component(src) || has_dotdot_component(dst)) {
+        put_error("bad_args");
+        return 64;
+    }
+    if (!realpath(root, root_abs)) {
+        put_error("folder_unavailable");
+        return 65;
+    }
+    if (!realpath(src, src_real) || !make_absolute_path(src_abs, sizeof(src_abs), src) ||
+        !canonicalize_parent_path(dst_abs, sizeof(dst_abs), dst)) {
+        return emit_move_result(0, "cannot_open_src");
+    }
+    if (!inside_root_abs(root_abs, src_real) || !inside_root_abs(root_abs, dst_abs))
+        return emit_move_result(0, "outside_jail");
+    if (!validate_move_source(src_abs, expected_size, have_size, expected_mtime,
+                              have_mtime, expected_hash, &reason))
+        return emit_move_result(0, reason);
+    if (!ensure_parent_dirs(dst_abs, root_abs))
+        return emit_move_result(0, "mkdir_failed");
+    if (!atomic_no_clobber_move(src_abs, dst_abs, &reason))
+        return emit_move_result(0, reason);
+    return emit_move_result(1, NULL);
+}
+
+static int command_undo(const char *root, const char *src, const char *dst) {
+    struct stat st;
+    char root_abs[PATH_MAX], src_abs[PATH_MAX], dst_abs[PATH_MAX], dst_real[PATH_MAX];
+    const char *reason = NULL;
+    if (!root || !src || !dst || has_dotdot_component(src) || has_dotdot_component(dst)) {
+        put_error("bad_args");
+        return 64;
+    }
+    if (!realpath(root, root_abs)) {
+        put_error("folder_unavailable");
+        return 65;
+    }
+    if (!realpath(dst, dst_real) || !canonicalize_parent_path(src_abs, sizeof(src_abs), src) ||
+        !make_absolute_path(dst_abs, sizeof(dst_abs), dst))
+        return emit_move_result(0, "dest_missing");
+    if (!inside_root_abs(root_abs, src_abs) || !inside_root_abs(root_abs, dst_real))
+        return emit_move_result(0, "outside_jail");
+    if (lstat(dst_abs, &st) != 0)
+        return emit_move_result(0, "dest_missing");
+    if (!ensure_parent_dirs(src_abs, root_abs))
+        return emit_move_result(0, "mkdir_failed");
+    if (!atomic_no_clobber_move(dst_abs, src_abs, &reason))
+        return emit_move_result(0, reason);
+    return emit_move_result(1, NULL);
+}
+
 static void usage(void) {
     fputs("usage: samosa-fs survey [--recursive] [--max-file-bytes N] ROOT\n"
           "       samosa-fs list [--recursive] [--max-file-bytes N] ROOT\n"
           "       samosa-fs metadata [--max-file-bytes N] PATH\n"
+          "       samosa-fs move --root ROOT [--size N] [--mtime T] [--sha256 H] SRC DST\n"
+          "       samosa-fs undo --root ROOT SRC DST\n"
           "       samosa-fs --version\n", stderr);
 }
 
@@ -758,7 +1069,15 @@ static int parse_size_arg(const char *text, size_t *out) {
 int main(int argc, char **argv) {
     const char *cmd;
     const char *path = NULL;
+    const char *root = NULL;
+    const char *src = NULL;
+    const char *dst = NULL;
+    const char *expected_hash = NULL;
     size_t max_bytes = DEFAULT_MAX_FILE_BYTES;
+    off_t expected_size = 0;
+    double expected_mtime = 0.0;
+    int have_size = 0;
+    int have_mtime = 0;
     int recursive = 0;
     int i;
     ItemList items = {0};
@@ -785,6 +1104,35 @@ int main(int argc, char **argv) {
                 usage();
                 return 64;
             }
+        } else if (strcmp(argv[i], "--root") == 0 && i + 1 < argc) {
+            root = argv[++i];
+        } else if (strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
+            char *end = NULL;
+            errno = 0;
+            expected_size = (off_t)strtoll(argv[++i], &end, 10);
+            if (errno || !end || *end || expected_size < 0) {
+                usage();
+                return 64;
+            }
+            have_size = 1;
+        } else if (strcmp(argv[i], "--mtime") == 0 && i + 1 < argc) {
+            char *end = NULL;
+            errno = 0;
+            expected_mtime = strtod(argv[++i], &end);
+            if (errno || !end || *end) {
+                usage();
+                return 64;
+            }
+            have_mtime = 1;
+        } else if (strcmp(argv[i], "--sha256") == 0 && i + 1 < argc) {
+            expected_hash = argv[++i];
+        } else if (strcmp(cmd, "move") == 0 || strcmp(cmd, "undo") == 0) {
+            if (!src) src = argv[i];
+            else if (!dst) dst = argv[i];
+            else {
+                usage();
+                return 64;
+            }
         } else if (!path) {
             path = argv[i];
         } else {
@@ -793,6 +1141,11 @@ int main(int argc, char **argv) {
         }
     }
     if (!path) {
+        if (strcmp(cmd, "move") == 0)
+            return command_move(root, src, dst, expected_size, have_size,
+                                expected_mtime, have_mtime, expected_hash);
+        if (strcmp(cmd, "undo") == 0)
+            return command_undo(root, src, dst);
         usage();
         return 64;
     }

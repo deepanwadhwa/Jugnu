@@ -320,6 +320,38 @@ def fs_sidecar_metadata(path, max_file_bytes=MAX_FILE_BYTES_DEFAULT):
     return payload, None
 
 
+def fs_sidecar_move(src, dst, input_folder=None, size=None, mtime=None, sha256=None):
+    args = ['move']
+    if input_folder:
+        args.extend(['--root', input_folder])
+    if size is not None:
+        args.extend(['--size', str(size)])
+    if mtime is not None:
+        args.extend(['--mtime', str(mtime)])
+    if sha256 is not None:
+        args.extend(['--sha256', sha256])
+    args.extend([src, dst])
+    payload, error = run_fs_sidecar(args)
+    if error:
+        return False, error
+    if payload.get('moved'):
+        return True, None
+    return False, payload.get('reason') or 'unknown'
+
+
+def fs_sidecar_undo(src, dst, input_folder=None):
+    args = ['undo']
+    if input_folder:
+        args.extend(['--root', input_folder])
+    args.extend([src, dst])
+    payload, error = run_fs_sidecar(args)
+    if error:
+        return False, error
+    if payload.get('moved'):
+        return True, None
+    return False, payload.get('reason') or 'unknown'
+
+
 def extract_document(path, extractor=None, timeout=_EXTRACTOR_TIMEOUT_S):
     """Extract text from a document (PDF today; plain text natively too).
 
@@ -743,6 +775,13 @@ def apply_move(plan_line, input_folder=None, verify_hash=False):
     """
     src = plan_line['src']
     dst = plan_line['dst']
+    sidecar = find_fs_sidecar()
+    if sidecar:
+        return fs_sidecar_move(
+            src, dst, input_folder=input_folder,
+            size=plan_line.get('size'), mtime=plan_line.get('mtime'),
+            sha256=plan_line.get('input_sha256') if verify_hash else None,
+        )
 
     try:
         fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
@@ -803,6 +842,10 @@ def revert_move(applied_line):
     """
     src = applied_line['src']
     dst = applied_line['dst']
+    sidecar = find_fs_sidecar()
+    if sidecar:
+        folder = os.path.commonpath([os.path.abspath(src), os.path.abspath(dst)])
+        return fs_sidecar_undo(src, dst, input_folder=folder)
     if not os.path.exists(dst):
         return False, 'dest_missing'
     src_dir = os.path.dirname(src)
