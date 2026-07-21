@@ -783,6 +783,7 @@ class _Emitter:
 FIND_TOOLS = ['fs_survey', 'fs_list', 'fs_metadata', 'fs_detect_type',
               'fs_read_text', 'fs_read_document', 'fs_read_page',
               'notes_append', 'notes_read', 'ask_user', 'fs_move']
+TOOL_RESULT_EVENT_PREVIEW_CHARS = 2000
 
 
 def run_job(goal, folder, mode='confirm', model_call=None, loop_model_call=None):
@@ -865,6 +866,9 @@ def run_job(goal, folder, mode='confirm', model_call=None, loop_model_call=None)
         for loop_event in samosa_tools.iter_tool_loop(call_model, messages, tools, ctx):
             while pending:
                 yield pending.pop(0)
+            if loop_event.get('type') == 'tool_result':
+                yield log.append('tool_result', **_tool_result_event(loop_event))
+                continue
             if loop_event.get('type') == 'await_user':
                 _write_convo(jdir, loop_event['convo'], loop_event['call'],
                              loop_event.get('round_i', 0))
@@ -969,6 +973,9 @@ def answer_job(job_id, answer, loop_model_call=None):
             loop_model_call, convo, tools, ctx, add_ability_prompt=False):
         while pending:
             yield pending.pop(0)
+        if loop_event.get('type') == 'tool_result':
+            yield log.append('tool_result', **_tool_result_event(loop_event))
+            continue
         if loop_event.get('type') == 'await_user':
             _write_convo(jdir, loop_event['convo'], loop_event['call'],
                          loop_event.get('round_i', 0))
@@ -1052,6 +1059,18 @@ def _stage_tool_move(jdir, folder, call):
     move = {'src': src, 'dst': dst, 'size': st.st_size, 'mtime': st.st_mtime}
     _write_plan(jdir, [move])
     return [move], None
+
+
+def _tool_result_event(loop_event):
+    call = loop_event.get('call') or {}
+    result = str(loop_event.get('result') or '')
+    return {
+        'tool': call.get('samosa_tool', ''),
+        'chars': len(result),
+        'bytes': len(result.encode('utf-8')),
+        'preview': result[:TOOL_RESULT_EVENT_PREVIEW_CHARS],
+        'truncated': len(result) > TOOL_RESULT_EVENT_PREVIEW_CHARS,
+    }
 
 
 def _apply(jdir, log, moves):

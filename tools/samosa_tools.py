@@ -145,6 +145,7 @@ REGISTRY = Registry()
 # --- The tool-call protocol (shared by chat and jobs) ----------------------
 
 MAX_TOOL_ROUNDS = 8
+MAX_TOOL_RESULT_PROMPT_CHARS = 8000
 
 
 def ability_prompt(tools, locality=''):
@@ -272,10 +273,19 @@ def iter_tool_loop(model_call, messages, tools, ctx, max_rounds=MAX_TOOL_ROUNDS,
         remaining = max_rounds - round_i - 1
         note = ("\n\n(No tool calls remain; answer now.)" if remaining <= 0
                 else f"\n\n({remaining} tool call(s) left.)")
+        prompt_result = _tool_result_for_prompt(result)
         convo.append({'role': 'assistant', 'content': (text or '').strip()})
         convo.append({'role': 'user',
-                      'content': f"SAMOSA_TOOL_RESULT {call.get('samosa_tool', '')}\n{result}{note}"})
+                      'content': f"SAMOSA_TOOL_RESULT {call.get('samosa_tool', '')}\n{prompt_result}{note}"})
     yield {'type': 'final', 'text': last_result, 'convo': convo}
+
+
+def _tool_result_for_prompt(result):
+    text = str(result)
+    if len(text) <= MAX_TOOL_RESULT_PROMPT_CHARS:
+        return text
+    omitted = len(text) - MAX_TOOL_RESULT_PROMPT_CHARS
+    return text[:MAX_TOOL_RESULT_PROMPT_CHARS] + f"\n\n[tool result truncated: {omitted} characters omitted]"
 
 
 def run_tool_loop(model_call, messages, tools, ctx, max_rounds=MAX_TOOL_ROUNDS):

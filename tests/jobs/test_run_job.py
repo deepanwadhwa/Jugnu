@@ -271,6 +271,11 @@ class JobsLayerTest(unittest.TestCase):
         with open(log_path) as f:
             logged = [line for line in f if '"type":"tool_call"' in line]
         self.assertEqual(len(logged), 2)
+        with open(log_path) as f:
+            result_events = [json.loads(line) for line in f if '"type":"tool_result"' in line]
+        self.assertEqual([e['tool'] for e in result_events], ['fs_list', 'fs_read_text'])
+        self.assertIn('preview', result_events[0])
+        self.assertIn('chars', result_events[0])
 
     def test_find_ask_user_pauses_and_resumes(self):
         def first_model(_messages):

@@ -258,6 +258,26 @@ class TestToolLoop(unittest.TestCase):
         self.assertIn('2 files', answer)
         self.assertTrue(any(t == 'tool_call' and k['tool'] == 'fs_survey' for t, k in calls))
 
+    def test_loop_truncates_large_tool_result_before_followup_prompt(self):
+        big = 'x' * (T.MAX_TOOL_RESULT_PROMPT_CHARS + 50)
+        tool = T.Tool('_big_result', 'big', [], lambda _a, _c: big, mutating=False)
+        T.REGISTRY.register(tool)
+        ctx = T.ToolContext(self.root, mode='preview')
+        scripted = ['{"samosa_tool":"_big_result"}', 'done']
+        seen_followup = []
+
+        def model_call(messages):
+            if len(scripted) == 1:
+                seen_followup.append(messages[-1]['content'])
+            return scripted.pop(0)
+
+        events = list(T.iter_tool_loop(model_call, [{'role': 'user', 'content': 'go'}],
+                                       [tool], ctx))
+        self.assertEqual(events[0]['type'], 'tool_result')
+        self.assertEqual(events[0]['result'], big)
+        self.assertIn('tool result truncated', seen_followup[0])
+        self.assertLess(len(seen_followup[0]), len(big) + 200)
+
     def test_ability_prompt_lists_registered_tools(self):
         prompt = T.ability_prompt(T.REGISTRY.subset(['fs_survey', 'fs_move']))
         self.assertIn('fs_survey', prompt)
