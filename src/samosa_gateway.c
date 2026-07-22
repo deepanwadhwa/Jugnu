@@ -2365,20 +2365,50 @@ static int definition_source(Gateway *g, jval *item, DefinitionSource *source) {
     return source->text || source->image_data_uri;
 }
 
+/* Return a heap copy of the first balanced JSON object in s, scanning
+   string-aware so braces inside strings do not miscount. Recovers the object
+   when a model wraps it in ```json fences or surrounds it with prose (Qwen
+   vision does this; llama-server backends usually return bare JSON). NULL if no
+   balanced object is present. This is the J1.5 recovery contract. */
+static char *first_json_object(const char *s) {
+    if (!s) return NULL;
+    const char *start = strchr(s, '{');
+    if (!start) return NULL;
+    int depth = 0, in_str = 0, esc = 0;
+    const char *p = start;
+    for (; *p; ++p) {
+        char c = *p;
+        if (in_str) {
+            if (esc) esc = 0;
+            else if (c == '\\') esc = 1;
+            else if (c == '"') in_str = 0;
+        } else if (c == '"') in_str = 1;
+        else if (c == '{') ++depth;
+        else if (c == '}' && --depth == 0) { ++p; break; }
+    }
+    if (depth != 0) return NULL;
+    size_t len = (size_t)(p - start);
+    char *out = malloc(len + 1);
+    if (!out) return NULL;
+    memcpy(out, start, len); out[len] = 0;
+    return out;
+}
+
 static int definition_record(TextBuffer *record, jval *item, const char *extracted,
                              int passed) {
     jval *path = json_get(item, "path"), *hash = json_get(item, "input_sha256");
-    char *arena = NULL; jval *fields = extracted ? json_parse(extracted, &arena) : NULL;
+    char *object = first_json_object(extracted);
+    char *arena = NULL; jval *fields = object ? json_parse(object, &arena) : NULL;
     if (!fields || fields->t != J_OBJ) passed = 0;
     if (!text_add(record, "{\"input_path\":") || !text_json_string(record, path && path->t == J_STR ? path->str : "") ||
         !text_add(record, ",\"input_sha256\":") || !text_json_string(record, hash && hash->t == J_STR ? hash->str : "") ||
         !text_add(record, passed ? ",\"status\":\"passed\",\"extracted\":" :
                                   ",\"status\":\"review_required\",\"reasons\":[\"invalid_model_output\"],\"extracted\":") ||
-        !text_json_value(record, fields)) { json_free(fields); free(arena); return 0; }
+        !text_json_value(record, fields)) { json_free(fields); free(arena); free(object); return 0; }
     if (fields && fields->t == J_OBJ) for (int i = 0; i < fields->len; ++i)
         if (!text_add(record, ",") || !text_json_string(record, fields->keys[i]) || !text_add(record, ":") ||
-            !text_json_value(record, fields->kids[i])) { json_free(fields); free(arena); return 0; }
-    int ok = text_add(record, "}"); json_free(fields); free(arena); return ok;
+            !text_json_value(record, fields->kids[i])) { json_free(fields); free(arena); free(object); return 0; }
+    int ok = text_add(record, "}"); json_free(fields); free(arena); free(object); return ok;
 }
 
 static int definition_request(Gateway *g, int fd, const SamosaHttpRequest *request,

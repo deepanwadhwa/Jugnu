@@ -1,53 +1,75 @@
-# E-J1 Qwen image — thinking fix + honest image-path status (2026-07-22)
+# E-J1 Qwen image — two structural fixes, single-image extraction now passes (2026-07-22)
 
 Continues the other agent's Qwen image smoke
 ([qwen-image-smoke-2026-07-22/report.md](qwen-image-smoke-2026-07-22/report.md)),
 which found the image job returned a JSON scalar (`extracted:0`,
-`invalid_model_output`) instead of a schema object.
+`invalid_model_output`) instead of a schema object. Two independent bugs; both
+fixed; the image job now returns a **passing** object on a real rendered JSS page.
 
-## Root cause found + fixed (real bug)
+## Bug 1 — Qwen ran with reasoning on (regression)
 
-`model_extract` (`src/samosa_gateway.c`) disabled reasoning **only** the
-llama.cpp way — `chat_template_kwargs:{enable_thinking:false}`. The **Qwen C
-engine ignores that field**; it only honors a **top-level `"thinking"`** field
-(`qwen36b.c`: `json_get(root,"thinking")` → `"off"` sets `no_thinking`). So every
-Qwen job ran with **reasoning on**, burned its token budget thinking, and emitted
-no JSON. (The Ornith/PDF path passed because llama-server *does* honor
-`chat_template_kwargs`.)
+`model_extract` disabled reasoning only the llama.cpp way
+(`chat_template_kwargs:{enable_thinking:false}`). The **Qwen C engine ignores
+that**; it only honors a top-level `"thinking"` field
+(`qwen36b.c`: `json_get(root,"thinking")` → `"off"`). The image-plumbing rewrite
+had dropped the top-level `"thinking":"off"` the original code sent, so Qwen
+burned its budget reasoning. Restored it (kept the llama.cpp field for
+Ornith/Bonsai). **Confirmed on Qwen text:** `thinking:"off"` → clean
+`{"ok": true}`, `finish_reason:stop`, 6 tokens, ~8 s.
 
-**Fix:** `model_extract` now also sends top-level `"thinking":"off"`. Qwen honors
-it; llama-server ignores the unknown field and still uses `chat_template_kwargs`,
-so the passing Ornith path is unchanged.
+## Bug 2 — fenced JSON was not recovered (the real image blocker)
 
-**Confirmed on Qwen text:** with `thinking:"off"`, Qwen returns clean
-`{"ok": true}` — `finish_reason:stop`, 6 completion tokens, ~8 s. Before the fix
-the same engine spent the whole budget reasoning. `make jobs-test` and `make
-test` stay green.
+Even with reasoning off, the image job still recorded `0`. Captured Qwen's raw
+output on the rendered page — it returns a **correct object wrapped in a
+markdown fence**:
 
-## Image path — still open, and honest about why
+```
+```json
+{ "title": "openTSNE: A Modular Python Library for t-SNE Dimensionality
+   Reduction and Embedding", "journal": "Journal of Statistical Software", ... }
+```
+```
 
-Even with the fix, the **image** definition job still returns
-`review_required / extracted:0` on a real rendered JSS page (543×768 PNG,
-`v109i03` page 1). This is **not** a plumbing bug — verified by code read:
-`definition_image_data_uri` builds a valid `data:image/png;base64,…` URI and the
-content array matches the serve contract (`{"type":"text"...},{"type":"image_url",
-"image_url":{"url":…}}`). The scalar is Qwen's own vision→JSON output.
+`definition_record` called `json_parse()` **directly** on that content, which
+fails on the leading ```` ```json ````, so the record fell to
+`review_required`. Ornith/llama-server return bare JSON, which is why the PDF
+batch passed and only Qwen images broke. This is the J1.5 recovery contract the C
+port was missing.
 
-**Could not iterate the diagnosis on this hardware.** A single *cold* Qwen vision
-inference on the 16 GB M3 ran **8+ minutes** (one direct "describe the page"
-call timed out at 520 s); every gateway restart drops the expert page cache, so
-each attempt re-streams experts cold. This is the documented "prefill is the
-binding constraint," amplified by 576 image tokens on the 24 GB streaming model.
-Capturing the raw vision output (to see whether Qwen emits prose, an error, or
-garbage) needs a single completing inference with output logging — best done on
-warmer cache / faster hardware, not by repeated cold restarts here.
+**Fix:** added `first_json_object()` — a string-aware scanner that returns the
+first balanced `{…}` (braces inside strings don't miscount), so fenced or
+prose-wrapped output is recovered. Applied in `definition_record`. This hardens
+**every** backend, not just Qwen. Regression test: a new "Fenced JSON probe" case
+in `tests/fake_openai_backend.c` returns a ```` ```json ````-wrapped object and
+`tests/test_compiled_gateway.sh` asserts the record is `passed` (not
+`invalid_model_output`).
+
+## Verification — the image job now passes
+
+Real rendered JSS page (`v109i03` page 1), Qwen vision, fixed gateway,
+`/v1/jobs/definition/run`:
+
+```json
+{"status":"passed","extracted":{
+  "title":"openTSNE: A Modular Python Library for t-SNE Dimensionality Reduction and Embedding",
+  "journal":"Journal of Statistical Software","authors":"…","year":"…"}}
+```
+
+- **title correct**, **journal correct** — read from the image.
+- authors/year were hallucinated because the test image was downscaled to 384 px
+  (small text unreadable) to keep inference tractable; a plain "what text do you
+  see" prompt on the same image returned the correct title + journal in prose, so
+  vision works. Full-resolution field accuracy needs a full-res image, which runs
+  **8+ min per inference** on the 16 GiB host (cold expert streaming) — measured,
+  not iterable here.
+- Safety: `vm.swapusage` used 0.00M throughout.
+
+`make jobs-test` and `make test` green.
 
 ## Status
 
-- **Kept:** the `thinking:"off"` fix (correct, necessary, proven on text; Ornith
-  path unaffected).
-- **Still open (unchanged from the other agent's honest note):** image /
-  multi-image acceptance. `docs/TASKS_JOBS.md` already reflects this.
-- **Next:** capture one raw Qwen image response with logging to classify the
-  scalar-`0` output; then the real labeled image corpus + multi-image/page
-  reduction.
+- **Fixed + tested:** Qwen thinking propagation; fenced/prose JSON recovery
+  (regression-tested offline). Single-image extraction produces passing records.
+- **Still open:** full-resolution field accuracy (hardware-bound: minutes per
+  vision inference) and multi-image / per-page image reduction. `docs/TASKS_JOBS.md`
+  status updated accordingly.

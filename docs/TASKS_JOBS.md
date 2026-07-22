@@ -1,9 +1,16 @@
 # Issue #7 — Samosa Jobs (batch, scheduled, local multimodal work)
 
 **Status: J1 implementation is landed on `issue-7-jobs`; its offline suite is
-green. E-J1 is closed for the labeled JSS PDF batch and the live chat interlock,
-but image/multi-image acceptance remains open.** The compiled definition route
-now emits active inference timing and has offline interlock coverage; see
+green. E-J1 is closed for the labeled JSS PDF batch and the live chat interlock.
+Single-image extraction now produces passing records — Qwen vision read a real
+rendered JSS page and returned a valid object (title + journal correct); the two
+structural blockers (Qwen thinking not disabled; ```json-fenced output not
+recovered) are fixed, see
+[`qwen-image-thinking-fix-2026-07-22.md`](regressions/jobs/e-j1/qwen-image-thinking-fix-2026-07-22.md).
+Still open: full-resolution field accuracy (small text needs a full-res image,
+~8 min/inference on the 16-GiB host) and multi-image/page reduction.** The
+compiled definition route now emits active inference timing and has offline
+interlock coverage; see
 [`compiled-interlock-telemetry-2026-07-22.md`](regressions/jobs/e-j1/compiled-interlock-telemetry-2026-07-22.md).
 The 2026-07-16 whole-file long-PDF preview hit unsafe memory pressure on the
 16-GiB reference host; see

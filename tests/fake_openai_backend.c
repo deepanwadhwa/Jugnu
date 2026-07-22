@@ -124,6 +124,14 @@ static int handler(SamosaHttpServer *server, int fd,
                 "\"message\":{\"role\":\"assistant\",\"content\":"
                 "\"{\\\"merchant\\\":\\\"Budget\\\",\\\"total\\\":10}\"}}]}", NULL);
         }
+        if (strstr(request->body, "Fenced JSON probe")) {
+            /* Reproduce Qwen vision's habit of wrapping the object in a ```json
+               markdown fence; the gateway must still recover the object. */
+            return samosa_http_response(fd, 200, "application/json",
+                "{\"choices\":[{\"index\":0,\"finish_reason\":\"stop\","
+                "\"message\":{\"role\":\"assistant\",\"content\":"
+                "\"```json\\n{\\\"merchant\\\":\\\"Fenced\\\",\\\"total\\\":3}\\n```\"}}]}", NULL);
+        }
     }
     if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
         strstr(request->body, "Extract structured data"))

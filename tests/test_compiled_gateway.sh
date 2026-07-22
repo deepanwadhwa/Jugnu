@@ -223,6 +223,18 @@ budget_run=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/definiti
 printf '%s' "$budget_run" | /usr/bin/grep -q '"type":"item_complete"'
 /usr/bin/grep -q '"merchant":"Budget"' "$TMP/definition-budget-out/output.jsonl"
 
+# A model that wraps its JSON object in a ```json markdown fence (Qwen vision
+# does this) must still be recovered as a passed record, not review_required.
+fenced_definition="{\"job\":{\"job_id\":\"native-definition-fenced\",\"input\":{\"folder\":\"$TMP/files\"},\"instruction\":\"Fenced JSON probe.\",\"output_schema\":{\"type\":\"object\",\"properties\":{\"merchant\":{\"type\":\"string\"},\"total\":{\"type\":\"number\"}}},\"output\":{\"dir\":\"$TMP/definition-fenced-out\"}}}"
+fenced_run=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/definition/run" \
+  -H 'Content-Type: application/json' --data-binary "$fenced_definition")
+printf '%s' "$fenced_run" | /usr/bin/grep -q '"type":"item_complete"'
+/usr/bin/grep -q '"status":"passed"' "$TMP/definition-fenced-out/output.jsonl"
+/usr/bin/grep -q '"merchant":"Fenced"' "$TMP/definition-fenced-out/output.jsonl"
+if /usr/bin/grep -q 'invalid_model_output' "$TMP/definition-fenced-out/output.jsonl"; then
+  echo "fenced JSON was not recovered (review_required)" >&2; exit 1
+fi
+
 image_definition="{\"job\":{\"job_id\":\"native-definition-image\",\"input\":{\"folder\":\"$TMP/image-files\"},\"instruction\":\"Image definition probe.\",\"output_schema\":{\"type\":\"object\",\"properties\":{\"people\":{\"type\":\"integer\"}}},\"output\":{\"dir\":\"$TMP/definition-image-out\"}}}"
 image_run=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/definition/run" \
   -H 'Content-Type: application/json' --data-binary "$image_definition")
