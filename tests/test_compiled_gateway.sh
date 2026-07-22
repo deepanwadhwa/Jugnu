@@ -12,10 +12,13 @@ HOME_DIR="$TMP/home"
 PORT=18977
 BACKEND_PORT=18978
 PID=""
+PID2=""
 
 cleanup() {
   [ -z "$PID" ] || kill "$PID" 2>/dev/null || true
   [ -z "$PID" ] || wait "$PID" 2>/dev/null || true
+  [ -z "$PID2" ] || kill "$PID2" 2>/dev/null || true
+  [ -z "$PID2" ] || wait "$PID2" 2>/dev/null || true
   /bin/rm -rf "$TMP"
 }
 trap cleanup EXIT HUP INT TERM
@@ -54,6 +57,9 @@ if command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
+# The main gateway runs with NO web stub, so the public-fetch SSRF checks hit
+# the real resolver (literal blocked IPs resolve offline). launchd is dry-run
+# and points at a temp LaunchAgents dir so the suite never touches real launchd.
 SAMOSA_HOME="$HOME_DIR" \
 SAMOSA_PORT="$PORT" \
 SAMOSA_BACKEND_PORT="$BACKEND_PORT" \
@@ -63,6 +69,9 @@ SAMOSA_BONSAI_SERVER="$BACKEND" \
 SAMOSA_ORNITH_MODEL="$HOME_DIR/models/ornith-9b/Ornith-1.0-9B-Q4_K_M.gguf" \
 SAMOSA_FS="$TMP/samosa-fs-wrapper" \
 SAMOSA_EXTRACT="$EXTRACTOR" \
+SAMOSA_WEB_MIN_INTERVAL=0 \
+SAMOSA_LAUNCH_AGENTS_DIR="$TMP/agents" \
+SAMOSA_LAUNCHD_DRYRUN=1 \
 "$GATEWAY" >"$TMP/gateway.log" 2>&1 &
 PID=$!
 
@@ -214,6 +223,104 @@ ALWAYS_JOB="{\"job\":{\"job_id\":\"always-report\",\"input\":{\"folder\":\"$TMP/
 jobsd_out=$(SAMOSA_HOME="$HOME_DIR" SAMOSA_FS="$TMP/samosa-fs-wrapper" "$JOBSD" jobsd-once)
 printf '%s' "$jobsd_out" | /usr/bin/grep -q '"job_id":"always-report","action":"run"'
 /usr/bin/grep -q '"type":"scheduled_job_complete"' "$HOME_DIR/jobs/always-report/events.jsonl"
+
+# --- Missed-window policy: skip retires, run_next_start catches up ---
+/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/schedule/arm" \
+  -H 'Content-Type: application/json' \
+  --data-binary "{\"job\":{\"job_id\":\"missed-skip\",\"input\":{\"folder\":\"$TMP/sched\"}},\"window_start\":\"22:00\",\"window_end\":\"06:00\",\"missed_policy\":\"skip\"}" \
+  | /usr/bin/grep -q '"ok":true'
+/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/schedule/arm" \
+  -H 'Content-Type: application/json' \
+  --data-binary "{\"job\":{\"job_id\":\"missed-run\",\"input\":{\"folder\":\"$TMP/sched\"}},\"window_start\":\"22:00\",\"window_end\":\"06:00\",\"missed_policy\":\"run_next_start\"}" \
+  | /usr/bin/grep -q '"ok":true'
+# now=12:00 outside the window, now_epoch far in the future => both windows expired.
+missed=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobsd/once" \
+  -H 'Content-Type: application/json' \
+  --data-binary '{"now_minutes":720,"on_battery":false,"now_epoch":4102444800}')
+printf '%s' "$missed" | /usr/bin/grep -q '"job_id":"missed-skip","action":"defer","reason":"window_expired"'
+printf '%s' "$missed" | /usr/bin/grep -q '"job_id":"missed-run","action":"run","reason":"missed_window"'
+/usr/bin/grep -q '"type":"scheduled_job_complete"' "$HOME_DIR/jobs/missed-run/events.jsonl"
+
+# --- launchd lifecycle (dry-run, temp LaunchAgents dir) ---
+/usr/bin/curl -fsS "http://127.0.0.1:$PORT/v1/jobs/launchd/status" | /usr/bin/grep -q '"installed":false'
+/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/launchd/install" | /usr/bin/grep -q '"ok":true'
+[ -f "$TMP/agents/com.samosa.jobsd.plist" ]
+/usr/bin/grep -q '<string>jobsd-once</string>' "$TMP/agents/com.samosa.jobsd.plist"
+/usr/bin/curl -fsS "http://127.0.0.1:$PORT/v1/jobs/launchd/status" | /usr/bin/grep -q '"installed":true'
+/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/launchd/uninstall" | /usr/bin/grep -q '"removed":true'
+[ ! -f "$TMP/agents/com.samosa.jobsd.plist" ]
+
+# --- Public-fetch SSRF + URL validation (real resolver; blocked IPs resolve offline) ---
+pub() { /usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/public-inputs/update" \
+  -H 'Content-Type: application/json' --data-binary "$1"; }
+printf '%s' "$(pub '{"job_id":"ssrf","urls":["http://127.0.0.1/x"]}')" \
+  | /usr/bin/grep -q '"error":"blocked non-public address"'
+printf '%s' "$(pub '{"job_id":"ssrf","urls":["http://169.254.169.254/latest/meta-data/"]}')" \
+  | /usr/bin/grep -q '"error":"blocked non-public address"'
+printf '%s' "$(pub '{"job_id":"ssrf","urls":["http://10.0.0.5/"]}')" \
+  | /usr/bin/grep -q '"error":"blocked non-public address"'
+printf '%s' "$(pub '{"job_id":"ssrf","urls":["http://[::1]/"]}')" \
+  | /usr/bin/grep -q '"error":"blocked non-public address"'
+printf '%s' "$(pub '{"job_id":"ssrf","urls":["http://example.com:8080/"]}')" \
+  | /usr/bin/grep -q '"error":"non-standard URL ports are blocked"'
+printf '%s' "$(pub '{"job_id":"ssrf","urls":["ftp://example.com/"]}')" \
+  | /usr/bin/grep -q 'only public http'
+printf '%s' "$(pub '{"job_id":"ssrf","urls":["http://user:pass@example.com/"]}')" \
+  | /usr/bin/grep -q '"error":"credentials in URLs are not allowed"'
+# no items written for any rejected URL
+[ ! -d "$HOME_DIR/jobs/ssrf/public/items" ] || [ -z "$(/bin/ls -A "$HOME_DIR/jobs/ssrf/public/items")" ]
+
+# --- Public-input change-state, robots, and HTML extraction (stubbed transport) ---
+/bin/mkdir "$TMP/stub" "$TMP/localdoc"
+printf 'my resume\n' >"$TMP/localdoc/resume.txt"
+printf '<html><head><title>Careers</title></head><body><script>secret()</script><h1>Roles</h1><p>Engineer &amp; Designer</p><style>.x{}</style></body></html>' \
+  >"$TMP/stub/http-example-com-jobs.html"
+printf 'User-agent: *\nDisallow: /private\nAllow: /\n' >"$TMP/stub/robots.txt"
+STUB_PORT=18981
+STUB_BACKEND_PORT=18982
+SAMOSA_HOME="$HOME_DIR" \
+SAMOSA_PORT="$STUB_PORT" \
+SAMOSA_BACKEND_PORT="$STUB_BACKEND_PORT" \
+SAMOSA_APP_HTML="$TMP/app.html" \
+SAMOSA_APP_LOGO="$TMP/logo.png" \
+SAMOSA_BONSAI_SERVER="$BACKEND" \
+SAMOSA_ORNITH_MODEL="$HOME_DIR/models/ornith-9b/Ornith-1.0-9B-Q4_K_M.gguf" \
+SAMOSA_FS="$TMP/samosa-fs-wrapper" \
+SAMOSA_WEB_STUB_DIR="$TMP/stub" \
+SAMOSA_WEB_MIN_INTERVAL=0 \
+"$GATEWAY" >"$TMP/gateway-stub.log" 2>&1 &
+PID2=$!
+i=0
+while [ "$i" -lt 100 ]; do
+  h=$(/usr/bin/curl -fsS "http://127.0.0.1:$STUB_PORT/healthz" 2>/dev/null || true)
+  printf '%s' "$h" | /usr/bin/grep -q '"ready":true' && break
+  kill -0 "$PID2" 2>/dev/null || { /bin/cat "$TMP/gateway-stub.log" >&2; exit 1; }
+  /bin/sleep 0.05; i=$((i + 1))
+done
+spub() { /usr/bin/curl -fsS -X POST "http://127.0.0.1:$STUB_PORT/v1/jobs/public-inputs/update" \
+  -H 'Content-Type: application/json' --data-binary "$1"; }
+# first fetch: new, exactly one changed unit, HTML script/style stripped, entity decoded
+first=$(spub '{"job_id":"watch","urls":["http://example.com/jobs"]}')
+printf '%s' "$first" | /usr/bin/grep -q '"checked":1,"changed":1'
+printf '%s' "$first" | /usr/bin/grep -q '"status":"new"'
+printf '%s' "$first" | /usr/bin/grep -q '"title":"Careers"'
+if printf '%s' "$first" | /usr/bin/grep -q 'secret'; then echo "html extraction leaked script text" >&2; exit 1; fi
+[ "$(/bin/ls "$HOME_DIR/jobs/watch/public/items"/*.txt | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = 1 ]
+/usr/bin/grep -q 'Engineer & Designer' "$HOME_DIR/jobs/watch/public/items"/*.txt
+# repeat: unchanged, zero new units
+printf '%s' "$(spub '{"job_id":"watch","urls":["http://example.com/jobs"]}')" | /usr/bin/grep -q '"checked":1,"changed":0'
+# change the page: exactly one new unit
+printf '<html><head><title>Careers</title></head><body><p>Two new roles</p></body></html>' \
+  >"$TMP/stub/http-example-com-jobs.html"
+printf '%s' "$(spub '{"job_id":"watch","urls":["http://example.com/jobs"]}')" | /usr/bin/grep -q '"changed":1'
+[ "$(/bin/ls "$HOME_DIR/jobs/watch/public/items"/*.txt | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = 2 ]
+# state.json holds exactly one entry for the URL (no duplicate keys)
+[ "$(/usr/bin/grep -o 'http://example.com/jobs' "$HOME_DIR/jobs/watch/public/state.json" | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = 1 ]
+# robots.txt disallows /private
+printf '%s' "$(spub '{"job_id":"watch","urls":["http://example.com/private/listing"]}')" \
+  | /usr/bin/grep -q 'robots.txt disallows'
+/usr/bin/curl -fsS -X POST "http://127.0.0.1:$STUB_PORT/v1/shutdown" >/dev/null
+wait "$PID2"; PID2=""
 
 /usr/bin/curl -sS -X POST "http://127.0.0.1:$PORT/v1/jobs/run" \
   -H 'Content-Type: application/json' \

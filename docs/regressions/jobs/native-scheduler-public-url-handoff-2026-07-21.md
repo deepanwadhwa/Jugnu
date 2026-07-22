@@ -288,3 +288,88 @@ poll deferring (idempotent one-shot).
    chunk and the one with real security surface.
 5. **Real acceptance** — no sleep/wake missed-window test, no real public-page
    change check, no installed-release run. Offline tests passing is not "works".
+
+## Continuation — 2026-07-21 (scheduler policy + native public-URL pipeline)
+
+This session closed the remaining native gaps except the two that require the
+real world (live-network acceptance) or the owner (deleting the Python modules).
+All of it builds `-Werror` clean and is exercised by `make compiled-gateway-test`
+(exit 0, with `python3` removed from `PATH`); the whole surface was also run
+under ASan/UBSan with **zero** errors.
+
+### What landed
+
+- **Missed-window policy is now real (was dead code).** `arm` records a
+  `deadline_epoch` (first wall-clock instant at/after arm whose local time equals
+  the window end, DST-correct via `mktime`). `schedule_decision()` takes a
+  `window_expired` signal: inside the window → run; expired + `run_next_start` →
+  `missed_window` run (catch-up after the laptop slept through the window);
+  expired + `skip` → `window_expired` and the schedule is retired
+  (`enabled:false`). Deterministically tested with a `now_epoch` override.
+- **Keep-awake.** A scheduled run spawns `/usr/bin/caffeinate -s` for its
+  lifetime (macOS; no-op elsewhere), tracked so a Kill releases it. Off by
+  `keep_awake:false`.
+- **Kill covers scheduled runs.** All scheduled children — sidecars, curl,
+  caffeinate — go through `run_capture`/`spawn_tracked`, so `/v1/kill`'s existing
+  `jobs_stop()` tears them down. The standalone `samosa-jobsd` installs a
+  SIGINT/SIGTERM handler that SIGKILLs tracked children and exits.
+- **launchd lifecycle.** `POST /v1/jobs/launchd/install` writes the plist to
+  `~/Library/LaunchAgents` (overridable) + creates the log dir, then
+  `launchctl load`; `.../uninstall` unloads + removes; `GET .../status` reports
+  installed/loaded. A dry-run mode (`SAMOSA_LAUNCHD_DRYRUN`, and always off
+  macOS) manages the plist file but never touches a real launchd domain — the
+  suite uses it so it never installs an agent on the dev machine.
+- **Native public-URL fetch pipeline (the big one).** `/v1/jobs/public-inputs/
+  update`. Per hop: parse+validate (http/https only, standard ports only, no
+  credentials), robots gate, per-host rate limit, resolve the host and reject if
+  **any** resolved address is private/loopback/link-local/CGNAT/transition
+  (IPv4+IPv6, strict against rebinding), then `curl --resolve host:port:ip
+  --max-redirs 0` pinned to that validated IP, with redirects followed manually
+  and re-validated. HTML→text drops script/style/svg/noscript/template, decodes
+  common entities, extracts `<title>`. Verified offline that
+  `127.0.0.1`, `169.254.169.254`, `10.0.0.5`, and `[::1]` are all blocked at the
+  resolver, and that bad scheme/port/credentials are rejected at parse.
+- **Change-state.** `<job>/public/state.json` + `items/`. New/changed page → one
+  item text+meta file and a `changed` record; unchanged → nothing. State is
+  written atomically and preserves pages from earlier runs. (Change digest is
+  FNV-1a, not SHA-256 — no crypto dependency; it is a change detector, not a
+  security primitive.)
+- **Comparison workflow.** A scheduled job with a `public_inputs` array runs the
+  fetch + change-state deterministically and emits a `scheduled_job_complete`
+  event carrying `checked`/`changed`; the local folder and changed items are left
+  on disk for the model comparison step (which reuses the existing definition
+  model path — not re-implemented here).
+
+### Test seam (honest note)
+
+`SAMOSA_WEB_STUB_DIR` replaces the network transport with local files keyed by a
+slug of the URL, and lets robots.txt be served locally. It exists so the change-
+state / robots / HTML-extraction contract is testable offline. URL parse
+validation still runs in stub mode; only the resolver+curl are replaced, and the
+seam is inert unless the env var is set. The SSRF resolver/blocklist is therefore
+tested on the **no-stub** gateway (literal blocked IPs resolve without network).
+
+### Acceptance gates — status now
+
+Gates 1–4, 6–9 are **met and tested offline**. Gate 5 (review-required queued):
+the scheduled runner is non-interactive by construction and never blocks on a
+question; a dedicated review-queue for model-backed scheduled extraction is not
+yet exercised. **Gate 10 (one real public-page change check on the installed
+release) is NOT done** — it needs live network + machine-safety sign-off and is
+the honest "works, measured" bar. **Gate 11 (removing `tools/samosa_gateway.py`
+/ `tools/samosa_jobs.py`) is deliberately NOT done**: it is owner-gated on gate
+10, and those modules still back the green `make jobs-test` / `make test` Python
+suites. Do not delete them until gate 10 passes and the Python tests are migrated
+or retired with the owner.
+
+### Known limitations left in code (not defects, but scoped)
+
+- `url_join` handles absolute and root-relative redirects fully and other
+  relative forms approximately (origin + base-dir + loc); most real redirects are
+  absolute.
+- The robots parser is a conservative subset (agent-token or `*` group,
+  longest-match Allow beats Disallow); errors/non-text robots → allowed, matching
+  the reference.
+- IPv6 blocklist covers the dangerous ranges explicitly rather than replicating
+  Python's full `is_global`; normal global unicast is allowed, internal/transition
+  ranges are blocked.

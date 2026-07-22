@@ -3,6 +3,7 @@
 #define _DARWIN_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -16,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -157,6 +159,42 @@ static char *run_capture(Gateway *g, const char *program, char *const argv[], si
     close(pipefd[0]); waitpid(pid, status, 0); track_job_pid(g, pid, 0); output[used] = 0;
     if (used == limit) { free(output); return NULL; }
     return output;
+}
+
+/* Fork/exec a long-lived helper (e.g. caffeinate) whose stdout we discard and
+   whose pid we track so a Kill tears it down with everything else. */
+static pid_t spawn_tracked(Gateway *g, const char *program, char *const argv[]) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); dup2(devnull, STDOUT_FILENO); close(devnull); }
+        execv(program, argv); _Exit(127);
+    }
+    track_job_pid(g, pid, 1);
+    return pid;
+}
+
+static void stop_tracked(Gateway *g, pid_t pid) {
+    if (pid <= 0) return;
+    kill(pid, SIGTERM);
+    for (int i = 0; i < 20; ++i) {
+        if (waitpid(pid, NULL, WNOHANG) == pid) { track_job_pid(g, pid, 0); return; }
+        struct timespec pause = {.tv_sec = 0, .tv_nsec = 50000000};
+        nanosleep(&pause, NULL);
+    }
+    kill(pid, SIGKILL); waitpid(pid, NULL, 0); track_job_pid(g, pid, 0);
+}
+
+/* Prevent system sleep for the lifetime of a scheduled run. macOS only; a no-op
+   elsewhere. The pid is tracked, so a Kill also releases the assertion. */
+static pid_t spawn_keep_awake(Gateway *g) {
+#ifdef __APPLE__
+    char *argv[] = {(char *)"/usr/bin/caffeinate", (char *)"-s", NULL};
+    return spawn_tracked(g, "/usr/bin/caffeinate", argv);
+#else
+    (void)g; return -1;
+#endif
 }
 
 static int json_escape_to(char *out, size_t cap, size_t *used, const char *text) {
@@ -375,6 +413,27 @@ static int current_minutes_local(void) {
     return tmv.tm_hour * 60 + tmv.tm_min;
 }
 
+/* First wall-clock instant at or after `from` whose local time-of-day equals
+   end_minutes. This is the deadline of the window instance a schedule is
+   targeting; once the clock passes it without a run, the window was missed. */
+static long window_deadline_epoch(int end_minutes, time_t from) {
+    struct tm tmv;
+    if (!localtime_r(&from, &tmv)) return 0;
+    tmv.tm_hour = end_minutes / 60;
+    tmv.tm_min = end_minutes % 60;
+    tmv.tm_sec = 0;
+    tmv.tm_isdst = -1;
+    time_t candidate = mktime(&tmv);
+    if (candidate == (time_t)-1) return 0;
+    if (candidate < from) {
+        tmv.tm_mday += 1;
+        tmv.tm_isdst = -1;
+        candidate = mktime(&tmv);
+        if (candidate == (time_t)-1) return 0;
+    }
+    return (long)candidate;
+}
+
 static int host_on_battery(void) {
 #ifdef __APPLE__
     FILE *pipe = popen("/usr/bin/pmset -g batt 2>/dev/null", "r");
@@ -388,8 +447,12 @@ static int host_on_battery(void) {
 #endif
 }
 
+/* Returns 1 if the schedule should run now, 0 to defer. `window_expired` is true
+   when the target window's deadline has already passed without a run — that is
+   what distinguishes a missed window (run_next_start catches up) from simply
+   being early in the day (outside_window: wait for tonight). */
 static int schedule_decision(jval *schedule, int now_minutes, int on_battery,
-                             char *reason, size_t reason_cap) {
+                             int window_expired, char *reason, size_t reason_cap) {
     jval *enabled = json_get(schedule, "enabled");
     jval *status = json_get(schedule, "last_status");
     if (enabled && enabled->t == J_BOOL && !enabled->boolean) {
@@ -409,10 +472,11 @@ static int schedule_decision(jval *schedule, int now_minutes, int on_battery,
     if (minutes_in_window(now_minutes, start, end)) {
         path_copy(reason, reason_cap, "inside_window"); return 1;
     }
-    jval *missed = json_get(schedule, "missed"), *policy = json_get(schedule, "missed_policy");
-    if (missed && missed->t == J_BOOL && missed->boolean &&
-        policy && policy->t == J_STR && !strcmp(policy->str, "run_next_start")) {
-        path_copy(reason, reason_cap, "missed_window"); return 1;
+    jval *policy = json_get(schedule, "missed_policy");
+    int run_next_start = policy && policy->t == J_STR && !strcmp(policy->str, "run_next_start");
+    if (window_expired) {
+        if (run_next_start) { path_copy(reason, reason_cap, "missed_window"); return 1; }
+        path_copy(reason, reason_cap, "window_expired"); return 0;
     }
     path_copy(reason, reason_cap, "outside_window"); return 0;
 }
@@ -508,6 +572,8 @@ static int jobs_schedule_arm(Gateway *g, int fd, const SamosaHttpRequest *reques
     jval *resources = json_get(job, "resources");
     jval *run_batt = resources && resources->t == J_OBJ ? json_get(resources, "run_on_battery") : NULL;
     char now[32]; rfc3339_now_to(now, sizeof(now));
+    char deadline[32];
+    snprintf(deadline, sizeof(deadline), "%ld", window_deadline_epoch(parse_hhmm(window_end), time(NULL)));
     TextBuffer schedule = {0};
     int ok = text_add(&schedule, "{\"schema_version\":1,\"job_id\":") && text_json_string(&schedule, job_id) &&
         text_add(&schedule, ",\"job_path\":") && text_json_string(&schedule, frozen_path) &&
@@ -515,6 +581,7 @@ static int jobs_schedule_arm(Gateway *g, int fd, const SamosaHttpRequest *reques
         text_add(&schedule, ",\"enabled\":true,\"window_start\":") && text_json_string(&schedule, window_start) &&
         text_add(&schedule, ",\"window_end\":") && text_json_string(&schedule, window_end) &&
         text_add(&schedule, ",\"missed_policy\":") && text_json_string(&schedule, missed_policy) &&
+        text_add(&schedule, ",\"deadline_epoch\":") && text_add(&schedule, deadline) &&
         text_add(&schedule, ",\"keep_awake\":") && text_add(&schedule, (keep && keep->t == J_BOOL && !keep->boolean) ? "false" : "true") &&
         text_add(&schedule, ",\"run_on_battery\":") && text_add(&schedule, (run_batt && run_batt->t == J_BOOL && run_batt->boolean) ? "true" : "false") &&
         text_add(&schedule, ",\"review_required_policy\":\"queue\",\"armed_at\":") && text_json_string(&schedule, now) &&
@@ -560,6 +627,621 @@ static const char *type_folder_for(const char *name, const char *media) {
     return "OTHER";
 }
 
+/* ============================================================================
+   Native public-URL fetch pipeline. Every fetch resolves the host itself,
+   rejects any resolved address in a private/loopback/link-local/transition
+   range, pins curl to that validated IP with --resolve, disables curl's own
+   redirects, and re-runs the whole check on each hop. This mirrors the Python
+   prototype's contract: curl is a pinned transport, never trusted to resolve
+   or follow redirects. HTTP(S) only; standard ports only; no credentials.
+   ============================================================================ */
+
+#define PUBLIC_FETCH_USER_AGENT "SamosaChat/1.0 (+local user-initiated fetch)"
+#define PUBLIC_FETCH_MAX_HOPS 6
+
+/* a is IPv4 in host byte order. Blocks 0/8, 10/8, 100.64/10, 127/8, 169.254/16,
+   172.16/12, 192.0.0/24, 192.168/16, 198.18/15, 224/4, 240/4. */
+static int ipv4_blocked(uint32_t a) {
+    uint8_t o1 = (uint8_t)(a >> 24), o2 = (uint8_t)(a >> 16), o3 = (uint8_t)(a >> 8);
+    if (o1 == 0 || o1 == 10 || o1 == 127) return 1;
+    if (o1 == 100 && (o2 & 0xc0) == 64) return 1;
+    if (o1 == 169 && o2 == 254) return 1;
+    if (o1 == 172 && (o2 & 0xf0) == 16) return 1;
+    if (o1 == 192 && o2 == 0 && o3 == 0) return 1;
+    if (o1 == 192 && o2 == 168) return 1;
+    if (o1 == 198 && (o2 & 0xfe) == 18) return 1;
+    if (o1 >= 224) return 1;
+    return 0;
+}
+
+/* Blocks ::/128, ::1/128, fc00::/7, fe80::/10, ::ffff:0:0/96 (IPv4-mapped),
+   64:ff9b::/96 (NAT64), and 2002::/16 (6to4) — the ranges that can smuggle a
+   fetch to an internal target across the IPv6 boundary. */
+static int ipv6_blocked(const uint8_t b[16]) {
+    int zero_prefix = 1;
+    for (int i = 0; i < 15; ++i) if (b[i]) { zero_prefix = 0; break; }
+    if (zero_prefix && (b[15] == 0 || b[15] == 1)) return 1;   /* :: and ::1 */
+    if ((b[0] & 0xfe) == 0xfc) return 1;                        /* fc00::/7 */
+    if (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) return 1;        /* fe80::/10 */
+    if (b[0] == 0x20 && b[1] == 0x02) return 1;                 /* 2002::/16 */
+    int zero10 = 1;
+    for (int i = 0; i < 10; ++i) if (b[i]) { zero10 = 0; break; }
+    if (zero10 && b[10] == 0xff && b[11] == 0xff) return 1;     /* ::ffff:0:0/96 */
+    if (b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b) {
+        int mid = 1;
+        for (int i = 4; i < 12; ++i) if (b[i]) { mid = 0; break; }
+        if (mid) return 1;                                     /* 64:ff9b::/96 */
+    }
+    return 0;
+}
+
+static int ip_blocked(const char *ip) {
+    struct in_addr v4; struct in6_addr v6;
+    if (inet_pton(AF_INET, ip, &v4) == 1) return ipv4_blocked(ntohl(v4.s_addr));
+    if (inet_pton(AF_INET6, ip, &v6) == 1) return ipv6_blocked(v6.s6_addr);
+    return 1;
+}
+
+/* Resolve host; reject if ANY resolved address is non-public (strict against
+   DNS rebinding). Returns the first usable address string. */
+static int resolve_public_host(const char *host, char out_ip[INET6_ADDRSTRLEN],
+                               char *err, size_t errcap) {
+    struct addrinfo hints; memset(&hints, 0, sizeof(hints));
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) {
+        snprintf(err, errcap, "could not resolve host"); return 0;
+    }
+    char first[INET6_ADDRSTRLEN] = {0};
+    int ok = 1;
+    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+        char ip[INET6_ADDRSTRLEN] = {0};
+        void *addr = ai->ai_family == AF_INET ?
+            (void *)&((struct sockaddr_in *)ai->ai_addr)->sin_addr :
+            ai->ai_family == AF_INET6 ?
+            (void *)&((struct sockaddr_in6 *)ai->ai_addr)->sin6_addr : NULL;
+        if (!addr || !inet_ntop(ai->ai_family, addr, ip, sizeof(ip))) continue;
+        if (ip_blocked(ip)) { ok = 0; snprintf(err, errcap, "blocked non-public address"); break; }
+        if (!first[0]) path_copy(first, sizeof(first), ip);
+    }
+    freeaddrinfo(res);
+    if (!ok) return 0;
+    if (!first[0]) { snprintf(err, errcap, "host has no usable address"); return 0; }
+    path_copy(out_ip, INET6_ADDRSTRLEN, first); return 1;
+}
+
+typedef struct { char scheme[8]; char host[256]; int port; char path[2048]; } ParsedUrl;
+
+static int url_parse(const char *url, ParsedUrl *p, char *err, size_t errcap) {
+    memset(p, 0, sizeof(*p));
+    const char *s = url; while (*s == ' ' || *s == '\t') ++s;
+    const char *sep = strstr(s, "://");
+    int https;
+    if (sep && (size_t)(sep - s) == 4 && !strncasecmp(s, "http", 4)) { strcpy(p->scheme, "http"); https = 0; }
+    else if (sep && (size_t)(sep - s) == 5 && !strncasecmp(s, "https", 5)) { strcpy(p->scheme, "https"); https = 1; }
+    else { snprintf(err, errcap, "only public http:// and https:// URLs are allowed"); return 0; }
+    const char *authority = sep + 3;
+    size_t authlen = strcspn(authority, "/?#");
+    const char *path_start = authority + authlen;
+    char auth[512];
+    if (authlen >= sizeof(auth)) { snprintf(err, errcap, "host is too long"); return 0; }
+    memcpy(auth, authority, authlen); auth[authlen] = 0;
+    if (strchr(auth, '@')) { snprintf(err, errcap, "credentials in URLs are not allowed"); return 0; }
+    p->port = https ? 443 : 80;
+    if (auth[0] == '[') {
+        char *close = strchr(auth, ']');
+        if (!close) { snprintf(err, errcap, "malformed IPv6 host"); return 0; }
+        *close = 0;
+        if (!path_copy(p->host, sizeof(p->host), auth + 1)) { snprintf(err, errcap, "host is too long"); return 0; }
+        if (close[1] == ':') p->port = atoi(close + 2);
+    } else {
+        char *colon = strrchr(auth, ':');
+        if (colon) { *colon = 0; p->port = atoi(colon + 1); }
+        if (!path_copy(p->host, sizeof(p->host), auth)) { snprintf(err, errcap, "host is too long"); return 0; }
+    }
+    if (!p->host[0]) { snprintf(err, errcap, "missing host"); return 0; }
+    if (p->port != 80 && p->port != 443) { snprintf(err, errcap, "non-standard URL ports are blocked"); return 0; }
+    if (*path_start) path_copy(p->path, sizeof(p->path), path_start);
+    else strcpy(p->path, "/");
+    return 1;
+}
+
+/* Per-host politeness: at least SAMOSA_WEB_MIN_INTERVAL seconds between fetches
+   to the same host:port. The slot is reserved under lock, then we sleep
+   unlocked so unrelated hosts are not stalled. */
+static pthread_mutex_t public_rate_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct { char key[300]; double last; } public_rate[64];
+static void public_rate_wait(const char *key) {
+    const char *env = getenv("SAMOSA_WEB_MIN_INTERVAL");
+    double interval = env ? atof(env) : 1.0;
+    if (interval <= 0) return;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    double now = ts.tv_sec + ts.tv_nsec / 1e9, wait = 0;
+    pthread_mutex_lock(&public_rate_lock);
+    int slot = -1, empty = -1;
+    for (int i = 0; i < 64; ++i) {
+        if (public_rate[i].key[0] == 0) { if (empty < 0) empty = i; }
+        else if (!strcmp(public_rate[i].key, key)) { slot = i; break; }
+    }
+    if (slot < 0) slot = empty < 0 ? 0 : empty;
+    double ready = public_rate[slot].last + interval;
+    if (public_rate[slot].last > 0 && ready > now) wait = ready - now;
+    path_copy(public_rate[slot].key, sizeof(public_rate[slot].key), key);
+    public_rate[slot].last = now + wait;
+    pthread_mutex_unlock(&public_rate_lock);
+    if (wait > 0) { struct timespec s = {.tv_sec = (time_t)wait, .tv_nsec = (long)((wait - (time_t)wait) * 1e9)}; nanosleep(&s, NULL); }
+}
+
+static int make_temp_path(char out[PATH_MAX]) {
+    const char *tmp = getenv("TMPDIR"); if (!tmp || !*tmp) tmp = "/tmp";
+    if (snprintf(out, PATH_MAX, "%s/samosa-web-XXXXXX", tmp) >= PATH_MAX) return -1;
+    return mkstemp(out);
+}
+
+/* One HTTP transaction, no redirects, pinned to `ip`. Returns the status code
+   (0 on transport failure); fills headers/body (caller frees). */
+static int curl_fetch(Gateway *g, const char *url, const char *host, int port,
+                      const char *ip, char **out_headers, char **out_body) {
+    *out_headers = NULL; *out_body = NULL;
+    char bodyp[PATH_MAX], headp[PATH_MAX];
+    int bfd = make_temp_path(bodyp); if (bfd < 0) return 0; close(bfd);
+    int hfd = make_temp_path(headp); if (hfd < 0) { unlink(bodyp); return 0; } close(hfd);
+    const char *curl = getenv("SAMOSA_CURL"); if (!curl || !*curl) curl = "/usr/bin/curl";
+    char maxbytes[24]; snprintf(maxbytes, sizeof(maxbytes), "%u", (unsigned)MAX_PUBLIC_FETCH_BYTES);
+    char resolve[600]; snprintf(resolve, sizeof(resolve), "%s:%d:%s", host, port, ip);
+    char *argv[] = { (char *)curl, (char *)"--silent", (char *)"--show-error",
+        (char *)"--fail-with-body", (char *)"--proto", (char *)"=http,https",
+        (char *)"--max-redirs", (char *)"0", (char *)"--max-time", (char *)"20",
+        (char *)"--connect-timeout", (char *)"5", (char *)"--max-filesize", maxbytes,
+        (char *)"--resolve", resolve, (char *)"-A", (char *)PUBLIC_FETCH_USER_AGENT,
+        (char *)"-D", headp, (char *)"-o", bodyp, (char *)"-w", (char *)"%{http_code}",
+        (char *)url, NULL };
+    int status = 0; char *code = run_capture(g, curl, argv, 64, &status);
+    int http = 0;
+    if (code) { const char *d = code; while (*d && (*d < '0' || *d > '9')) ++d; http = atoi(d); free(code); }
+    *out_headers = read_file_limit(headp, 256 * 1024);
+    *out_body = read_file_limit(bodyp, MAX_PUBLIC_FETCH_BYTES);
+    unlink(bodyp); unlink(headp);
+    return http;
+}
+
+static void header_value(const char *headers, const char *name, char *out, size_t cap) {
+    out[0] = 0;
+    size_t namelen = strlen(name);
+    for (const char *line = headers; line && *line; ) {
+        const char *eol = strchr(line, '\n');
+        if (!strncasecmp(line, name, namelen) && line[namelen] == ':') {
+            const char *v = line + namelen + 1;
+            while (*v == ' ' || *v == '\t') ++v;
+            size_t n = eol ? (size_t)(eol - v) : strlen(v);
+            while (n && (v[n - 1] == '\r' || v[n - 1] == ' ' || v[n - 1] == '\t')) --n;
+            if (n >= cap) n = cap - 1;
+            memcpy(out, v, n); out[n] = 0;
+        }
+        line = eol ? eol + 1 : NULL;
+    }
+}
+
+static char *url_join(const char *base, const char *loc) {
+    if (!strncasecmp(loc, "http://", 7) || !strncasecmp(loc, "https://", 8)) return strdup(loc);
+    ParsedUrl b; char err[64];
+    if (!url_parse(base, &b, err, sizeof(err))) return strdup(loc);
+    char origin[600];
+    if ((!strcmp(b.scheme, "http") && b.port == 80) || (!strcmp(b.scheme, "https") && b.port == 443))
+        snprintf(origin, sizeof(origin), "%s://%s", b.scheme, b.host);
+    else
+        snprintf(origin, sizeof(origin), "%s://%s:%d", b.scheme, b.host, b.port);
+    char joined[4096];
+    if (loc[0] == '/') snprintf(joined, sizeof(joined), "%s%s", origin, loc);
+    else {
+        char dir[2048]; path_copy(dir, sizeof(dir), b.path);
+        char *slash = strrchr(dir, '/'); if (slash) slash[1] = 0; else strcpy(dir, "/");
+        snprintf(joined, sizeof(joined), "%s%s%s", origin, dir, loc);
+    }
+    return strdup(joined);
+}
+
+static int content_type_allowed(const char *ctype) {
+    static const char *ok[] = { "text/html", "text/plain", "application/json",
+        "text/xml", "application/xml", "application/rss+xml", NULL };
+    for (int i = 0; ok[i]; ++i) if (!strcmp(ctype, ok[i])) return 1;
+    return 0;
+}
+
+/* Test seam: when SAMOSA_WEB_STUB_DIR is set, the network transport is replaced
+   by local files keyed by a slug of the URL (<slug>.html or <slug>.txt). URL
+   validation still runs, so scheme/port/credential rejections are unaffected.
+   Never consulted unless the env var is set. */
+static int stub_page_path(const char *url, char out[PATH_MAX], int *is_html) {
+    const char *dir = getenv("SAMOSA_WEB_STUB_DIR");
+    if (!dir) return 0;
+    char slug[160]; slugify_to(slug, sizeof(slug), url);
+    if (snprintf(out, PATH_MAX, "%s/%s.html", dir, slug) < PATH_MAX && access(out, F_OK) == 0) { *is_html = 1; return 1; }
+    if (snprintf(out, PATH_MAX, "%s/%s.txt", dir, slug) < PATH_MAX && access(out, F_OK) == 0) { *is_html = 0; return 1; }
+    return 0;
+}
+
+/* Robots gate. On any fetch error, or a non-text robots file, fetch is allowed
+   (matching the reference). A conservative subset of the robots spec: the group
+   for our agent token, else '*', longest-match Allow beats longest-match
+   Disallow. */
+static int robots_path_allowed(const char *robots, const char *ua_token, const char *path) {
+    int have_specific = 0;
+    for (int pass = 0; pass < 2; ++pass) {
+        const char *want = pass == 0 ? ua_token : "*";
+        int in_group = 0, group_started = 0, last_was_agent = 0;
+        long best_allow = -1, best_disallow = -1;
+        for (const char *line = robots; line && *line; ) {
+            const char *eol = strchr(line, '\n');
+            size_t len = eol ? (size_t)(eol - line) : strlen(line);
+            while (len && (line[len - 1] == '\r' || line[len - 1] == ' ')) --len;
+            const char *p = line; size_t rest = len;
+            while (rest && (*p == ' ' || *p == '\t')) { ++p; --rest; }
+            if (rest && *p != '#') {
+                if (rest >= 11 && !strncasecmp(p, "user-agent:", 11)) {
+                    const char *v = p + 11; size_t vn = rest - 11;
+                    while (vn && (*v == ' ' || *v == '\t')) { ++v; --vn; }
+                    int matches = (pass == 0)
+                        ? (vn && strlen(want) <= vn && !strncasecmp(v, want, strlen(want)))
+                        : (vn == 1 && v[0] == '*');
+                    if (!last_was_agent && group_started) in_group = 0;   /* new group */
+                    if (matches) { in_group = 1; if (pass == 0) have_specific = 1; }
+                    group_started = 1; last_was_agent = 1;
+                } else {
+                    last_was_agent = 0;
+                    if (in_group && (rest >= 9 && !strncasecmp(p, "disallow:", 9))) {
+                        const char *v = p + 9; size_t vn = rest - 9;
+                        while (vn && (*v == ' ' || *v == '\t')) { ++v; --vn; }
+                        if (vn && !strncmp(path, v, vn) && (long)vn > best_disallow) best_disallow = (long)vn;
+                        if (!vn) { /* empty Disallow = allow all: no constraint */ }
+                    } else if (in_group && (rest >= 6 && !strncasecmp(p, "allow:", 6))) {
+                        const char *v = p + 6; size_t vn = rest - 6;
+                        while (vn && (*v == ' ' || *v == '\t')) { ++v; --vn; }
+                        if (vn && !strncmp(path, v, vn) && (long)vn > best_allow) best_allow = (long)vn;
+                    }
+                }
+            }
+            line = eol ? eol + 1 : NULL;
+        }
+        if (pass == 0 && !have_specific) continue;   /* no specific group; try '*' */
+        return best_disallow < 0 || best_allow >= best_disallow;
+    }
+    return 1;
+}
+
+static int robots_allowed(Gateway *g, const char *url); /* fwd */
+
+static int fetch_public(Gateway *g, const char *url, int enforce_robots,
+                        char **final_url, char **content_type, char **body,
+                        char *err, size_t errcap) {
+    *final_url = *content_type = *body = NULL;
+    char *current = strdup(url);
+    if (!current) { snprintf(err, errcap, "out of memory"); return 0; }
+    for (int hop = 0; hop < PUBLIC_FETCH_MAX_HOPS; ++hop) {
+        ParsedUrl parsed;
+        if (!url_parse(current, &parsed, err, errcap)) { free(current); return 0; }
+        if (enforce_robots && !robots_allowed(g, current)) {
+            snprintf(err, errcap, "robots.txt disallows this URL"); free(current); return 0;
+        }
+        char key[300]; snprintf(key, sizeof(key), "%s:%d", parsed.host, parsed.port);
+        public_rate_wait(key);
+        int is_html = 0; char stub[PATH_MAX];
+        if (stub_page_path(current, stub, &is_html)) {
+            char *data = read_file_limit(stub, MAX_PUBLIC_FETCH_BYTES);
+            if (!data) { snprintf(err, errcap, "stub page unreadable"); free(current); return 0; }
+            *final_url = current; *content_type = strdup(is_html ? "text/html" : "text/plain"); *body = data;
+            return 1;
+        }
+        if (getenv("SAMOSA_WEB_STUB_DIR")) { snprintf(err, errcap, "fetch failed (no stub)"); free(current); return 0; }
+        char ip[INET6_ADDRSTRLEN];
+        if (!resolve_public_host(parsed.host, ip, err, errcap)) { free(current); return 0; }
+        char *headers = NULL, *data = NULL;
+        int http = curl_fetch(g, current, parsed.host, parsed.port, ip, &headers, &data);
+        char location[2048], ctype[128];
+        header_value(headers ? headers : "", "location", location, sizeof(location));
+        header_value(headers ? headers : "", "content-type", ctype, sizeof(ctype));
+        char *semi = strchr(ctype, ';'); if (semi) *semi = 0;
+        for (char *c = ctype; *c; ++c) { if (*c >= 'A' && *c <= 'Z') *c += 32; if (*c == ' ') *c = 0; }
+        free(headers);
+        if ((http == 301 || http == 302 || http == 303 || http == 307 || http == 308) && location[0]) {
+            char *next = url_join(current, location);
+            free(current); free(data); current = next;
+            if (!current) { snprintf(err, errcap, "out of memory"); return 0; }
+            continue;
+        }
+        if (http < 200 || http >= 300) {
+            snprintf(err, errcap, "fetch failed with HTTP %d", http); free(current); free(data); return 0;
+        }
+        if (!content_type_allowed(ctype)) {
+            snprintf(err, errcap, "unsupported content type: %s", ctype[0] ? ctype : "unknown");
+            free(current); free(data); return 0;
+        }
+        *final_url = current; *content_type = strdup(ctype[0] ? ctype : "text/plain"); *body = data ? data : strdup("");
+        return 1;
+    }
+    snprintf(err, errcap, "too many redirects"); free(current); return 0;
+}
+
+static int robots_allowed(Gateway *g, const char *url) {
+    ParsedUrl p; char err[64];
+    if (!url_parse(url, &p, err, sizeof(err))) return 0;
+    char robots_url[512];
+    if ((!strcmp(p.scheme, "http") && p.port == 80) || (!strcmp(p.scheme, "https") && p.port == 443))
+        snprintf(robots_url, sizeof(robots_url), "%s://%s/robots.txt", p.scheme, p.host);
+    else
+        snprintf(robots_url, sizeof(robots_url), "%s://%s:%d/robots.txt", p.scheme, p.host, p.port);
+    char *robots_text = NULL;
+    if (getenv("SAMOSA_WEB_STUB_DIR")) {
+        const char *dir = getenv("SAMOSA_WEB_STUB_DIR");
+        char path[PATH_MAX];
+        if (snprintf(path, sizeof(path), "%s/robots.txt", dir) < (int)sizeof(path))
+            robots_text = read_file_limit(path, 256 * 1024);
+        if (!robots_text) return 1;
+    } else {
+        char *final_url = NULL, *ctype = NULL, *body = NULL, ferr[128];
+        if (!fetch_public(g, robots_url, 0, &final_url, &ctype, &body, ferr, sizeof(ferr))) {
+            free(final_url); free(ctype); free(body); return 1;
+        }
+        int text = ctype && (!strcmp(ctype, "text/plain") || !strcmp(ctype, "text/html"));
+        if (text) robots_text = body ? strdup(body) : NULL;
+        free(final_url); free(ctype); free(body);
+        if (!robots_text) return 1;
+    }
+    int allowed = robots_path_allowed(robots_text, "samosachat", p.path);
+    free(robots_text); return allowed;
+}
+
+static void append_entity(TextBuffer *out, const char *name, size_t len) {
+    struct { const char *n; const char *v; } named[] = {
+        {"amp", "&"}, {"lt", "<"}, {"gt", ">"}, {"quot", "\""}, {"apos", "'"},
+        {"nbsp", " "}, {"#39", "'"}, {"#34", "\""}, {NULL, NULL} };
+    char buf[16];
+    if (len < sizeof(buf)) { memcpy(buf, name, len); buf[len] = 0;
+        for (int i = 0; named[i].n; ++i) if (!strcmp(buf, named[i].n)) { text_add(out, named[i].v); return; }
+        if (buf[0] == '#') { int code = atoi(buf + 1); if (code >= 32 && code < 127) { char c[2] = {(char)code, 0}; text_add(out, c); return; } }
+    }
+    text_add(out, " ");
+}
+
+/* HTML → readable text: drops script/style/svg/noscript/template, inserts a
+   newline at block boundaries, decodes common entities, extracts <title>. */
+static void html_to_text(const char *html, char **out_text, char **out_title) {
+    TextBuffer text = {0}, title = {0};
+    int skip = 0, in_title = 0, last_space = 1;
+    const char *p = html;
+    while (*p) {
+        if (*p == '<') {
+            const char *q = p + 1; int closing = 0;
+            if (*q == '/') { closing = 1; ++q; }
+            if (*q == '!') { const char *gt = strchr(q, '>'); p = gt ? gt + 1 : q; continue; }
+            char tag[16]; size_t tl = 0;
+            while (*q && (isalnum((unsigned char)*q)) && tl + 1 < sizeof(tag)) tag[tl++] = (char)tolower((unsigned char)*q++);
+            tag[tl] = 0;
+            const char *gt = strchr(q, '>'); const char *nextp = gt ? gt + 1 : (q + strlen(q));
+            int is_skip = !strcmp(tag, "script") || !strcmp(tag, "style") || !strcmp(tag, "svg") ||
+                          !strcmp(tag, "noscript") || !strcmp(tag, "template");
+            if (is_skip) { if (closing) { if (skip) --skip; } else ++skip; }
+            else if (!strcmp(tag, "title")) in_title = !closing;
+            else if (!closing && (!strcmp(tag, "p") || !strcmp(tag, "br") || !strcmp(tag, "li") ||
+                     !strcmp(tag, "article") || !strcmp(tag, "section") || !strcmp(tag, "div") ||
+                     !strcmp(tag, "h1") || !strcmp(tag, "h2") || !strcmp(tag, "h3") || !strcmp(tag, "tr"))) {
+                if (!skip) { text_add(&text, "\n"); last_space = 1; }
+            }
+            p = nextp; continue;
+        }
+        if (skip) { ++p; continue; }
+        if (*p == '&') {
+            const char *semi = strchr(p, ';');
+            if (semi && semi - p <= 10) {
+                TextBuffer *dst = in_title ? &title : &text;
+                append_entity(dst, p + 1, (size_t)(semi - p - 1));
+                last_space = 0; p = semi + 1; continue;
+            }
+        }
+        unsigned char c = (unsigned char)*p;
+        if (isspace(c)) {
+            if (!last_space) { if (!in_title) text_add(&text, " "); else text_add(&title, " "); last_space = 1; }
+        } else {
+            char s[2] = {(char)c, 0};
+            if (in_title) text_add(&title, s); else text_add(&text, s);
+            last_space = 0;
+        }
+        ++p;
+    }
+    /* collapse spaces around newlines and runs of blank lines */
+    if (text.data) {
+        char *r = text.data, *w = text.data;
+        while (*r) {
+            if (*r == '\n') { while (w > text.data && w[-1] == ' ') --w; *w++ = '\n';
+                while (r[1] == '\n' || r[1] == ' ') { if (r[1] == ' ') ++r; else if (r[2] == '\n' || r[2] == ' ') ++r; else break; }
+                ++r; while (*r == ' ') ++r; continue; }
+            *w++ = *r++;
+        }
+        *w = 0;
+    }
+    *out_text = text.data ? text.data : strdup("");
+    *out_title = title.data ? title.data : strdup("");
+}
+
+typedef struct { char *url; char *title; char *text; int truncated; } PublicPage;
+static void public_page_free(PublicPage *pg) { free(pg->url); free(pg->title); free(pg->text); memset(pg, 0, sizeof(*pg)); }
+
+static int readable_page(Gateway *g, const char *url, PublicPage *out, char *err, size_t errcap) {
+    memset(out, 0, sizeof(*out));
+    char *final_url = NULL, *ctype = NULL, *body = NULL;
+    if (!fetch_public(g, url, 1, &final_url, &ctype, &body, err, errcap)) return 0;
+    char *title = NULL, *text = NULL;
+    if (!strcmp(ctype, "text/html")) {
+        html_to_text(body, &text, &title);
+        if (!title[0]) { free(title); ParsedUrl p; char e[64]; title = strdup(url_parse(final_url, &p, e, sizeof(e)) ? p.host : final_url); }
+        int scripts = 0; for (const char *s = body; (s = strcasestr(s, "<script")); s += 7) ++scripts;
+        if (strlen(text) < 300 && scripts >= 3) {
+            snprintf(err, errcap, "this page appears to require JavaScript and could not be read");
+            free(final_url); free(ctype); free(body); free(title); free(text); return 0;
+        }
+    } else {
+        text = body ? strdup(body) : strdup("");
+        ParsedUrl p; char e[64];
+        const char *base = url_parse(final_url, &p, e, sizeof(e)) ? p.path : final_url;
+        const char *slash = strrchr(base, '/');
+        title = strdup(slash && slash[1] ? slash + 1 : final_url);
+    }
+    /* trim leading/trailing whitespace to judge emptiness */
+    const char *t = text; while (*t == ' ' || *t == '\n' || *t == '\r' || *t == '\t') ++t;
+    if (!*t) {
+        snprintf(err, errcap, "the page did not contain readable text");
+        free(final_url); free(ctype); free(body); free(title); free(text); return 0;
+    }
+    if (strlen(title) > 300) title[300] = 0;
+    out->truncated = strlen(text) > MAX_PUBLIC_TEXT_BYTES;
+    if (out->truncated) text[MAX_PUBLIC_TEXT_BYTES] = 0;
+    out->url = final_url; out->title = title; out->text = text;
+    free(ctype); free(body);
+    return 1;
+}
+
+/* Fetch each user-supplied public URL and persist only new or changed pages.
+   Change detection compares an FNV-1a digest of title+text against the prior
+   run's; unchanged pages produce no item, a changed/new page produces exactly
+   one item text file. Returns a malloc'd JSON summary (caller frees) or NULL on
+   a structural failure (bad job_id / no URLs), with `err` set. */
+static char *update_job_public_inputs(Gateway *g, const char *job_id, jval *urls,
+                                      char *err, size_t errcap) {
+    if (!valid_job_id(job_id)) { snprintf(err, errcap, "a valid job_id is required"); return NULL; }
+    const char *clean[MAX_PUBLIC_JOB_URLS]; int nclean = 0;
+    for (int i = 0; urls && urls->t == J_ARR && i < urls->len; ++i) {
+        jval *u = urls->kids[i];
+        if (!u || u->t != J_STR || !u->str[0]) continue;
+        int dup = 0; for (int j = 0; j < nclean; ++j) if (!strcmp(clean[j], u->str)) { dup = 1; break; }
+        if (dup) continue;
+        if (nclean >= MAX_PUBLIC_JOB_URLS) { snprintf(err, errcap, "at most %d URLs are allowed", MAX_PUBLIC_JOB_URLS); return NULL; }
+        clean[nclean++] = u->str;
+    }
+    if (!nclean) { snprintf(err, errcap, "at least one public URL is required"); return NULL; }
+
+    char public_dir[PATH_MAX], items_dir[PATH_MAX], state_path[PATH_MAX], last_path[PATH_MAX];
+    if (!job_state_path(g, job_id, "public", public_dir, 1) ||
+        !path_join(items_dir, sizeof(items_dir), public_dir, "items") || !mkdirs(items_dir) ||
+        !path_join(state_path, sizeof(state_path), public_dir, "state.json") ||
+        !path_join(last_path, sizeof(last_path), public_dir, "last_fetch.json")) {
+        snprintf(err, errcap, "could not prepare the public input directory"); return NULL;
+    }
+    char *state_raw = read_file_limit(state_path, 8 << 20), *state_arena = NULL;
+    jval *prev = state_raw ? json_parse(state_raw, &state_arena) : NULL;
+    jval *prev_pages = prev && prev->t == J_OBJ ? json_get(prev, "pages") : NULL;
+
+    TextBuffer records = {0}, changed_items = {0}, new_pages = {0};
+    char now[32]; rfc3339_now_to(now, sizeof(now));
+    char *emitted[MAX_PUBLIC_JOB_URLS]; int nemitted = 0;   /* owned copies of final URLs */
+    int changed = 0, checked = 0;
+
+    for (int i = 0; i < nclean; ++i) {
+        char ferr[160]; PublicPage page;
+        checked++;
+        if (i && !text_add(&records, ",")) {}
+        if (!readable_page(g, clean[i], &page, ferr, sizeof(ferr))) {
+            text_add(&records, "{\"requested_url\":"); text_json_string(&records, clean[i]);
+            text_add(&records, ",\"status\":\"error\",\"error\":"); text_json_string(&records, ferr);
+            text_add(&records, "}");
+            continue;
+        }
+        char digest[17]; TextBuffer keyed = {0};
+        text_add(&keyed, page.title); text_add_n(&keyed, "\0", 1); text_add(&keyed, page.text);
+        snprintf(digest, sizeof(digest), "%016llx",
+                 (unsigned long long)stable_hash_bytes((unsigned char *)keyed.data, keyed.len));
+        free(keyed.data);
+        const char *prev_hash = NULL;
+        if (prev_pages && prev_pages->t == J_OBJ) {
+            jval *pe = json_get(prev_pages, page.url);
+            jval *ph = pe && pe->t == J_OBJ ? json_get(pe, "hash") : NULL;
+            if (ph && ph->t == J_STR) prev_hash = ph->str;
+        }
+        const char *status = !prev_hash ? "new" : (strcmp(prev_hash, digest) ? "changed" : "unchanged");
+
+        char text_path[PATH_MAX] = {0}, meta_path[PATH_MAX] = {0};
+        if (strcmp(status, "unchanged")) {
+            char slug[64]; slugify_to(slug, sizeof(slug), page.title[0] ? page.title : page.url);
+            char stem[96]; snprintf(stem, sizeof(stem), "%s-%.12s", slug, digest);
+            snprintf(text_path, sizeof(text_path), "%s/%s.txt", items_dir, stem);
+            snprintf(meta_path, sizeof(meta_path), "%s/%s.json", items_dir, stem);
+            write_small_file(text_path, page.text);
+            changed++;
+        }
+        TextBuffer rec = {0};
+        text_add(&rec, "{\"url\":"); text_json_string(&rec, page.url);
+        text_add(&rec, ",\"requested_url\":"); text_json_string(&rec, clean[i]);
+        text_add(&rec, ",\"title\":"); text_json_string(&rec, page.title);
+        text_add(&rec, ",\"hash\":"); text_json_string(&rec, digest);
+        text_add(&rec, ",\"status\":"); text_json_string(&rec, status);
+        text_add(&rec, ",\"truncated\":"); text_add(&rec, page.truncated ? "true" : "false");
+        char chars[32]; snprintf(chars, sizeof(chars), ",\"text_chars\":%zu", strlen(page.text));
+        text_add(&rec, chars);
+        if (text_path[0]) { text_add(&rec, ",\"text_path\":"); text_json_string(&rec, text_path);
+            text_add(&rec, ",\"meta_path\":"); text_json_string(&rec, meta_path); }
+        text_add(&rec, "}");
+        if (meta_path[0]) { TextBuffer m = {0}; text_add_n(&m, rec.data, rec.len); text_add(&m, "\n"); write_small_file(meta_path, m.data); free(m.data); }
+        text_add_n(&records, rec.data, rec.len);
+        if (strcmp(status, "unchanged")) { if (changed > 1 && !text_add(&changed_items, ",")) {} text_add_n(&changed_items, rec.data, rec.len); }
+        free(rec.data);
+
+        int seen = 0; for (int j = 0; j < nemitted; ++j) if (!strcmp(emitted[j], page.url)) { seen = 1; break; }
+        if (!seen && nemitted < MAX_PUBLIC_JOB_URLS) {
+            if (nemitted && !text_add(&new_pages, ",")) {}
+            text_json_string(&new_pages, page.url); text_add(&new_pages, ":{\"hash\":");
+            text_json_string(&new_pages, digest); text_add(&new_pages, ",\"title\":");
+            text_json_string(&new_pages, page.title); text_add(&new_pages, ",\"last_seen_at\":");
+            text_json_string(&new_pages, now); text_add(&new_pages, "}");
+            emitted[nemitted++] = strdup(page.url);   /* stable: page.url is freed below */
+        }
+        public_page_free(&page);
+    }
+
+    /* Preserve pages from earlier runs that were not part of this URL set. */
+    for (int i = 0; prev_pages && prev_pages->t == J_OBJ && i < prev_pages->len; ++i) {
+        const char *key = prev_pages->keys[i];
+        int seen = 0; for (int j = 0; j < nemitted; ++j) if (emitted[j] && !strcmp(emitted[j], key)) { seen = 1; break; }
+        if (seen) continue;
+        if (new_pages.len && !text_add(&new_pages, ",")) {}
+        text_json_string(&new_pages, key); text_add(&new_pages, ":");
+        text_json_value(&new_pages, prev_pages->kids[i]);
+    }
+
+    TextBuffer state_out = {0};
+    text_add(&state_out, "{\"pages\":{"); text_add_n(&state_out, new_pages.data ? new_pages.data : "", new_pages.len);
+    text_add(&state_out, "}}\n");
+    write_small_file(state_path, state_out.data);
+
+    TextBuffer summary = {0};
+    char head[128]; snprintf(head, sizeof(head), "{\"ok\":true,\"checked\":%d,\"changed\":%d,", checked, changed);
+    text_add(&summary, head);
+    text_add(&summary, "\"job_id\":"); text_json_string(&summary, job_id);
+    text_add(&summary, ",\"changed_items\":["); text_add_n(&summary, changed_items.data ? changed_items.data : "", changed_items.len);
+    text_add(&summary, "],\"records\":["); text_add_n(&summary, records.data ? records.data : "", records.len);
+    text_add(&summary, "]}");
+    write_small_file(last_path, summary.data);
+
+    for (int i = 0; i < nemitted; ++i) free(emitted[i]);
+    free(state_out.data); free(new_pages.data); free(records.data); free(changed_items.data);
+    json_free(prev); free(state_arena); free(state_raw);
+    return summary.data;
+}
+
+static int jobs_public_inputs_update(Gateway *g, int fd, const SamosaHttpRequest *request) {
+    char *arena = NULL; jval *body = json_parse(request->body, &arena);
+    jval *id = body && body->t == J_OBJ ? json_get(body, "job_id") : NULL;
+    jval *urls = body && body->t == J_OBJ ? json_get(body, "urls") : NULL;
+    if (!id || id->t != J_STR || !urls || urls->t != J_ARR) {
+        json_free(body); free(arena);
+        return samosa_http_json_error(fd, 400, "invalid_public_inputs", "job_id and a urls array are required.");
+    }
+    char job_id[128]; path_copy(job_id, sizeof(job_id), id->str);
+    char err[200]; char *summary = update_job_public_inputs(g, job_id, urls, err, sizeof(err));
+    json_free(body); free(arena);
+    if (!summary) return samosa_http_json_error(fd, 400, "public_inputs_failed", err);
+    int ok = samosa_http_response(fd, 200, "application/json", summary, NULL);
+    free(summary); return ok;
+}
+
 static int run_scheduled_job_native(Gateway *g, const char *schedule_path, jval *schedule) {
     jval *job_path_value = json_get(schedule, "job_path");
     jval *job_id_value = json_get(schedule, "job_id");
@@ -569,7 +1251,9 @@ static int run_scheduled_job_native(Gateway *g, const char *schedule_path, jval 
     jval *job = job_raw ? json_parse(job_raw, &job_arena) : NULL;
     jval *input = job && job->t == J_OBJ ? json_get(job, "input") : NULL;
     jval *folder = input && input->t == J_OBJ ? json_get(input, "folder") : NULL;
-    if (!folder || folder->t != J_STR) {
+    jval *public_inputs = job && job->t == J_OBJ ? json_get(job, "public_inputs") : NULL;
+    int has_public = public_inputs && public_inputs->t == J_ARR;
+    if ((!folder || folder->t != J_STR) && !has_public) {
         json_free(job); free(job_arena); free(job_raw);
         write_schedule_with_status(schedule_path, schedule, "failed", 1, "job_unavailable");
         return 0;
@@ -584,6 +1268,33 @@ static int run_scheduled_job_native(Gateway *g, const char *schedule_path, jval 
     text_add(&fields, ",\"job_path\":"); text_json_string(&fields, job_path_value->str);
     append_job_event_file(events_path, &seq, "scheduled_job_start", fields.data);
     free(fields.data);
+    /* Comparison workflow: fetch the user's public URLs, persist only new/changed
+       pages. The local folder (if any) and the changed items are both left on
+       disk for a later model comparison step; the runner does the deterministic
+       fetch + change detection here. */
+    if (has_public) {
+        char perr[200];
+        char *summary = update_job_public_inputs(g, job_id_value->str, public_inputs, perr, sizeof(perr));
+        int ok = summary != NULL;
+        TextBuffer ev = {0};
+        if (ok) {
+            char *sarena = NULL; jval *sj = json_parse(summary, &sarena);
+            jval *ck = sj ? json_get(sj, "checked") : NULL, *ch = sj ? json_get(sj, "changed") : NULL;
+            char nums[96];
+            snprintf(nums, sizeof(nums), "\"kind\":\"public\",\"checked\":%d,\"changed\":%d",
+                     ck && ck->t == J_NUM ? (int)ck->num : 0, ch && ch->t == J_NUM ? (int)ch->num : 0);
+            text_add(&ev, nums);
+            json_free(sj); free(sarena);
+        } else {
+            text_add(&ev, "\"kind\":\"public\",\"error\":"); text_json_string(&ev, perr);
+        }
+        append_job_event_file(events_path, &seq, ok ? "scheduled_job_complete" : "error", ev.data);
+        free(ev.data); free(summary);
+        json_free(job); free(job_arena); free(job_raw);
+        write_schedule_with_status(schedule_path, schedule, ok ? "complete" : "failed", ok ? 0 : 1,
+                                   ok ? "complete" : "public_fetch_failed");
+        return ok;
+    }
     jval *organize = json_get(job, "organize");
     if (!organize || organize->t != J_OBJ) {
         char *argv[] = {g->samosa_fs, "survey", "--max-file-bytes", "104857600", folder->str, NULL};
@@ -640,12 +1351,15 @@ static int run_scheduled_job_native(Gateway *g, const char *schedule_path, jval 
 
 static int jobsd_once_native(Gateway *g, int fd, const SamosaHttpRequest *request) {
     int now = current_minutes_local(), on_battery = host_on_battery();
+    long now_epoch = (long)time(NULL);
     if (request && request->body_len) {
         char *arena = NULL; jval *body = json_parse(request->body, &arena);
         jval *n = body && body->t == J_OBJ ? json_get(body, "now_minutes") : NULL;
         jval *b = body && body->t == J_OBJ ? json_get(body, "on_battery") : NULL;
+        jval *e = body && body->t == J_OBJ ? json_get(body, "now_epoch") : NULL;
         if (n && n->t == J_NUM) now = (int)n->num;
         if (b && b->t == J_BOOL) on_battery = b->boolean;
+        if (e && e->t == J_NUM) now_epoch = (long)e->num;
         json_free(body); free(arena);
     }
     DIR *dir = opendir(g->jobs_root);
@@ -659,16 +1373,20 @@ static int jobsd_once_native(Gateway *g, int fd, const SamosaHttpRequest *reques
             char *raw = read_file_limit(schedule_path, 1 << 20), *arena = NULL;
             jval *schedule = raw ? json_parse(raw, &arena) : NULL;
             if (!schedule || schedule->t != J_OBJ) { json_free(schedule); free(arena); free(raw); continue; }
-            char reason[64]; int should_run = schedule_decision(schedule, now, on_battery, reason, sizeof(reason));
+            jval *dl = json_get(schedule, "deadline_epoch");
+            int window_expired = dl && dl->t == J_NUM && now_epoch >= (long)dl->num;
+            char reason[64];
+            int should_run = schedule_decision(schedule, now, on_battery, window_expired, reason, sizeof(reason));
             int ran = 0;
-            if (should_run) ran = run_scheduled_job_native(g, schedule_path, schedule);
-            else if (!strcmp(reason, "outside_window")) {
-                jval *ws = json_get(schedule, "window_start"), *we = json_get(schedule, "window_end");
-                int start = parse_hhmm(ws && ws->t == J_STR ? ws->str : "22:00");
-                int end = parse_hhmm(we && we->t == J_STR ? we->str : "06:00");
-                if (start >= 0 && end >= 0 && !minutes_in_window(now, start, end))
-                    write_schedule_with_status(schedule_path, schedule, "missed", 1, "outside_window");
-            }
+            if (should_run) {
+                jval *ka = json_get(schedule, "keep_awake");
+                pid_t caffeinate = (ka && ka->t == J_BOOL && !ka->boolean) ? -1 : spawn_keep_awake(g);
+                ran = run_scheduled_job_native(g, schedule_path, schedule);
+                stop_tracked(g, caffeinate);
+            } else if (!strcmp(reason, "window_expired"))
+                /* skip policy: the window came and went; retire the schedule so it
+                   is not re-evaluated on every future poll. */
+                write_schedule_with_status(schedule_path, schedule, "expired", 0, "window_expired");
             if (count++ && !text_add(&decisions, ",")) {}
             text_add(&decisions, "{\"job_id\":"); text_json_string(&decisions, entry->d_name);
             text_add(&decisions, ",\"action\":"); text_json_string(&decisions, should_run ? "run" : "defer");
@@ -686,27 +1404,113 @@ static int jobsd_once_native(Gateway *g, int fd, const SamosaHttpRequest *reques
     free(response.data); free(decisions.data); return ok;
 }
 
-static int jobs_launchd_plist(Gateway *g, int fd) {
+static void launchd_plist_build(Gateway *g, TextBuffer *plist) {
     char program[PATH_MAX];
     if (!path_join(program, sizeof(program), g->home, "current/bin/samosa-jobsd"))
         path_copy(program, sizeof(program), "samosa-jobsd");
+    text_add(plist, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+                    "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+                    "<plist version=\"1.0\"><dict>"
+                    "<key>Label</key><string>com.samosa.jobsd</string>"
+                    "<key>ProgramArguments</key><array><string>");
+    text_add(plist, program);
+    text_add(plist, "</string><string>jobsd-once</string></array>"
+                    "<key>RunAtLoad</key><true/><key>StartInterval</key><integer>300</integer>"
+                    "<key>StandardOutPath</key><string>");
+    text_add(plist, g->home); text_add(plist, "/logs/jobsd.out.log</string>"
+                    "<key>StandardErrorPath</key><string>");
+    text_add(plist, g->home); text_add(plist, "/logs/jobsd.err.log</string>"
+                    "</dict></plist>\n");
+}
+
+static int jobs_launchd_plist(Gateway *g, int fd) {
     TextBuffer plist = {0};
-    text_add(&plist, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-                     "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
-                     "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
-                     "<plist version=\"1.0\"><dict>"
-                     "<key>Label</key><string>com.samosa.jobsd</string>"
-                     "<key>ProgramArguments</key><array><string>");
-    text_add(&plist, program);
-    text_add(&plist, "</string><string>jobsd-once</string></array>"
-                     "<key>RunAtLoad</key><true/><key>StartInterval</key><integer>300</integer>"
-                     "<key>StandardOutPath</key><string>");
-    text_add(&plist, g->home); text_add(&plist, "/logs/jobsd.out.log</string>"
-                     "<key>StandardErrorPath</key><string>");
-    text_add(&plist, g->home); text_add(&plist, "/logs/jobsd.err.log</string>"
-                     "</dict></plist>\n");
-    int ok = samosa_http_response(fd, 200, "application/xml", plist.data, NULL);
+    launchd_plist_build(g, &plist);
+    int ok = plist.data && samosa_http_response(fd, 200, "application/xml", plist.data, NULL);
     free(plist.data); return ok;
+}
+
+/* The LaunchAgents directory and plist path. Overridable for tests so the suite
+   never installs a real agent on the developer's machine. */
+static int launchd_agents_dir(char out[PATH_MAX]) {
+    const char *override = getenv("SAMOSA_LAUNCH_AGENTS_DIR");
+    if (override) return path_copy(out, PATH_MAX, override);
+    const char *user_home = getenv("HOME");
+    return user_home && path_join(out, PATH_MAX, user_home, "Library/LaunchAgents");
+}
+
+static int launchd_plist_path(char out[PATH_MAX]) {
+    char dir[PATH_MAX];
+    return launchd_agents_dir(dir) && path_join(out, PATH_MAX, dir, "com.samosa.jobsd.plist");
+}
+
+/* A dry run writes and manages the plist file but never invokes launchctl, so
+   tests (and non-macOS hosts) do not touch a real launchd domain. */
+static int launchd_dry_run(void) {
+#ifdef __APPLE__
+    return getenv("SAMOSA_LAUNCHD_DRYRUN") != NULL;
+#else
+    return 1;
+#endif
+}
+
+static int run_launchctl(Gateway *g, const char *verb, const char *argument) {
+    char *argv[] = {(char *)"/bin/launchctl", (char *)verb, (char *)"-w", (char *)argument, NULL};
+    if (!strcmp(verb, "list")) { argv[2] = (char *)argument; argv[3] = NULL; }
+    int status = 0; char *out = run_capture(g, "/bin/launchctl", argv, 1 << 16, &status);
+    int ok = out && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    free(out); return ok;
+}
+
+static int jobs_launchd_install(Gateway *g, int fd) {
+    char plist_path[PATH_MAX], agents[PATH_MAX], logs[PATH_MAX];
+    if (!launchd_agents_dir(agents) || !launchd_plist_path(plist_path))
+        return samosa_http_json_error(fd, 500, "launchd_path", "Could not resolve the LaunchAgents path.");
+    TextBuffer plist = {0}; launchd_plist_build(g, &plist);
+    int wrote = plist.data && mkdirs(agents) &&
+                path_join(logs, sizeof(logs), g->home, "logs") && mkdirs(logs) &&
+                write_small_file(plist_path, plist.data);
+    free(plist.data);
+    if (!wrote) return samosa_http_json_error(fd, 500, "launchd_write", "Could not write the launchd plist.");
+    int dry = launchd_dry_run(), loaded = 0;
+    if (!dry) { run_launchctl(g, "unload", plist_path); loaded = run_launchctl(g, "load", plist_path); }
+    TextBuffer resp = {0};
+    int ok = text_add(&resp, "{\"ok\":true,\"plist_path\":") && text_json_string(&resp, plist_path) &&
+        text_add(&resp, ",\"loaded\":") && text_add(&resp, loaded ? "true" : "false") &&
+        text_add(&resp, ",\"dry_run\":") && text_add(&resp, dry ? "true" : "false") && text_add(&resp, "}");
+    int sent = ok && samosa_http_response(fd, 200, "application/json", resp.data, NULL);
+    free(resp.data); return sent;
+}
+
+static int jobs_launchd_uninstall(Gateway *g, int fd) {
+    char plist_path[PATH_MAX];
+    if (!launchd_plist_path(plist_path))
+        return samosa_http_json_error(fd, 500, "launchd_path", "Could not resolve the LaunchAgents path.");
+    int dry = launchd_dry_run();
+    if (!dry) run_launchctl(g, "unload", plist_path);
+    int removed = (access(plist_path, F_OK) != 0) || (unlink(plist_path) == 0);
+    TextBuffer resp = {0};
+    int ok = text_add(&resp, "{\"ok\":true,\"removed\":") && text_add(&resp, removed ? "true" : "false") &&
+        text_add(&resp, ",\"dry_run\":") && text_add(&resp, dry ? "true" : "false") && text_add(&resp, "}");
+    int sent = ok && samosa_http_response(fd, 200, "application/json", resp.data, NULL);
+    free(resp.data); return sent;
+}
+
+static int jobs_launchd_status(Gateway *g, int fd) {
+    char plist_path[PATH_MAX];
+    if (!launchd_plist_path(plist_path))
+        return samosa_http_json_error(fd, 500, "launchd_path", "Could not resolve the LaunchAgents path.");
+    int installed = access(plist_path, F_OK) == 0;
+    int dry = launchd_dry_run(), loaded = 0;
+    if (!dry) loaded = run_launchctl(g, "list", "com.samosa.jobsd");
+    TextBuffer resp = {0};
+    int ok = text_add(&resp, "{\"installed\":") && text_add(&resp, installed ? "true" : "false") &&
+        text_add(&resp, ",\"loaded\":") && text_add(&resp, loaded ? "true" : "false") &&
+        text_add(&resp, ",\"dry_run\":") && text_add(&resp, dry ? "true" : "false") &&
+        text_add(&resp, ",\"plist_path\":") && text_json_string(&resp, plist_path) && text_add(&resp, "}");
+    int sent = ok && samosa_http_response(fd, 200, "application/json", resp.data, NULL);
+    free(resp.data); return sent;
 }
 
 static char *backend_json(Gateway *g, const char *payload) {
@@ -1719,6 +2523,14 @@ static int gateway_handler(SamosaHttpServer *server, int fd,
         return jobsd_once_native(g, fd, request);
     if (!strcmp(request->method, "GET") && !strcmp(request->path, "/v1/jobs/launchd-plist"))
         return jobs_launchd_plist(g, fd);
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/jobs/launchd/install"))
+        return jobs_launchd_install(g, fd);
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/jobs/launchd/uninstall"))
+        return jobs_launchd_uninstall(g, fd);
+    if (!strcmp(request->method, "GET") && !strcmp(request->path, "/v1/jobs/launchd/status"))
+        return jobs_launchd_status(g, fd);
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/jobs/public-inputs/update"))
+        return jobs_public_inputs_update(g, fd, request);
     if (!strcmp(request->path, "/v1/chat/completions") ||
         !strcmp(request->path, "/v1/models"))
         return proxy_request(g, fd, request);
@@ -1733,6 +2545,17 @@ static void on_signal(int number) {
     if (!signal_gateway) return;
     atomic_store(&signal_gateway->stopping, 1);
     if (signal_gateway->server) samosa_http_server_stop(signal_gateway->server);
+}
+
+/* jobsd is single-threaded and short-lived; on a signal, kill any tracked
+   child (sidecar, curl, caffeinate) so nothing is orphaned, then exit. */
+static Gateway *jobsd_signal_gateway;
+static void jobsd_on_signal(int number) {
+    (void)number;
+    if (jobsd_signal_gateway)
+        for (size_t i = 0; i < sizeof(jobsd_signal_gateway->job_pids) / sizeof(jobsd_signal_gateway->job_pids[0]); ++i)
+            if (jobsd_signal_gateway->job_pids[i] > 0) kill(jobsd_signal_gateway->job_pids[i], SIGKILL);
+    _Exit(1);
 }
 
 static int load_config(Gateway *g) {
@@ -1786,6 +2609,8 @@ int main(int argc, char **argv) {
     /* jobsd one-shot: poll armed schedules, run any inside their window, exit.
        No backend, no listener — this is what launchd fires on an interval. */
     if (argc >= 2 && !strcmp(argv[1], "jobsd-once")) {
+        jobsd_signal_gateway = &gateway;
+        signal(SIGINT, jobsd_on_signal); signal(SIGTERM, jobsd_on_signal);
         int ok = jobsd_once_native(&gateway, -1, NULL);
         pthread_mutex_destroy(&gateway.mu);
         return ok ? 0 : 1;
