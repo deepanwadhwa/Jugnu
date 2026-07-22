@@ -2,6 +2,7 @@
 set -eu
 
 GATEWAY=${SAMOSA_COMPILED_GATEWAY:-./samosa-gateway}
+JOBSD=${SAMOSA_COMPILED_JOBSD:-./samosa-jobsd}
 BACKEND=${SAMOSA_FAKE_BACKEND:-./test_fake_openai_backend}
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 FS_SIDECAR=${SAMOSA_FS:-"$ROOT/build/samosa-fs"}
@@ -151,6 +152,68 @@ undone=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/undo" \
   -H 'Content-Type: application/json' --data-binary "{\"job_id\":\"$MOVE_JOB\"}")
 printf '%s' "$undone" | /usr/bin/grep -q '"undone":1'
 [ -f "$TMP/files/cat-medical-note.txt" ]
+
+# --- Native background scheduler: arm, idempotency, window/battery policy, jobsd binary ---
+/bin/mkdir "$TMP/sched"
+printf 'shift log entry\n' >"$TMP/sched/log-a.txt"
+printf 'another note\n' >"$TMP/sched/log-b.txt"
+
+# Arm an overnight (cross-midnight) report job.
+SCHED_JOB="{\"job\":{\"job_id\":\"nightly-report\",\"input\":{\"folder\":\"$TMP/sched\"}},\"window_start\":\"22:00\",\"window_end\":\"06:00\",\"missed_policy\":\"skip\"}"
+armed=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/schedule/arm" \
+  -H 'Content-Type: application/json' --data-binary "$SCHED_JOB")
+printf '%s' "$armed" | /usr/bin/grep -q '"ok":true'
+printf '%s' "$armed" | /usr/bin/grep -q '"job_id":"nightly-report"'
+[ -f "$HOME_DIR/jobs/nightly-report/schedule.json" ]
+[ -f "$HOME_DIR/jobs/nightly-report/job.json" ]
+
+# Re-arming the identical definition is idempotent (no rejection).
+armed_again=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/schedule/arm" \
+  -H 'Content-Type: application/json' --data-binary "$SCHED_JOB")
+printf '%s' "$armed_again" | /usr/bin/grep -q '"ok":true'
+
+# Arming a changed definition under the same job_id is rejected, not replaced.
+CHANGED_JOB="{\"job\":{\"job_id\":\"nightly-report\",\"input\":{\"folder\":\"$TMP/sched\"},\"instruction\":\"different\"},\"window_start\":\"22:00\",\"window_end\":\"06:00\"}"
+rejected=$(/usr/bin/curl -sS -X POST "http://127.0.0.1:$PORT/v1/jobs/schedule/arm" \
+  -H 'Content-Type: application/json' --data-binary "$CHANGED_JOB")
+printf '%s' "$rejected" | /usr/bin/grep -q '"code":"schedule_definition_changed"'
+
+# Outside the window: defer.
+outside=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobsd/once" \
+  -H 'Content-Type: application/json' --data-binary '{"now_minutes":720,"on_battery":false}')
+printf '%s' "$outside" | /usr/bin/grep -q '"job_id":"nightly-report","action":"defer","reason":"outside_window"'
+
+# Inside the window but on battery (run_on_battery defaults false): defer.
+battery=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobsd/once" \
+  -H 'Content-Type: application/json' --data-binary '{"now_minutes":1380,"on_battery":true}')
+printf '%s' "$battery" | /usr/bin/grep -q '"job_id":"nightly-report","action":"defer","reason":"on_battery"'
+
+# Inside the window on AC: it runs to completion across midnight.
+ran=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobsd/once" \
+  -H 'Content-Type: application/json' --data-binary '{"now_minutes":1380,"on_battery":false}')
+printf '%s' "$ran" | /usr/bin/grep -q '"job_id":"nightly-report","action":"run","reason":"inside_window"'
+printf '%s' "$ran" | /usr/bin/grep -q '"status":"complete"'
+/usr/bin/grep -q '"type":"scheduled_job_complete"' "$HOME_DIR/jobs/nightly-report/events.jsonl"
+
+# One-shot polling is idempotent: a finished schedule does not run again.
+again=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobsd/once" \
+  -H 'Content-Type: application/json' --data-binary '{"now_minutes":1380,"on_battery":false}')
+printf '%s' "$again" | /usr/bin/grep -q '"job_id":"nightly-report","action":"defer"'
+
+# The launchd plist points at the compiled samosa-jobsd one-shot.
+plist=$(/usr/bin/curl -fsS "http://127.0.0.1:$PORT/v1/jobs/launchd-plist")
+printf '%s' "$plist" | /usr/bin/grep -q 'samosa-jobsd'
+printf '%s' "$plist" | /usr/bin/grep -q '<string>jobsd-once</string>'
+
+# The standalone compiled daemon runs an armed job with python unavailable and no
+# listener/backend. Arm a 24h window that ignores battery so it is time/power
+# independent, then invoke the binary directly.
+ALWAYS_JOB="{\"job\":{\"job_id\":\"always-report\",\"input\":{\"folder\":\"$TMP/sched\"},\"resources\":{\"run_on_battery\":true}},\"window_start\":\"00:00\",\"window_end\":\"00:00\",\"missed_policy\":\"skip\"}"
+/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/schedule/arm" \
+  -H 'Content-Type: application/json' --data-binary "$ALWAYS_JOB" | /usr/bin/grep -q '"ok":true'
+jobsd_out=$(SAMOSA_HOME="$HOME_DIR" SAMOSA_FS="$TMP/samosa-fs-wrapper" "$JOBSD" jobsd-once)
+printf '%s' "$jobsd_out" | /usr/bin/grep -q '"job_id":"always-report","action":"run"'
+/usr/bin/grep -q '"type":"scheduled_job_complete"' "$HOME_DIR/jobs/always-report/events.jsonl"
 
 /usr/bin/curl -sS -X POST "http://127.0.0.1:$PORT/v1/jobs/run" \
   -H 'Content-Type: application/json' \

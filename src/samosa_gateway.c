@@ -3,6 +3,7 @@
 #define _DARWIN_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -1712,6 +1713,12 @@ static int gateway_handler(SamosaHttpServer *server, int fd,
         return jobs_apply_or_undo(g, fd, request, 0);
     if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/jobs/undo"))
         return jobs_apply_or_undo(g, fd, request, 1);
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/jobs/schedule/arm"))
+        return jobs_schedule_arm(g, fd, request);
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/jobsd/once"))
+        return jobsd_once_native(g, fd, request);
+    if (!strcmp(request->method, "GET") && !strcmp(request->path, "/v1/jobs/launchd-plist"))
+        return jobs_launchd_plist(g, fd);
     if (!strcmp(request->path, "/v1/chat/completions") ||
         !strcmp(request->path, "/v1/models"))
         return proxy_request(g, fd, request);
@@ -1771,10 +1778,17 @@ static int load_config(Gateway *g) {
            g->backend_port > 0 && g->backend_port < 65536;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     Gateway gateway;
     if (!load_config(&gateway)) {
         fprintf(stderr, "samosa-gateway: invalid configuration\n"); return 2;
+    }
+    /* jobsd one-shot: poll armed schedules, run any inside their window, exit.
+       No backend, no listener — this is what launchd fires on an interval. */
+    if (argc >= 2 && !strcmp(argv[1], "jobsd-once")) {
+        int ok = jobsd_once_native(&gateway, -1, NULL);
+        pthread_mutex_destroy(&gateway.mu);
+        return ok ? 0 : 1;
     }
     if (!backend_start(&gateway)) {
         fprintf(stderr, "samosa-gateway: backend %s is not installed\n", gateway.backend); return 2;

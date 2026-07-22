@@ -61,13 +61,22 @@ samosa-gateway: src/samosa_gateway.c src/samosa_http.h src/json.h
 	$(CC) -O2 -Wall -Wextra -Werror -Wno-unused-function -std=c11 -pthread -Isrc \
 	  src/samosa_gateway.c -o $(BUILD_DIR)/samosa-gateway
 
+# samosa-jobsd is the same source under a launchd-friendly name. Invoked as
+# `samosa-jobsd jobsd-once` it polls armed schedules and exits — no listener,
+# no backend — which is exactly what the installed launchd plist fires.
+samosa-jobsd: src/samosa_gateway.c src/samosa_http.h src/json.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -Werror -Wno-unused-function -std=c11 -pthread -Isrc \
+	  src/samosa_gateway.c -o $(BUILD_DIR)/samosa-jobsd
+
 test_fake_openai_backend: tests/fake_openai_backend.c src/samosa_http.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Werror -Wno-unused-function -std=c11 -pthread -Isrc \
 	  tests/fake_openai_backend.c -o $(BUILD_DIR)/test_fake_openai_backend
 
-compiled-gateway-test: samosa-gateway samosa-fs test_fake_openai_backend tests/test_compiled_gateway.sh
+compiled-gateway-test: samosa-gateway samosa-jobsd samosa-fs test_fake_openai_backend tests/test_compiled_gateway.sh
 	SAMOSA_COMPILED_GATEWAY="$$PWD/$(BUILD_DIR)/samosa-gateway" \
+	SAMOSA_COMPILED_JOBSD="$$PWD/$(BUILD_DIR)/samosa-jobsd" \
 	SAMOSA_FAKE_BACKEND="$$PWD/$(BUILD_DIR)/test_fake_openai_backend" \
 	SAMOSA_FS="$$PWD/$(BUILD_DIR)/samosa-fs" sh tests/test_compiled_gateway.sh
 

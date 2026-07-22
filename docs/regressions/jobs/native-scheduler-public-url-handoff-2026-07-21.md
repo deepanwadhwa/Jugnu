@@ -209,3 +209,82 @@ This handoff file itself will add:
 ```text
 ?? docs/regressions/jobs/native-scheduler-public-url-handoff-2026-07-21.md
 ```
+
+## Continuation — 2026-07-21 (native scheduler wired + tested)
+
+This picks up directly from the checkpoint above and completes handoff steps
+1–3, 6, and 7 (the scheduler half). The public-URL fetch pipeline (steps 4–5)
+is deliberately **not** started here; it is the next milestone.
+
+### What landed
+
+- **Fixed the build.** The checkpointed helpers did not compile — `jobsd_once_
+  native()` uses `opendir`/`readdir`/`struct dirent`/`closedir` but `dirent.h`
+  was not included. Added `#include <dirent.h>`. `make samosa-gateway` was
+  verified to fail before the include and pass after.
+- **Wired three native routes** into `gateway_handler()`:
+  - `POST /v1/jobs/schedule/arm` → `jobs_schedule_arm()`
+  - `POST /v1/jobsd/once` → `jobsd_once_native()`
+  - `GET  /v1/jobs/launchd-plist` → `jobs_launchd_plist()`
+- **Added the `samosa-jobsd` one-shot.** `main()` now takes `argc/argv`; invoked
+  as `samosa-jobsd jobsd-once` (or `samosa-gateway jobsd-once`) it loads config,
+  runs `jobsd_once_native(g, -1, NULL)` once, prints the decisions JSON, and
+  exits — **no backend start, no listener bind**. New `samosa-jobsd` Makefile
+  target builds the same source under the launchd-friendly name.
+- **Extended `tests/test_compiled_gateway.sh`** (runs with `python3` removed from
+  `PATH`). New assertions: arm succeeds; identical re-arm is idempotent; a
+  changed definition under the same `job_id` is rejected with
+  `code:"schedule_definition_changed"`; a cross-midnight window (22:00–06:00)
+  defers outside the window, defers inside-but-on-battery, runs inside-on-AC to
+  `scheduled_job_complete`, and does **not** re-run once finished; the launchd
+  plist references `samosa-jobsd` + `jobsd-once`; and the **standalone compiled
+  daemon** runs an armed 24h/`run_on_battery` job with `python3` unavailable,
+  writing `events.jsonl`. `compiled-gateway-test` now also builds+passes
+  `samosa-jobsd`.
+
+### Evidence
+
+```text
+$ make samosa-gateway            # before dirent.h: 13 errors (incomplete struct dirent, closedir)
+$ make samosa-gateway samosa-jobsd   # after: exit 0
+$ make compiled-gateway-test     # exit 0 → "compiled gateway without python: PASS"
+```
+
+Manual end-to-end of the standalone binary (report job and organize/move job)
+confirmed `scheduled_job_start`/`scheduled_job_complete` events, `schedule.json`
+marked `complete`+`enabled:false`, `applied.jsonl` recording moves, and a second
+poll deferring (idempotent one-shot).
+
+### Acceptance gates (from TASKS_JOBS "Native Jobs completion estimate")
+
+- **Gate 1** (compiled `samosa-jobsd`, runs with python unavailable) — **met and
+  tested.**
+- **Gate 2** (idempotent arm; changed definition rejected) — **met and tested.**
+- **Gate 3** (cross-midnight windows) — window logic **met and tested**; the
+  **missed-window `run_next_start` policy is NOT wired** (see below).
+- **Gate 4** (battery/AC policy before work starts) — **met and tested** via the
+  `on_battery` override; `caffeinate`/keep-awake for a run's lifetime is **not**
+  implemented.
+- **Gate 5** (review-required queued, daemon never blocks on a question) — the
+  scheduled runner is non-interactive by construction; no review-queue path is
+  exercised yet.
+- Gates 6–11 (Kill of a daemon run, public URLs/SSRF/robots, changed-page units,
+  installed-release integration, Python removal) — **not started.**
+
+### Honest remaining work (do not overstate)
+
+1. **Missed-window policy is dead code.** `schedule_decision()` will honor
+   `run_next_start` only if a `missed` **boolean** is true, but nothing ever sets
+   it — `jobsd_once_native()` writes `last_status:"missed"` instead. Wire these
+   together (or drive the decision off `last_status`) before claiming Gate 3's
+   missed-window half. Not done here to avoid shipping half-correct policy.
+2. **launchd lifecycle** — only the plist *generator* exists. Install/uninstall/
+   status, log paths, and `caffeinate` keep-awake are unimplemented.
+3. **Kill for a scheduled run** — `/v1/kill` stops interactive sidecars; it does
+   not yet own a running daemon job + its sidecars + keep-awake (Gate 6).
+4. **Native public-URL pipeline (handoff steps 4–5)** — untouched. The
+   `MAX_PUBLIC_*` constants and `netdb.h`/`arpa/inet.h` includes are staged but
+   no fetch/SSRF/robots/change-state code exists. This is the largest remaining
+   chunk and the one with real security surface.
+5. **Real acceptance** — no sleep/wake missed-window test, no real public-page
+   change check, no installed-release run. Offline tests passing is not "works".
