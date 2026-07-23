@@ -2589,7 +2589,7 @@ static char *ji_first_lines(const char *text) {
    verify loop reads. Budget JI_SKIM_MAX_FILES / JI_SKIM_MAX_SECONDS; survivors
    past the budget are listed unskimmed so the loop can still read them. */
 static int find_skim(Gateway *g, int fd, const char *folder, const char *job_id,
-                     jval *items, const int *verdict, TextBuffer *skim_context,
+                     jval *items, const int *verdict,
                      int *listed, int *parked_count, int *seq) {
     int total = items->len;
     *listed = 0; *parked_count = 0;
@@ -2672,13 +2672,6 @@ static int find_skim(Gateway *g, int fd, const char *folder, const char *job_id,
             job_append_jsonl(g, job_id, "skim.jsonl", sl.data);
         free(sl.data);
 
-        char head[32]; snprintf(head, sizeof(head), "%d. ", *listed);
-        text_add(skim_context, head); text_add(skim_context, rel);
-        text_add(skim_context, " ("); text_add(skim_context, type); text_add(skim_context, ")\n");
-        if (parked) { text_add(skim_context, "   (could not read: "); text_add(skim_context, source_buf); text_add(skim_context, ")\n"); }
-        else if (first_lines && *first_lines) { text_add(skim_context, "   "); text_add(skim_context, first_lines); text_add(skim_context, "\n"); }
-        else if (!within_budget) text_add(skim_context, "   (not yet skimmed)\n");
-
         TextBuffer ev = {0}; char nb[32];
         snprintf(nb, sizeof(nb), "%d", (*seq)++);
         int e = text_add(&ev, "{\"seq\":") && text_add(&ev, nb) && text_add(&ev, ",\"type\":\"skim_progress\",\"done\":");
@@ -2690,6 +2683,111 @@ static int find_skim(Gateway *g, int fd, const char *folder, const char *job_id,
         free(ev.data); free(first_lines);
     }
     free(order);
+    return ok;
+}
+
+typedef struct { char *rel; char *first_lines; int parked; char *reason; } ClRow;
+
+/* Phase C (JI.4): cheap batch classification over the skim's {rel_path,
+   first_lines} rows, to narrow to a shortlist before the expensive verify loop.
+   Reads skim.jsonl, batches readable rows under JI_CLASSIFY_BATCH_TOKENS, one
+   model call per batch (match|maybe|no). Builds shortlist (the numbered
+   rel_path + first_lines rows the verify loop reads) from match|maybe; parked
+   files are appended as unreadable notes so the loop still reports them. */
+static int find_classify(Gateway *g, int fd, const char *goal, const char *job_id,
+                         TextBuffer *shortlist, int *shortlist_count, int *seq) {
+    *shortlist_count = 0;
+    char path[PATH_MAX];
+    if (!job_state_path(g, job_id, "skim.jsonl", path, 0)) return 1;
+    char *raw = read_file_limit(path, 32 << 20);
+    if (!raw) return 1;
+    int cap = 1; for (char *p = raw; *p; ++p) if (*p == '\n') cap++;
+    ClRow *rows = malloc((size_t)cap * sizeof(*rows));
+    if (!rows) { free(raw); return 0; }
+    int nrows = 0;
+    for (char *save = NULL, *line = strtok_r(raw, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        char *la = NULL; jval *o = json_parse(line, &la);
+        if (o && o->t == J_OBJ) {
+            jval *p = json_get(o, "path"), *fl = json_get(o, "first_lines");
+            jval *pk = json_get(o, "parked"), *sc = json_get(o, "source");
+            rows[nrows].rel = strdup(p && p->t == J_STR ? p->str : "");
+            rows[nrows].first_lines = strdup(fl && fl->t == J_STR ? fl->str : "");
+            rows[nrows].parked = pk && pk->t == J_BOOL && pk->boolean;
+            rows[nrows].reason = strdup(sc && sc->t == J_STR ? sc->str : "");
+            if (rows[nrows].rel && rows[nrows].first_lines && rows[nrows].reason) nrows++;
+        }
+        json_free(o); free(la);
+    }
+    free(raw);
+
+    const char *system =
+        "You are classifying skimmed files for a local file-finding job. Each numbered "
+        "file shows its path and the first lines of its content. Output a JSON array of "
+        "{\"i\": <index>, \"v\": \"match\"|\"maybe\"|\"no\", \"why\": \"<short>\"}: match = the "
+        "content clearly satisfies the goal; maybe = it plausibly could; no = it does not. "
+        "Output JSON only, one object per file.";
+    /* readable (non-parked) row indices, in file order */
+    int *readable = malloc((size_t)(nrows > 0 ? nrows : 1) * sizeof(int));
+    int nread = 0, ok = readable != NULL;
+    for (int i = 0; ok && i < nrows; ++i) if (!rows[i].parked) readable[nread++] = i;
+
+    int done = 0, ri = 0;
+    while (ok && ri < nread) {
+        TextBuffer batch = {0};
+        if (!text_add(&batch, "Goal: ") || !text_add(&batch, goal) || !text_add(&batch, "\nFiles:\n")) { free(batch.data); ok = 0; break; }
+        int n = 0, first = ri;
+        for (; ri < nread; ) {
+            ClRow *r = &rows[readable[ri]];
+            char head[32]; snprintf(head, sizeof(head), "%d. ", n + 1);
+            if (!text_add(&batch, head) || !text_add(&batch, r->rel) || !text_add(&batch, "\n   ") ||
+                !text_add(&batch, r->first_lines) || !text_add(&batch, "\n")) { ok = 0; break; }
+            n++; ri++;
+            if (batch.len >= (size_t)JI_CLASSIFY_BATCH_TOKENS * 4) break;
+        }
+        if (!ok) { free(batch.data); break; }
+        char *arr = NULL;
+        for (int attempt = 0; attempt < 2 && !arr; ++attempt) {
+            char *content = ji_model_text(g, system, batch.data);
+            arr = content ? first_json_array(content) : NULL;
+            free(content);
+        }
+        free(batch.data);
+        char *varena = NULL; jval *verdicts = arr ? json_parse(arr, &varena) : NULL;
+        for (int li = 0; li < n; ++li) {
+            ClRow *r = &rows[readable[first + li]];
+            const char *v = "maybe";  /* fail open: an unparsed verdict keeps the file */
+            if (verdicts && verdicts->t == J_ARR)
+                for (int k = 0; k < verdicts->len; ++k) {
+                    jval *e = verdicts->kids[k];
+                    jval *iv = e && e->t == J_OBJ ? json_get(e, "i") : NULL;
+                    if (iv && iv->t == J_NUM && (int)iv->num == li + 1) {
+                        jval *vv = json_get(e, "v");
+                        if (vv && vv->t == J_STR && (!strcmp(vv->str, "match") || !strcmp(vv->str, "maybe") || !strcmp(vv->str, "no"))) v = vv->str;
+                        break;
+                    }
+                }
+            if (strcmp(v, "no")) {
+                char head[32]; snprintf(head, sizeof(head), "%d. ", ++(*shortlist_count));
+                text_add(shortlist, head); text_add(shortlist, r->rel);
+                text_add(shortlist, "\n   "); text_add(shortlist, r->first_lines); text_add(shortlist, "\n");
+            }
+        }
+        json_free(verdicts); free(varena); free(arr);
+        done += n;
+        char ev[192];
+        snprintf(ev, sizeof(ev), "{\"seq\":%d,\"type\":\"classify_progress\",\"done\":%d,\"total\":%d,\"shortlist\":%d}",
+                 (*seq)++, done, nread, *shortlist_count);
+        if (!sse_json(fd, ev)) ok = 0;
+    }
+    /* Parked files: never classifiable by content — surface them so the loop
+       lists them under "could not read" in finish (design law 5). */
+    for (int i = 0; ok && i < nrows; ++i) if (rows[i].parked) {
+        char head[32]; snprintf(head, sizeof(head), "%d. ", ++(*shortlist_count));
+        text_add(shortlist, head); text_add(shortlist, rows[i].rel);
+        text_add(shortlist, " (could not read: "); text_add(shortlist, rows[i].reason); text_add(shortlist, ")\n");
+    }
+    for (int i = 0; i < nrows; ++i) { free(rows[i].rel); free(rows[i].first_lines); free(rows[i].reason); }
+    free(rows); free(readable);
     return ok;
 }
 
@@ -2899,22 +2997,29 @@ static int find_start(Gateway *g, int fd, const char *goal, const char *folder,
         samosa_send_all(fd, "data: [DONE]\n\n", 14);
         return 0;
     }
-    TextBuffer skim = {0}; int listed = 0, parked = 0;
-    if (!find_skim(g, fd, folder, job_id, items, verdict, &skim, &listed, &parked, &seq)) {
-        free(skim.data); free(verdict); json_free(listing); free(arena); free(list_raw);
+    int listed = 0, parked = 0;
+    if (!find_skim(g, fd, folder, job_id, items, verdict, &listed, &parked, &seq)) {
+        free(verdict); json_free(listing); free(arena); free(list_raw);
         sse_json(fd, "{\"type\":\"error\",\"message\":\"The skim index failed.\"}");
         samosa_send_all(fd, "data: [DONE]\n\n", 14);
         return 0;
     }
     free(verdict);
+    TextBuffer shortlist = {0}; int shortcount = 0;
+    if (!find_classify(g, fd, goal, job_id, &shortlist, &shortcount, &seq)) {
+        free(shortlist.data); json_free(listing); free(arena); free(list_raw);
+        sse_json(fd, "{\"type\":\"error\",\"message\":\"Classification failed.\"}");
+        samosa_send_all(fd, "data: [DONE]\n\n", 14);
+        return 0;
+    }
     TextBuffer user = {0};
     int ok = text_add(&user, "Goal: ") && text_add(&user, goal) && text_add(&user, "\n\n");
-    if (ok && listed > 0)
-        ok = text_add(&user, "Plausible files with the first lines of each (the skim index). Confirm or reject each by reading more of it if needed:\n") &&
-             text_add(&user, skim.data ? skim.data : "");
+    if (ok && shortcount > 0)
+        ok = text_add(&user, "Shortlisted files with the first lines of each. Confirm or reject each by reading more of it if needed, and report any you could not read:\n") &&
+             text_add(&user, shortlist.data ? shortlist.data : "");
     else if (ok)
-        ok = text_add(&user, "Filename triage flagged no plausible files by name. If the goal implies content that a filename could hide, reading is still worthwhile; otherwise finish with no matches.\n");
-    free(skim.data);
+        ok = text_add(&user, "Triage and classification flagged no plausible files. If the goal implies content a filename could hide, reading is still worthwhile; otherwise finish with no matches.\n");
+    free(shortlist.data);
     TextBuffer messages = {0};
     if (ok) ok = text_add(&messages, "{\"role\":\"system\",\"content\":") && text_json_string(&messages, ji_verify_system) &&
                  text_add(&messages, "},{\"role\":\"user\",\"content\":") && text_json_string(&messages, user.data) && text_add(&messages, "}");
@@ -2922,7 +3027,7 @@ static int find_start(Gateway *g, int fd, const char *goal, const char *folder,
     json_free(listing); free(arena); free(list_raw);
     if (!ok) { free(messages.data); sse_json(fd, "{\"type\":\"error\",\"message\":\"The search could not start.\"}"); samosa_send_all(fd, "data: [DONE]\n\n", 14); return 0; }
     save_convo(g, job_id, messages.data);
-    save_phase(g, job_id, "D", 0, listed, parked, 0);
+    save_phase(g, job_id, "D", 0, listed, shortcount, 0);
     return find_loop(g, fd, goal, folder, job_id, &messages, seq);
 }
 

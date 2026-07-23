@@ -145,6 +145,7 @@ find=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/run" \
 printf '%s' "$find" | /usr/bin/grep -q '"type":"triage_progress"'
 printf '%s' "$find" | /usr/bin/grep -q '"type":"index_complete"'
 printf '%s' "$find" | /usr/bin/grep -q '"type":"skim_progress"'
+printf '%s' "$find" | /usr/bin/grep -q '"type":"classify_progress"'
 printf '%s' "$find" | /usr/bin/grep -q '"tool":"fs_read_text"'
 printf '%s' "$find" | /usr/bin/grep -q '"type":"result"'
 printf '%s' "$find" | /usr/bin/grep -q 'cat-medical-note.txt'

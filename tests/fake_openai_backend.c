@@ -47,6 +47,17 @@ static int handler(SamosaHttpServer *server, int fd,
             "{\\\"i\\\":2,\\\"v\\\":\\\"unknown\\\",\\\"why\\\":\\\"anonymous\\\"},"
             "{\\\"i\\\":3,\\\"v\\\":\\\"unknown\\\",\\\"why\\\":\\\"anonymous\\\"},"
             "{\\\"i\\\":4,\\\"v\\\":\\\"unknown\\\",\\\"why\\\":\\\"anonymous\\\"}]\"}}]}", NULL);
+    /* Phase C classify (JI.4): the skim rows come back match/maybe so every
+       readable survivor stays on the shortlist for the verify loop. */
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
+        strstr(request->body, "classifying skimmed files"))
+        return samosa_http_response(fd, 200, "application/json",
+            "{\"choices\":[{\"index\":0,\"finish_reason\":\"stop\","
+            "\"message\":{\"role\":\"assistant\",\"content\":"
+            "\"[{\\\"i\\\":1,\\\"v\\\":\\\"match\\\",\\\"why\\\":\\\"content fits\\\"},"
+            "{\\\"i\\\":2,\\\"v\\\":\\\"maybe\\\",\\\"why\\\":\\\"unclear\\\"},"
+            "{\\\"i\\\":3,\\\"v\\\":\\\"maybe\\\",\\\"why\\\":\\\"unclear\\\"},"
+            "{\\\"i\\\":4,\\\"v\\\":\\\"maybe\\\",\\\"why\\\":\\\"unclear\\\"}]\"}}]}", NULL);
     /* Answer-resume finish (JI.6): only fires when BOTH the user's answer
        ("the cafe one") and the run-1 read result ("Cafe total") are in the
        conversation — a direct lock on RC4 (the run-1 tool result must survive). */
