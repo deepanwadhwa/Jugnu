@@ -1991,6 +1991,100 @@ static char *reshape_doc_read_result(const char *full_lines_json, const char *re
     return out.data;
 }
 
+static char *first_json_object(const char *s);
+
+static void escalate_low_conf_crops(Gateway *g, const char *absolute, jval *lines_arr, int *out_l_unc, double *out_min_c) {
+    if (!lines_arr || lines_arr->t != J_ARR || lines_arr->len == 0) return;
+    if (!backend_supports_images(g, g->backend)) return;
+
+    char crop_dir[PATH_MAX];
+    snprintf(crop_dir, sizeof(crop_dir), "/tmp/samosa_crops_%d_%ld", (int)getpid(), (long)time(NULL));
+    if (!mkdirs(crop_dir)) return;
+
+    char *argv_ocr[] = {g->samosa_ocr, "read", (char *)absolute, "--emit-crops", crop_dir, "--below", "0.84", NULL};
+    int status = 0;
+    char *ocr_raw = run_capture(g, g->samosa_ocr, argv_ocr, 16 << 20, &status);
+    if (!ocr_raw || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        free(ocr_raw);
+        rmdir(crop_dir);
+        return;
+    }
+    free(ocr_raw);
+
+    int l_unc = 0;
+    double min_c = 1.0;
+    for (int i = 0; i < lines_arr->len; i++) {
+        jval *line = lines_arr->kids[i];
+        jval *cf = json_get(line, "conf");
+        double c = cf ? cf->num : 0.0;
+        if (c < 0.84) {
+            char crop_path[PATH_MAX];
+            snprintf(crop_path, sizeof(crop_path), "%s/crop_%03d.ppm", crop_dir, i);
+            struct stat st;
+            if (stat(crop_path, &st) == 0 && st.st_size > 0) {
+                size_t bytes_len = 0;
+                unsigned char *bytes = read_file_bytes_limit(crop_path, 10 << 20, &bytes_len);
+                if (bytes) {
+                    char *b64 = base64_encode_bytes(bytes, bytes_len);
+                    free(bytes);
+                    if (b64) {
+                        TextBuffer uri = {0};
+                        text_add(&uri, "data:image/x-portable-pixmap;base64,");
+                        text_add(&uri, b64);
+                        free(b64);
+
+                        jval *crop_schema = json_parse("{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}", NULL);
+                        double call_sec = 0;
+                        char *extracted = model_extract(g, "Read the text in this image crop accurately.", crop_schema, NULL, uri.data, 256, &call_sec);
+                        free(uri.data);
+                        json_free(crop_schema);
+                        if (extracted) {
+                            char *obj = first_json_object(extracted);
+                            char *f_arena = NULL;
+                            jval *f_obj = obj ? json_parse(obj, &f_arena) : NULL;
+                            jval *v_text = f_obj ? json_get(f_obj, "text") : NULL;
+                            if (v_text && v_text->t == J_STR && *v_text->str) {
+                                jval *t_node = json_get(line, "text");
+                                if (t_node && t_node->t == J_STR) {
+                                    free(t_node->str);
+                                    t_node->str = strdup(v_text->str);
+                                }
+                                jval *c_node = json_get(line, "conf");
+                                if (c_node && c_node->t == J_NUM) c_node->num = 0.95;
+                                jval *r_node = json_get(line, "reader");
+                                if (r_node && r_node->t == J_STR) {
+                                    free(r_node->str);
+                                    r_node->str = strdup("vlm_crop");
+                                }
+                                c = 0.95;
+                            }
+                            json_free(f_obj); free(f_arena); free(obj); free(extracted);
+                        }
+                    }
+                }
+            }
+        }
+        if (c < 0.84) l_unc++;
+        if (i == 0 || c < min_c) min_c = c;
+    }
+    *out_l_unc = l_unc;
+    *out_min_c = min_c;
+
+    DIR *d = opendir(crop_dir);
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            if (strcmp(ent->d_name, ".") && strcmp(ent->d_name, "..")) {
+                char fpath[PATH_MAX];
+                snprintf(fpath, sizeof(fpath), "%s/%s", crop_dir, ent->d_name);
+                unlink(fpath);
+            }
+        }
+        closedir(d);
+    }
+    rmdir(crop_dir);
+}
+
 static char *doc_read_handler(Gateway *g, const char *absolute, jval *args) {
     const char *detail = "text";
     jval *detail_v = args ? json_get(args, "detail") : NULL;
@@ -2177,6 +2271,9 @@ static char *doc_read_handler(Gateway *g, const char *absolute, jval *args) {
             double c = cf ? cf->num : 0.0;
             if (c < 0.84) l_unc++;
             if (i == 0 || c < min_c) min_c = c;
+        }
+        if (l_unc > 0 && backend_supports_images(g, g->backend)) {
+            escalate_low_conf_crops(g, absolute, lines_arr, &l_unc, &min_c);
         }
         text_add(&full_lines, "{\"ok\":true,\"page_count\":1,\"pages\":[{\"index\":1,\"source\":\"ocr\",");
         char numbuf[128];

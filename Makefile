@@ -87,6 +87,10 @@ doc-read-test: samosa-gateway samosa-ocr test_fake_openai_backend tests/test_doc
 motto-test: samosa-gateway samosa-ocr test_fake_openai_backend tests/test_motto_scenario.sh
 	sh tests/test_motto_scenario.sh
 
+# tier2-test: offline gate for R5 Tier-2 Bonsai crop escalation.
+tier2-test: samosa-gateway samosa-ocr test_fake_openai_backend tests/test_tier2_escalation.sh
+	sh tests/test_tier2_escalation.sh
+
 samosa-gateway: src/samosa_gateway.c src/samosa_http.h src/json.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Werror -Wno-unused-function -std=c11 -pthread -Isrc \
