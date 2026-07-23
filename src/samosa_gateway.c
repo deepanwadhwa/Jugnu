@@ -67,6 +67,7 @@ typedef struct {
 static int tcp_connect(int port);
 static int backend_probe(Gateway *g);
 static const char *backend_model(const char *name);
+static int backend_supports_images(Gateway *g, const char *name);
 static int sse_json(int fd, const char *json);
 
 static Gateway *signal_gateway;
@@ -1719,19 +1720,24 @@ static int schema_field_prompt(TextBuffer *out, const char *key, jval *propertie
 static int schema_fields_prompt(TextBuffer *out, jval *schema) {
     jval *required = schema && schema->t == J_OBJ ? json_get(schema, "required") : NULL;
     jval *properties = schema && schema->t == J_OBJ ? json_get(schema, "properties") : NULL;
-    if (!text_add(out, "Return exactly one JSON object with these keys and no other keys:\n"))
+    if (!text_add(out, "Return exactly one JSON object with these keys and no other keys. "
+                       "Include every key listed; use null for any value that is not present "
+                       "in the source:\n"))
         return 0;
     int wrote = 0;
-    if (required && required->t == J_ARR) {
-        for (int i = 0; i < required->len; ++i) {
-            if (!required->kids[i] || required->kids[i]->t != J_STR) continue;
-            if (!schema_field_prompt(out, required->kids[i]->str, properties)) return 0;
+    /* List all declared properties, not just the required ones — otherwise the
+       model is told to omit optional fields ("no other keys") and never emits
+       them. Fall back to the required names only when no properties block. */
+    if (properties && properties->t == J_OBJ) {
+        for (int i = 0; i < properties->len; ++i) {
+            if (!schema_field_prompt(out, properties->keys[i], properties)) return 0;
             wrote = 1;
         }
     }
-    if (!wrote && properties && properties->t == J_OBJ) {
-        for (int i = 0; i < properties->len; ++i) {
-            if (!schema_field_prompt(out, properties->keys[i], properties)) return 0;
+    if (!wrote && required && required->t == J_ARR) {
+        for (int i = 0; i < required->len; ++i) {
+            if (!required->kids[i] || required->kids[i]->t != J_STR) continue;
+            if (!schema_field_prompt(out, required->kids[i]->str, properties)) return 0;
             wrote = 1;
         }
     }
@@ -2396,16 +2402,23 @@ static char *first_json_object(const char *s) {
 }
 
 static int definition_record(TextBuffer *record, jval *item, const char *extracted,
-                             int passed) {
+                             int passed, const char *review_reason) {
     jval *path = json_get(item, "path"), *hash = json_get(item, "input_sha256");
     char *object = first_json_object(extracted);
     char *arena = NULL; jval *fields = object ? json_parse(object, &arena) : NULL;
     if (!fields || fields->t != J_OBJ) passed = 0;
     if (!text_add(record, "{\"input_path\":") || !text_json_string(record, path && path->t == J_STR ? path->str : "") ||
-        !text_add(record, ",\"input_sha256\":") || !text_json_string(record, hash && hash->t == J_STR ? hash->str : "") ||
-        !text_add(record, passed ? ",\"status\":\"passed\",\"extracted\":" :
-                                  ",\"status\":\"review_required\",\"reasons\":[\"invalid_model_output\"],\"extracted\":") ||
-        !text_json_value(record, fields)) { json_free(fields); free(arena); free(object); return 0; }
+        !text_add(record, ",\"input_sha256\":") || !text_json_string(record, hash && hash->t == J_STR ? hash->str : "")) {
+        json_free(fields); free(arena); free(object); return 0;
+    }
+    if (passed) {
+        if (!text_add(record, ",\"status\":\"passed\",\"extracted\":")) { json_free(fields); free(arena); free(object); return 0; }
+    } else if (!text_add(record, ",\"status\":\"review_required\",\"reasons\":[") ||
+               !text_json_string(record, review_reason ? review_reason : "invalid_model_output") ||
+               !text_add(record, "],\"extracted\":")) {
+        json_free(fields); free(arena); free(object); return 0;
+    }
+    if (!text_json_value(record, fields)) { json_free(fields); free(arena); free(object); return 0; }
     if (fields && fields->t == J_OBJ) for (int i = 0; i < fields->len; ++i)
         if (!text_add(record, ",") || !text_json_string(record, fields->keys[i]) || !text_add(record, ":") ||
             !text_json_value(record, fields->kids[i])) { json_free(fields); free(arena); free(object); return 0; }
@@ -2473,13 +2486,19 @@ static int definition_request(Gateway *g, int fd, const SamosaHttpRequest *reque
         }
         DefinitionSource source;
         int have_source = definition_source(g, item, &source);
+        /* An image unit needs a vision-capable active backend. Rather than send
+           the image to a text-only model and get garbage, queue it for review
+           with a clear reason (select Bonsai or Qwen for image jobs). */
+        int needs_vision = have_source && source.image_data_uri && !backend_supports_images(g, g->backend);
         double call_seconds = 0.0;
-        char *extracted = have_source ? model_extract(g, instruction && instruction->t == J_STR ? instruction->str : "",
-                                                      schema, source.text, source.image_data_uri,
-                                                      job_inference_max_tokens(job), &call_seconds) : NULL;
+        char *extracted = (have_source && !needs_vision) ?
+            model_extract(g, instruction && instruction->t == J_STR ? instruction->str : "",
+                          schema, source.text, source.image_data_uri,
+                          job_inference_max_tokens(job), &call_seconds) : NULL;
         active_seconds += call_seconds;
         definition_source_free(&source); TextBuffer record = {0};
-        if (!definition_record(&record, item, extracted, extracted != NULL)) { free(extracted); free(record.data); free(records_file.data); free(records_array.data); goto definition_fail; }
+        if (!definition_record(&record, item, extracted, extracted != NULL,
+                               needs_vision ? "vision_backend_required" : "invalid_model_output")) { free(extracted); free(record.data); free(records_file.data); free(records_array.data); goto definition_fail; }
         free(extracted);
         if (!text_add(&records_file, record.data) || !text_add(&records_file, "\n") ||
             (completed && !text_add(&records_array, ",")) || !text_add(&records_array, record.data)) {

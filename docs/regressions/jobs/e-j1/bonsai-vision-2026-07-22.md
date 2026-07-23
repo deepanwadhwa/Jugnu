@@ -52,13 +52,28 @@ model_call_seconds = 14.371   wall = 15 s   swap used = 0.00M
   a structural blocker.
 - `make jobs-test` and `make test` green.
 
-## Open / follow-ups
+## Follow-ups done (2026-07-22, same session)
 
-- **Coverage of optional fields** — tune the extraction prompt (or make the JSON
-  grammar require all schema keys) so authors/year are emitted.
-- **Routing.** Image jobs require a vision backend to be the *active* one
-  (bonsai/qwen). Auto-routing image units to a vision backend when the active one
-  is text-only (ornith) is a separate enhancement.
+- **All schema fields now emitted (was the real cause of empty authors/year).**
+  `schema_fields_prompt` listed only the *required* keys and said "no other
+  keys", so the model was told to omit optional fields. Fixed to list **all**
+  declared properties with "use null when not present". Re-verified on Bonsai:
+  the record now carries `title`, `journal`, `authors`, `year` (~18 s).
+  **Remaining inaccuracy is OCR, not structure:** the 1-bit Bonsai misread the
+  diacritic author names ("Poličar"→"Goljaric") and the year (2024→2021).
+  Improving that means the BF16 mmproj (0.93 GB) or the 2-bit Ternary variant —
+  a model-quality choice, not a code fix.
+- **Vision-backend guard (the safe half of "routing").** An image unit on a
+  text-only active backend (ornith) no longer gets sent to a blind model; it is
+  queued `review_required` with reason `vision_backend_required`. Tested offline
+  (guard fires on ornith; the same job passes after selecting bonsai). Full
+  auto-switching to a vision backend mid-job (two live backends) is deliberately
+  not done on the 16 GiB host — selecting bonsai/qwen for image jobs is the
+  supported flow.
+
+## Still open
+
+- **OCR accuracy of fine print** — try the BF16 mmproj or 2-bit Ternary Bonsai.
 - **Packaging.** The 0.63 GB mmproj is not yet in the HF release; it can ship as
   an opt-in vision pack the same way PDFium does (owner-gated).
 - Multi-image / per-page image reduction still not built.

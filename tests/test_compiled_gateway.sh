@@ -25,6 +25,8 @@ trap cleanup EXIT HUP INT TERM
 
 mkdir -p "$HOME_DIR/models/ornith-9b"
 printf 'fixture\n' >"$HOME_DIR/models/ornith-9b/Ornith-1.0-9B-Q4_K_M.gguf"
+/bin/mkdir -p "$HOME_DIR/models/bonsai-27b-1bit"
+printf 'fixture\n' >"$HOME_DIR/models/bonsai-27b-1bit/Bonsai-27B-Q1_0.gguf"
 printf 'mmproj-fixture\n' >"$HOME_DIR/bonsai-mmproj.gguf"
 printf 'ornith\n' >"$HOME_DIR/model-backend"
 printf '<!doctype html><title>Compiled Samosa</title>\n' >"$TMP/app.html"
@@ -243,11 +245,37 @@ if /usr/bin/grep -q 'invalid_model_output' "$TMP/definition-fenced-out/output.js
   echo "fenced JSON was not recovered (review_required)" >&2; exit 1
 fi
 
+# With a text-only backend active (ornith), an image unit must be queued for
+# review with a clear reason, not sent to a blind model.
+guard_definition="{\"job\":{\"job_id\":\"native-definition-image-guard\",\"input\":{\"folder\":\"$TMP/image-files\"},\"instruction\":\"Image definition probe.\",\"output_schema\":{\"type\":\"object\",\"properties\":{\"people\":{\"type\":\"integer\"}}},\"output\":{\"dir\":\"$TMP/definition-image-guard-out\"}}}"
+guard_run=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/definition/run" \
+  -H 'Content-Type: application/json' --data-binary "$guard_definition")
+printf '%s' "$guard_run" | /usr/bin/grep -q '"type":"item_complete"'
+/usr/bin/grep -q '"reasons":\["vision_backend_required"\]' "$TMP/definition-image-guard-out/output.jsonl"
+
+# Switch to Bonsai (its mmproj fixture makes it vision-capable); the same image
+# job now reaches the backend as image_url content and passes.
+/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/backends/select" \
+  -H 'Content-Type: application/json' --data-binary '{"backend":"bonsai"}' | /usr/bin/grep -q '"accepted":true'
+i=0
+while [ "$i" -lt 100 ]; do
+  /usr/bin/curl -fsS "http://127.0.0.1:$PORT/healthz" 2>/dev/null | /usr/bin/grep -q '"ready":true' && break
+  /bin/sleep 0.05; i=$((i + 1))
+done
 image_definition="{\"job\":{\"job_id\":\"native-definition-image\",\"input\":{\"folder\":\"$TMP/image-files\"},\"instruction\":\"Image definition probe.\",\"output_schema\":{\"type\":\"object\",\"properties\":{\"people\":{\"type\":\"integer\"}}},\"output\":{\"dir\":\"$TMP/definition-image-out\"}}}"
 image_run=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/definition/run" \
   -H 'Content-Type: application/json' --data-binary "$image_definition")
 printf '%s' "$image_run" | /usr/bin/grep -q '"type":"item_complete"'
 /usr/bin/grep -q '"people":2' "$TMP/definition-image-out/output.jsonl"
+
+# Restore the text backend for the remaining tests.
+/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/backends/select" \
+  -H 'Content-Type: application/json' --data-binary '{"backend":"ornith"}' | /usr/bin/grep -q '"accepted":true'
+i=0
+while [ "$i" -lt 100 ]; do
+  /usr/bin/curl -fsS "http://127.0.0.1:$PORT/healthz" 2>/dev/null | /usr/bin/grep -q '"ready":true' && break
+  /bin/sleep 0.05; i=$((i + 1))
+done
 
 /bin/mkdir "$TMP/pdf-files"
 /usr/bin/printf '%%PDF-1.4\n' >"$TMP/pdf-files/article.pdf"
