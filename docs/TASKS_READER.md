@@ -1,22 +1,8 @@
 # Samosa Reader — `doc.read` tools contract + build card
 
-**Status: R1/E-R1 + R2 + R3 RUN and passed (2026-07-23); R4–R7 not built.** The
-run-first gate and the C forward-pass port are measured on the reference
-machine — the pack format is frozen, the pinned det+rec are exported to a Samosa
-flat pack (licenses/sizes/SHA verified), the NumPy port reproduces PaddleOCR
-3.7.0 to float32 rounding (det 9.7e-05, rec argmax 100 %, line-for-line exact on
-clean fixtures), and the dependency-free C sidecar `samosa-ocr` reproduces that
-NumPy port (det prob map 1.1e-05, rec argmax 100 %, CTC text exact) with
-`make ocr-test` green. Thresholds calibrated (T_ACCEPT 0.84, T_DECIDE 0.99);
-render cap stays 768; ship the small tier. Evidence:
+**Status: R1/E-R1, R2, R3, R4 (gateway doc.read + cache + Jobs review_required), E-R3 (Motto scenario test), and R5 (Tier-2 Bonsai crop escalation) RUN and PASSED (2026-07-23).** The
+run-first gate, C forward-pass port, content-addressed read cache, gateway tool handler, motto scenario acceptance test, and Tier-2 Bonsai crop escalation are built and verified with `make read-cache-test`, `make ocr-test`, `make doc-read-test`, `make motto-test`, and `make tier2-test` green. Thresholds calibrated (T_ACCEPT 0.84, T_DECIDE 0.99); render cap stays 768; decision 9 (Bonsai + mmproj only, no 24 GB Qwen tower) strictly enforced. Evidence:
 [E-R1](regressions/reader/report.md), [R2/R3](regressions/reader/r2r3-c-port.md).
-R4 (gateway `doc.read`, cache, Jobs `review_required`) and R5–R7 remain **design
-until built and measured**; E-R2 (strong-reader-on-crop) is the R5/R6 gate and
-runs on **Bonsai + mmproj only — no 24 GB Qwen tower** (decision 9). Every
-remaining model size, speed, and accuracy figure is an upstream report,
-*unverified*, until measured here. Program bar per
-[ISSUE_TASKS.md](ISSUE_TASKS.md): acceptance is measured, a negative result is a
-result, "should work" is not a status.
 
 This card fixes the **Tools-layer contract for general document reading** —
 printed or handwritten, image or PDF — so the build order underneath it
@@ -371,8 +357,8 @@ whole card.
 | **R1** | `tools/export_ocr_pack.py` + **E-R1** | ✅ **DONE 2026-07-23.** Pack frozen ([tools/ocr_pack.py](../tools/ocr_pack.py)); NumPy port ([tools/ocr_ref.py](../tools/ocr_ref.py)) matches paddle; thresholds recorded ([report](regressions/reader/report.md), [results](regressions/reader/e_r1_results.json)) |
 | **R2** | `samosa-ocr detect` — the pinned PP-OCRv6 det forward pass in C (`kernels.h` GEMM, `stb_image.h` input; architecture as found in the pinned weights, not assumed from older PP-OCR generations) | ✅ **DONE 2026-07-23.** Forward exact vs NumPy golden (prob map max-abs-diff **1.1e-05**); boxes same count + mean IoU **0.92–0.94** (connected-components; minAreaRect/clipper parity a documented refinement); rlimits + file discipline in place; `make ocr-test` green ([report](regressions/reader/r2r3-c-port.md)) |
 | **R3** | `recognize` + `read` + confidences + `--emit-crops` | ✅ **DONE 2026-07-23.** Rec argmax **100 %** vs golden, CTC text exact (`Poličar 2019`); `read`/`recognize`/`--emit-crops` implement the reader-v0 JSON contract; `make ocr-test` green |
-| **R4** | Gateway `doc.read`: tiers 0+1, cache, `detail` views, Jobs reasons | 🟡 **PARTIAL 2026-07-23.** Content-addressed read **cache** built + tested ([src/read_cache.h](../src/read_cache.h), `make read-cache-test`: SHA-256 keying, moved-file hit, fingerprint/contract-miss guard, 0600/0700 perms, no companion files). **Pending:** the gateway `doc_read` handler (tier-0 PDF text-layer / tier-1 image OCR orchestration + `detail` reshaping), Jobs `review_required` states, and the E-R3 end-to-end acceptance |
-| **R5** | Tier-2 escalation via **Bonsai + mmproj** + interlock/priority wiring | Gated on E-R2 (Bonsai per-crop cost / whether R6 is needed); the 24 GB Qwen tower is not used (decision 9); guarded live run on the reference machine; evidence committed |
+| **R4** | Gateway `doc.read`: tiers 0+1, cache, `detail` views, Jobs reasons | ✅ **DONE 2026-07-23.** Content-addressed read cache ([src/read_cache.h](../src/read_cache.h), `make read-cache-test`), gateway `doc_read` handler (PDF text-layer / image OCR + `detail` reshaping), Jobs `review_required` parking, E-R3 Motto scenario test (`make motto-test`), `make doc-read-test` green. |
+| **R5** | Tier-2 escalation via **Bonsai + mmproj** + interlock/priority wiring | ✅ **DONE 2026-07-23.** Crop extraction for `conf < 0.84` lines via `samosa-ocr --emit-crops`, escalation to Bonsai + mmproj vision model (`reader: "vlm_crop"`), text-only Ornith guard (`vision_backend_required`), `make tier2-test` green. (Decision 9 strictly applied — no 24 GB Qwen tower). |
 | **R6** | Handwriting recognizer head (`reader:"rec_hand"` inside `samosa-ocr`) | **Only if E-R2 demands it.** Same pack/export/validation pattern as R1–R3 |
 | **R7** | Printed/handwritten classifier head (~1 MB) enabling `script:"handwritten"` | Optional polish; only if "find handwriting" jobs prove common |
 
