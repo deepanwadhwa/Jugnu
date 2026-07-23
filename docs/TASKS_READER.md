@@ -65,6 +65,13 @@ are. VLM-class generality at 16 GB is manufactured, not bought.
    the unit in `review_required`, reusing the Jobs states. Medical records get
    flagged, not mis-filed.
 7. **No deletes anywhere in this path** (standing owner rule, 2026-07-19).
+8. **License policy: Apache-2.0 or MIT only (owner, 2026-07-23).** Every
+   model pack, vendored library, and exported weight file in this card must
+   be Apache-2.0 or MIT, verified against the exact files at pin time —
+   not the repo's headline license. AGPL and other copyleft are
+   disqualifying, full stop (house precedent: PyMuPDF, rejected in
+   [TASKS_DOCUMENTS.md](TASKS_DOCUMENTS.md)). If a named candidate fails
+   this check, the candidate is replaced; the policy is not.
 
 ## The tool — `doc.read`
 
@@ -233,19 +240,23 @@ unchanged to whatever moves *are* approved.
 
 ## Model packs and licensing
 
-All figures upstream-reported, **unverified** until pinned:
+All figures upstream-reported, **unverified** until pinned. Every candidate
+below is subject to locked decision 8 — Apache-2.0 or MIT verified against
+the exact files, or it is replaced:
 
 - **Text detector:** PP-OCR mobile det (DBNet-family, ~5 MB). **Recognizer:**
   PP-OCR mobile rec (~10–16 MB + charset). PaddleOCR publishes under
-  Apache-2.0 — **verify the license of the exact model files at pin time**;
-  house precedent is PyMuPDF's rejection for AGPL (ISSUE_TASKS.md conflict 1).
-  Upstream det input convention is ~960 px long edge; actual working
-  resolution is decided by measurement in E-R1, not by convention.
+  Apache-2.0 — **verify the license of the exact model files at pin time**
+  (decision 8); if any pinned file is not Apache/MIT, substitute an
+  Apache/MIT OCR family and record the swap here. Upstream det input
+  convention is ~960 px long edge; actual working resolution is decided by
+  measurement in E-R1, not by convention.
 - **Handwriting head (R6, conditional):** TrOCR-small-handwritten class,
   ~62 M params (~65 MB int8), reported CER ≈4–6 % on IAM English cursive —
-  reported, unverified. MIT-licensed per upstream — verify. Its encoder is the
-  [vision.c](../src/vision.c) block pattern; its decoder is a miniature of the
-  engine's decode loop. Built **only if E-R2 fails** (see below).
+  reported, unverified. MIT-licensed per upstream — verify at pin time
+  (decision 8). Its encoder is the [vision.c](../src/vision.c) block pattern;
+  its decoder is a miniature of the engine's decode loop. Built **only if
+  E-R2 fails** (see below).
 - **Export:** `tools/export_ocr_pack.py`, offline, one-time, producing the
   flat pack + SHA-manifest. Packs ship opt-in and manifest-pinned like PDFium
   and the Bonsai mmproj; outward publishing waits for owner confirmation.
@@ -254,11 +265,13 @@ All figures upstream-reported, **unverified** until pinned:
 
 Not in this card: `image.look` (thin wrapper over the vision backends for
 "describe/what is this" questions) and `image.detect` (object
-counting). Each gets its own small card when needed. One warning recorded now
-so it is not rediscovered late: **Ultralytics YOLO models are AGPL-3.0** — the
-same conflict that disqualified PyMuPDF. If `image.detect` is ever built,
-start from an Apache-licensed detector family (e.g. RT-DETR / D-FINE) and
-verify at pin time.
+counting). Each gets its own small card when needed. One exclusion recorded
+now so it is not rediscovered late: **Ultralytics YOLO models are AGPL-3.0
+and are ruled out by decision 8** — the same conflict that disqualified
+PyMuPDF. Earlier internal notes naming YOLO26n as the counting candidate are
+superseded. If `image.detect` is ever built, start from an Apache/MIT
+detector family (e.g. RT-DETR / D-FINE, both published Apache-2.0 —
+verify the exact files at pin time) and apply decision 8 there too.
 
 ## Experiments — run these before the C
 
