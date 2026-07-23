@@ -73,6 +73,12 @@ samosa-ocr-omp: src/samosa_ocr.c src/kernels.h src/json.h src/stb_image.h
 ocr-test: samosa-ocr tests/test_samosa_ocr.sh tools/testdata/ocr/det.gold
 	SAMOSA_OCR="$$PWD/$(BUILD_DIR)/samosa-ocr" sh tests/test_samosa_ocr.sh
 
+# read-cache-test: offline gate for the content-addressed doc.read cache (R4).
+read-cache-test: tests/test_read_cache.c src/read_cache.h src/json.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -O2 -Wall -Wextra -Wno-unused-function -std=c11 tests/test_read_cache.c -o $(BUILD_DIR)/test_read_cache
+	$(BUILD_DIR)/test_read_cache
+
 samosa-gateway: src/samosa_gateway.c src/samosa_http.h src/json.h
 	@mkdir -p $(BUILD_DIR)
 	$(CC) -O2 -Wall -Wextra -Werror -Wno-unused-function -std=c11 -pthread -Isrc \
