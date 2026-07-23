@@ -238,54 +238,79 @@ files that mention John Doe" over medical records must park the shaky reads
 for a human, not act on them. JO's no-delete / journaled-undo rules apply
 unchanged to whatever moves *are* approved.
 
-## Model packs and licensing
+## Model pins (licenses verified 2026-07-23; decision 8 applied)
 
-All figures upstream-reported, **unverified** until pinned. Every candidate
-below is subject to locked decision 8 — Apache-2.0 or MIT verified against
-the exact files, or it is replaced:
+Every model below is **pinned to an exact Hugging Face repo revision** and
+was license-verified on 2026-07-23 by the method stated in the table.
+Accuracy and speed figures remain upstream reports — unverified on the
+reference machine until E-R1/E-R2 run. The executing agent must, at download
+time: (1) re-read the license tag at the pinned revision, (2) download at
+that revision (`?revision=<sha>`), (3) check the payload byte sizes against
+this table, and (4) record SHA-256 of every downloaded file in the pack
+manifest. Any mismatch — tag, revision, or size — is **stop and report to
+the owner**, never substitute.
 
-- **Text detector:** PP-OCR mobile det (DBNet-family, ~5 MB). **Recognizer:**
-  PP-OCR mobile rec (~10–16 MB + charset). PaddleOCR publishes under
-  Apache-2.0 — **verify the license of the exact model files at pin time**
-  (decision 8); if any pinned file is not Apache/MIT, substitute an
-  Apache/MIT OCR family and record the swap here. Upstream det input
-  convention is ~960 px long edge; actual working resolution is decided by
-  measurement in E-R1, not by convention.
-- **Handwriting head (R6, conditional):** TrOCR-small-handwritten class,
-  ~62 M params (~65 MB int8), reported CER ≈4–6 % on IAM English cursive —
-  reported, unverified. MIT-licensed per upstream — verify at pin time
-  (decision 8). Its encoder is the [vision.c](../src/vision.c) block pattern;
-  its decoder is a miniature of the engine's decode loop. Built **only if
-  E-R2 fails** (see below).
+| Role | Pin (HF repo `@` revision) | Payload (exact bytes) | License — verification method |
+|---|---|---|---|
+| Text detector (R2) | `PaddlePaddle/PP-OCRv6_small_det_safetensors` `@ eae2ee920a39fb3087637d3dbb58df1896ec1f24` | `model.safetensors` 9,938,124 | Apache-2.0 — HF `license` tag on the official PaddlePaddle org, read 2026-07-23 |
+| Text recognizer (R3) | `PaddlePaddle/PP-OCRv6_small_rec_safetensors` `@ fe049fb103f57443fe8840c54ed06b702f3c1de5` | `model.safetensors` 21,204,736 + charset/decode config `inference.yml` 150,579 | Apache-2.0 — same method |
+| Accuracy upgrade tier (promotion rule in E-R1) | `PaddlePaddle/PP-OCRv6_medium_det_safetensors` `@ 4236c2b61741a259c091fd879dcc4edc339e916c` and `PP-OCRv6_medium_rec_safetensors` `@ 024cad6a831de75c2c3c26e711ba8c4a82ccd24b` | det 88,020,412 · rec 76,741,720 | Apache-2.0 — same method |
+| Handwriting head (R6, **conditional on E-R2**) | `microsoft/trocr-base-handwritten` `@ eaacaf452b06415df8f10bb6fad3a4c11e609406` | `model.safetensors` 1,333,384,464 (334 M params F32; ≈335 MB at int8 export — arithmetic, unmeasured) | MIT — HF `license` tag set by Microsoft, read 2026-07-23 |
+
+Binding notes on these pins:
+
+- **Safetensors payloads only.** Every pin above ships `model.safetensors`;
+  the export tool reads it with a minimal header-plus-buffer parser (NumPy
+  side) — **no Paddle, no PyTorch, no ONNX, and never a pickle
+  (`pytorch_model.bin`, `.pdiparams`) at any stage.**
+- **Tier rule.** The shipped pack is the **small** tier (det+rec ≈ 31 MB
+  F32). E-R1 scores the medium tier on the same fixtures; promote to medium
+  only if it corrects fixture lines small reads wrong. The C port is
+  shape-generic — tier promotion is a pack swap, not a code change.
+- **One recognizer, one scope.** The v6 recognizer is a single unified model
+  whose upstream claim spans English + 46 Latin-script languages — no
+  separate en/latin models, and the diacritics fixture ("Poličar") falls
+  inside its charset. Claim only what the fixtures measure (Open questions).
+- **The TrOCR variant is fixed at `base`.** It is the only handwritten TrOCR
+  with upstream license metadata (checked 2026-07-23: `small` and `large`
+  carry none, which places them outside decision 8). Do not substitute them,
+  even for size. Its encoder is the [vision.c](../src/vision.c) block
+  pattern; its decoder is a miniature of the engine's decode loop.
+- **Preprocessing is data, not convention.** Resize/normalization/charset
+  come from each pinned repo's `inference.yml` / `preprocessor_config.json`
+  at the pinned revision; the export tool embeds them in the pack manifest.
+  Do not hardcode input conventions from older PP-OCR generations.
 - **Export:** `tools/export_ocr_pack.py`, offline, one-time, producing the
   flat pack + SHA-manifest. Packs ship opt-in and manifest-pinned like PDFium
   and the Bonsai mmproj; outward publishing waits for owner confirmation.
-- **Credit:** when the pack ships, the PaddleOCR (and if used, TrOCR) teams
-  are credited at the **top** of README/model card, per the standing rule.
+- **Credit:** when the pack ships, the PaddleOCR/PP-OCRv6 team (and, if R6
+  ships, the Microsoft TrOCR team) are credited at the **top** of
+  README/model card, per the standing rule.
 
 Not in this card: `image.look` (thin wrapper over the vision backends for
-"describe/what is this" questions) and `image.detect` (object
-counting). Each gets its own small card when needed. One exclusion recorded
-now so it is not rediscovered late: **Ultralytics YOLO models are AGPL-3.0
-and are ruled out by decision 8** — the same conflict that disqualified
-PyMuPDF. Earlier internal notes naming YOLO26n as the counting candidate are
-superseded. If `image.detect` is ever built, start from an Apache/MIT
-detector family (e.g. RT-DETR / D-FINE, both published Apache-2.0 —
-verify the exact files at pin time) and apply decision 8 there too.
+"describe/what is this" questions) and `image.detect` (object counting).
+Each gets its own small card when needed. For `image.detect`, the
+license-cleared starting candidates are **RT-DETR**
+(`lyuwenyu/RT-DETR`, Apache-2.0, GitHub LICENSE verified 2026-07-23) and
+**D-FINE** (`Peterande/D-FINE`, Apache-2.0, GitHub LICENSE verified
+2026-07-23); decision 8 applies to the exact weight files when that card is
+written.
 
 ## Experiments — run these before the C
 
 **E-R1 — export + numeric validation (RUN THIS FIRST; ~1 day; pure Python,
-no C, no 24 GB model).** The E-V1 pattern. Export det+rec to the flat pack;
-re-implement both forward passes in NumPy; run PaddleOCR upstream as the
-reference on ≥20 fixture images — printed forms, receipts, a dense page, and
-the JSS page whose diacritics broke 1-bit Bonsai. Deliverables: (a) pack
-format frozen; (b) NumPy output matches the reference line-for-line within
-stated tolerance — if it cannot, the C port is resized or killed *here*;
+no C, no 24 GB model).** The E-V1 pattern. Export the pinned det+rec to the
+flat pack; re-implement both forward passes in NumPy; run **PaddleOCR
+≥ 3.7.0** (the PP-OCRv6 release) as the reference implementation on ≥20
+fixture images — printed forms, receipts, a dense page, and the JSS page
+whose diacritics broke 1-bit Bonsai. Deliverables: (a) pack format frozen;
+(b) NumPy output matches the reference line-for-line within stated
+tolerance — if it cannot, the C port is resized or killed *here*;
 (c) `T_ACCEPT`/`T_DECIDE` calibrated from the confidence histograms of
 correct vs. incorrect lines; (d) accuracy at 768 px vs. 1536 px long edge,
 which **decides the render-cap question** (below) with a measurement instead
-of an opinion.
+of an opinion; (e) the small-vs-medium tier decision per the promotion rule
+in the pins table, recorded with the fixture lines that decided it.
 
 **E-R2 — strong-reader-on-crop (~0.5 day; real backends; machine-safety
 rules apply).** ~10 photographed handwritten field crops (names, DOBs; block
@@ -308,7 +333,7 @@ whole card.
 | Step | What | Gate / definition of done |
 |---|---|---|
 | **R1** | `tools/export_ocr_pack.py` + **E-R1** | E-R1 deliverables committed under `docs/regressions/reader/`; thresholds recorded |
-| **R2** | `samosa-ocr detect` — DBNet forward pass in C (`kernels.h` GEMM, `stb_image.h` input) | Boxes match the E-R1 NumPy reference on all fixtures within stated tolerance; SIDECAR_CONTRACT limits in place; `make ocr-test` (own target, like `jobs-test`) green offline |
+| **R2** | `samosa-ocr detect` — the pinned PP-OCRv6 det forward pass in C (`kernels.h` GEMM, `stb_image.h` input; architecture as found in the pinned weights, not assumed from older PP-OCR generations) | Boxes match the E-R1 NumPy reference on all fixtures within stated tolerance; SIDECAR_CONTRACT limits in place; `make ocr-test` (own target, like `jobs-test`) green offline |
 | **R3** | `recognize` + `read` + confidences + `--emit-crops` | Line texts match the E-R1 reference; deterministic across runs; `make ocr-test` green |
 | **R4** | Gateway `doc.read`: tiers 0+1, cache, `detail` views, Jobs reasons | Offline tests against fixtures; the no-jobs/no-tool path stays byte-identical to today (the standing #3/#4 gate); E-R3 passes |
 | **R5** | Tier-2 escalation via vision backend + interlock/priority wiring | Gated on E-R2's backend choice; guarded live run on the reference machine; evidence committed |
@@ -326,9 +351,11 @@ whole card.
   looks at the pixels, so handwritten margin notes on an otherwise clean
   printed PDF are missed in v1. Documented gap; a v2 could OCR only regions
   outside text-layer boxes. Do not silently promise this works.
-- **Language scope.** v1 is Latin-script printed text + (via tier 2/R6)
-  English handwriting. Say so wherever user-facing. Multilingual packs exist
-  upstream but each adds a charset and a pack; out of scope until asked for.
+- **Language scope.** The pinned v6 recognizer spans English + 46
+  Latin-script languages *by upstream claim*; v1 **claims** only what the
+  fixture set measures — English printed text plus Latin diacritics — and
+  (via tier 2/R6) English handwriting. Say so wherever user-facing; do not
+  advertise the wider coverage without fixtures for it.
 - **`script` fidelity.** Until R7, "uncertain" is honest and "handwritten" is
   banned from output. "Move files with handwriting" is served in the interim
   by `lines_uncertain > 0` — document that it also catches blur and stamps.
