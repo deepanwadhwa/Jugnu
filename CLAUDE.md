@@ -26,6 +26,22 @@ superseded in part — see ISSUE_TASKS.md). Serve API: [docs/SERVE_API.md](docs/
 
 ## Open defects
 
+**J11 (OPEN, #7)** — the shipped find-job path (`jobs_find`,
+`src/samosa_gateway.c`) failed the owner's Titli dogfood a second time
+(2026-07-23) from five compounding defects: a C escaping bug whose tokenizer
+treats the **letter "t" as a delimiter** (`" \\t…"` at
+`src/samosa_gateway.c:1851` — "Titli" and "cat" can never become search
+terms; reproduced, a wallpaper zip outscores a file named after the cat), a
+hardcoded "What is your pet's name?" fallback (line 2469), answer-restarts
+that discard the whole run (line 2588, violating the JF.3 spec), state that
+persists only goal+folder, and PDFs read text-layer-only while the prompt
+steers away from `doc.read`'s OCR cascade. Zero find-path test coverage let
+all five ship. Evidence + reproduction:
+[docs/regressions/jobs/titli-find-2026-07-23.md](docs/regressions/jobs/titli-find-2026-07-23.md);
+fix program: [docs/TASKS_JOBS_INTELLIGENCE.md](docs/TASKS_JOBS_INTELLIGENCE.md)
+**Phase JI** (supersedes the shipped implementation, enforces the JF spec's
+model-decides design).
+
 **G9 (OPEN, #1)** — the cgroup pressure signal counts page cache and
 over-triggers. `linux_memory_pressure_level()` uses `memory.current/memory.max`,
 but cgroup v2's `memory.current` includes the page cache the engine fills by

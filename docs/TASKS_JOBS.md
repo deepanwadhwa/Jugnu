@@ -1354,6 +1354,19 @@ prompts, code-repo jobs, tool/action adapters, agents.
 
 ## Phase JF — model-driven "find" jobs (owner-approved direction, 2026-07-21)
 
+> **STATUS UPDATE 2026-07-23:** an implementation of this phase shipped
+> (`7eab55a`, `c9c99a0`) and **failed the Titli dogfood a second time** — it
+> diverged from this spec on exactly the points the spec called out (C-side
+> candidate filtering the spec never asked for, a hardcoded fallback
+> question, restart-instead-of-resume despite JF.3, `fs_read_pages` instead
+> of `doc.read` for scans). Root-cause evidence:
+> [regressions/jobs/titli-find-2026-07-23.md](regressions/jobs/titli-find-2026-07-23.md);
+> CLAUDE.md defect **J11**. The rebuild spec is
+> [TASKS_JOBS_INTELLIGENCE.md](TASKS_JOBS_INTELLIGENCE.md) (**Phase JI**),
+> which supersedes the shipped `jobs_find` code while keeping JF.1–JF.4 as
+> the intent baseline. Do not extend the shipped find path — demolition is
+> JI.0.
+
 > **Status: SPEC — nothing below is built.** Approved by the owner on
 > 2026-07-21 after dogfooding: "find my cat's medical record… his name is
 > Titli" against a real ~/Downloads (508 files) fell through `decode_intent`'s
