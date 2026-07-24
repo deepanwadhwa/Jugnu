@@ -64,6 +64,7 @@ PDFIUM_ARCHIVES = [
 GATEWAY_SOURCE_FILES = [
     "samosa_gateway.c",
     "samosa_fs.c",
+    "read_cache.h",
 ]
 
 def sha256_file(path: pathlib.Path) -> str:

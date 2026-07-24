@@ -38,6 +38,37 @@ printf "Cafe total 4.50\n" >"$TMP/files/receipt-b.txt"
 /bin/mkdir "$TMP/interlock-files"
 printf "First interlock receipt.\n" >"$TMP/interlock-files/a.txt"
 printf "Second interlock receipt.\n" >"$TMP/interlock-files/b.txt"
+
+# --- JI.8 fixture folders ---
+# (d) Education scenario: diploma + junk + RC1-like name. Goal is "find my
+#     education certificates" — the test asserts no event ever mentions "pet".
+/bin/mkdir "$TMP/edu-files"
+printf "Bachelor of Science in Computer Science, 2020\nUniversity of Example\nConferred June 15, 2020\n" >"$TMP/edu-files/diploma_bsc_2020.txt"
+printf "Random notes about nothing relevant.\n" >"$TMP/edu-files/CamScanner_04-22-2024.txt"
+printf "Training schedule for Q3 2026.\n" >"$TMP/edu-files/training_schedule.txt"
+
+# (f) Sweep scenario: two planted vet record targets + junk + an image that
+#     will park as ocr_unavailable (no samosa-ocr configured in this test).
+/bin/mkdir "$TMP/sweep-files"
+printf "Miso annual checkup 2026, all vaccinations current.\n" >"$TMP/sweep-files/miso_vet_checkup.txt"
+printf "Titli rabies booster 2023, next due 2026.\n" >"$TMP/sweep-files/titli_vaccination_2023.txt"
+printf "Grocery list: milk, eggs, bread.\n" >"$TMP/sweep-files/grocery_list.txt"
+printf "Wallpaper gallery index.\n" >"$TMP/sweep-files/wallpaper_gallery.txt"
+# A real PNG header (1x1 pixel) so samosa-fs detects it as image/png. The
+# gateway's doc.read will fail (no OCR pack) → parked with ocr_unavailable.
+printf '\x89PNG\r\n\x1a\n' >"$TMP/sweep-files/scan_unknown.png"
+# Phase-B checkpoint fixture: one more readable file than the per-run skim
+# budget.  The Continue request must add only the final row, not reread 300.
+/bin/mkdir "$TMP/checkpoint-files"
+i=1
+while [ "$i" -le 301 ]; do printf 'checkpoint fixture %s\n' "$i" >"$TMP/checkpoint-files/file-$i.txt"; i=$((i + 1)); done
+# JI.2 crash fixture: 510 rows force many 16-file triage batches.  The fake
+# backend holds batch two so the test can SIGKILL at a known durable cursor.
+/bin/mkdir "$TMP/triage-crash-files"
+i=1
+while [ "$i" -le 510 ]; do printf 'triage crash fixture %s\n' "$i" >"$TMP/triage-crash-files/file-$i.txt"; i=$((i + 1)); done
+/bin/mkdir "$TMP/verify-crash-files"
+printf 'durable crash probe content\n' >"$TMP/verify-crash-files/crash-probe.txt"
 /bin/mkdir "$TMP/image-files"
 /bin/cp "$ROOT/assets/samosa-chat.png" "$TMP/image-files/two.png"
 /bin/mkdir -p "$HOME_DIR/jobs/review-native/results"
@@ -80,33 +111,43 @@ fi
 # The main gateway runs with NO web stub, so the public-fetch SSRF checks hit
 # the real resolver (literal blocked IPs resolve offline). launchd is dry-run
 # and points at a temp LaunchAgents dir so the suite never touches real launchd.
-SAMOSA_HOME="$HOME_DIR" \
-SAMOSA_PORT="$PORT" \
-SAMOSA_BACKEND_PORT="$BACKEND_PORT" \
-SAMOSA_APP_HTML="$TMP/app.html" \
-SAMOSA_APP_LOGO="$TMP/logo.png" \
-SAMOSA_BONSAI_SERVER="$BACKEND" \
-SAMOSA_ORNITH_MODEL="$HOME_DIR/models/ornith-9b/Ornith-1.0-9B-Q4_K_M.gguf" \
-SAMOSA_FS="$TMP/samosa-fs-wrapper" \
-SAMOSA_EXTRACT="$TMP/samosa-extract-wrapper" \
-SAMOSA_EXTRACT_CALLS="$TMP/extract-calls.log" \
-SAMOSA_REAL_EXTRACT="$EXTRACTOR" \
-SAMOSA_INTERACTIVE_COOLDOWN_S=0.2 \
-SAMOSA_WEB_MIN_INTERVAL=0 \
-SAMOSA_LAUNCH_AGENTS_DIR="$TMP/agents" \
-SAMOSA_LAUNCHD_DRYRUN=1 \
-SAMOSA_BONSAI_MMPROJ="$HOME_DIR/bonsai-mmproj.gguf" \
-"$GATEWAY" >"$TMP/gateway.log" 2>&1 &
-PID=$!
-
-i=0
-while [ "$i" -lt 100 ]; do
-  health=$(/usr/bin/curl -fsS "http://127.0.0.1:$PORT/healthz" 2>/dev/null || true)
-  printf '%s' "$health" | /usr/bin/grep -q '"ready":true' && break
-  kill -0 "$PID" 2>/dev/null || { /bin/cat "$TMP/gateway.log" >&2; exit 1; }
-  /bin/sleep 0.05
-  i=$((i + 1))
-done
+# Keeping this in a function lets the crash tests restart the real binary with
+# precisely the same configuration and durable home directory.
+launch_main_gateway() {
+  SAMOSA_HOME="$HOME_DIR" \
+  SAMOSA_PORT="$PORT" \
+  SAMOSA_BACKEND_PORT="$BACKEND_PORT" \
+  SAMOSA_APP_HTML="$TMP/app.html" \
+  SAMOSA_APP_LOGO="$TMP/logo.png" \
+  SAMOSA_BONSAI_SERVER="$BACKEND" \
+  SAMOSA_ORNITH_MODEL="$HOME_DIR/models/ornith-9b/Ornith-1.0-9B-Q4_K_M.gguf" \
+  SAMOSA_FS="$TMP/samosa-fs-wrapper" \
+  SAMOSA_EXTRACT="$TMP/samosa-extract-wrapper" \
+  SAMOSA_EXTRACT_CALLS="$TMP/extract-calls.log" \
+  SAMOSA_REAL_EXTRACT="$EXTRACTOR" \
+  SAMOSA_INTERACTIVE_COOLDOWN_S=0.2 \
+  SAMOSA_WEB_MIN_INTERVAL=0 \
+  SAMOSA_LAUNCH_AGENTS_DIR="$TMP/agents" \
+  SAMOSA_LAUNCHD_DRYRUN=1 \
+  SAMOSA_BONSAI_MMPROJ="$HOME_DIR/bonsai-mmproj.gguf" \
+  SAMOSA_FAKE_PID_FILE="$TMP/fake-backend.pid" \
+  SAMOSA_FAKE_TRIAGE_FIRST="$TMP/fake-triage-first" \
+  SAMOSA_FAKE_TRIAGE_DELAY="$TMP/fake-triage-delay" \
+  SAMOSA_FAKE_VERIFY_DELAY="$TMP/fake-verify-delay" \
+  "$GATEWAY" >>"$TMP/gateway.log" 2>&1 &
+  PID=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    health=$(/usr/bin/curl -fsS "http://127.0.0.1:$PORT/healthz" 2>/dev/null || true)
+    printf '%s' "$health" | /usr/bin/grep -q '"ready":true' && return 0
+    kill -0 "$PID" 2>/dev/null || { /bin/cat "$TMP/gateway.log" >&2; return 1; }
+    /bin/sleep 0.05
+    i=$((i + 1))
+  done
+  echo "main gateway did not become ready" >&2
+  return 1
+}
+launch_main_gateway
 printf '%s' "$health" | /usr/bin/grep -q '"compiled":true'
 printf '%s' "$health" | /usr/bin/grep -q '"ready":true'
 status=$(/usr/bin/curl -fsS "http://127.0.0.1:$PORT/internal/v1/status")
@@ -164,8 +205,13 @@ FIND_JOB=$(printf '%s' "$find" | /usr/bin/sed -n 's/.*"job_id":"\([^"]*\)".*/\1/
 # Durable state persisted: Phase A verdicts, the loop conversation, the result.
 [ -f "$HOME_DIR/jobs/$FIND_JOB/verdicts.jsonl" ]
 [ -f "$HOME_DIR/jobs/$FIND_JOB/skim.jsonl" ]
+[ -f "$HOME_DIR/jobs/$FIND_JOB/classify.jsonl" ]
 [ -f "$HOME_DIR/jobs/$FIND_JOB/convo.json" ]
 [ -f "$HOME_DIR/jobs/$FIND_JOB/result.json" ]
+[ -f "$HOME_DIR/jobs/$FIND_JOB/events.jsonl" ]
+/usr/bin/grep -q '"type":"triage_progress"' "$HOME_DIR/jobs/$FIND_JOB/events.jsonl"
+/usr/bin/grep -q '"type":"result"' "$HOME_DIR/jobs/$FIND_JOB/events.jsonl"
+/usr/bin/grep -q '"verdict":' "$HOME_DIR/jobs/$FIND_JOB/classify.jsonl"
 # Phase A assigns confidence (high|medium|low), never a hard drop (E-JI1 lesson).
 /usr/bin/grep -q '"confidence":' "$HOME_DIR/jobs/$FIND_JOB/verdicts.jsonl"
 if /usr/bin/grep -q '"verdict":"no"' "$HOME_DIR/jobs/$FIND_JOB/verdicts.jsonl"; then
@@ -191,6 +237,189 @@ resumed=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/answer" \
 printf '%s' "$resumed" | /usr/bin/grep -q '"type":"result"'
 printf '%s' "$resumed" | /usr/bin/grep -q 'receipt-b.txt'
 printf '%s' "$resumed" | /usr/bin/grep -q '"type":"done"'
+
+# JI.2/JI.6: SIGKILL is materially different from a normal checkpoint: no
+# cleanup runs.  Stop Phase A after its first durable batch, kill its child
+# backend too (the parent normally owns it), then start a fresh gateway over
+# the same job home.  Exactly 510 verdict rows proves it resumed at batch two
+# instead of re-triaging the already durable first 16 rows.
+kill_main_for_crash() {
+  crash_backend=$(/bin/cat "$TMP/fake-backend.pid" 2>/dev/null || true)
+  /bin/kill -KILL "$PID" 2>/dev/null || true
+  wait "$PID" 2>/dev/null || true
+  PID=""
+  [ -z "$crash_backend" ] || /bin/kill -KILL "$crash_backend" 2>/dev/null || true
+  /bin/sleep 0.05
+}
+/usr/bin/curl -sS -N -X POST "http://127.0.0.1:$PORT/v1/jobs/run" \
+  -H 'Content-Type: application/json' \
+  --data-binary "{\"goal\":\"find triage crash fixtures\",\"folder\":\"$TMP/triage-crash-files\"}" \
+  >"$TMP/triage-crash.sse" 2>/dev/null &
+TRIAGE_CRASH_CURL=$!
+i=0
+while [ "$i" -lt 200 ] && [ ! -f "$TMP/fake-triage-delay" ]; do
+  /bin/kill -0 "$TRIAGE_CRASH_CURL" 2>/dev/null || { /bin/cat "$TMP/triage-crash.sse" >&2; exit 1; }
+  /bin/sleep 0.02; i=$((i + 1))
+done
+[ -f "$TMP/fake-triage-first" ]
+[ -f "$TMP/fake-triage-delay" ]
+TRIAGE_JOB=$(/bin/ls -dt "$HOME_DIR"/jobs/job-* | /usr/bin/head -1 | /usr/bin/xargs /usr/bin/basename)
+[ "$(/usr/bin/grep -c '"rel_path":' "$HOME_DIR/jobs/$TRIAGE_JOB/verdicts.jsonl")" = 16 ]
+kill_main_for_crash
+wait "$TRIAGE_CRASH_CURL" 2>/dev/null || true
+launch_main_gateway
+triage_resume=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/continue" \
+  -H 'Content-Type: application/json' --data-binary "{\"job_id\":\"$TRIAGE_JOB\"}")
+printf '%s' "$triage_resume" | /usr/bin/grep -q '"type":"triage_progress"'
+[ "$(/usr/bin/grep -c '"rel_path":' "$HOME_DIR/jobs/$TRIAGE_JOB/verdicts.jsonl")" = 510 ]
+[ "$(/usr/bin/grep -c '"rel_path":"file-1.txt"' "$HOME_DIR/jobs/$TRIAGE_JOB/verdicts.jsonl")" = 1 ]
+
+# JI.6 Phase D crash recovery: the fake backend holds the post-read model turn.
+# The durable conversation already contains the tool call and result when the
+# process dies.  Continue must finish from that conversation without emitting a
+# second read/tool event.
+/usr/bin/curl -sS -N -X POST "http://127.0.0.1:$PORT/v1/jobs/run" \
+  -H 'Content-Type: application/json' \
+  --data-binary "{\"goal\":\"find verify crash fixture\",\"folder\":\"$TMP/verify-crash-files\"}" \
+  >"$TMP/verify-crash.sse" 2>/dev/null &
+VERIFY_CRASH_CURL=$!
+i=0
+while [ "$i" -lt 200 ] && [ ! -f "$TMP/fake-verify-delay" ]; do
+  /bin/kill -0 "$VERIFY_CRASH_CURL" 2>/dev/null || { /bin/cat "$TMP/verify-crash.sse" >&2; exit 1; }
+  /bin/sleep 0.02; i=$((i + 1))
+done
+[ -f "$TMP/fake-verify-delay" ]
+VERIFY_JOB=$(/bin/ls -dt "$HOME_DIR"/jobs/job-* | /usr/bin/head -1 | /usr/bin/xargs /usr/bin/basename)
+/usr/bin/grep -q 'durable crash probe content' "$HOME_DIR/jobs/$VERIFY_JOB/convo.json"
+kill_main_for_crash
+wait "$VERIFY_CRASH_CURL" 2>/dev/null || true
+launch_main_gateway
+verify_resume=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/continue" \
+  -H 'Content-Type: application/json' --data-binary "{\"job_id\":\"$VERIFY_JOB\"}")
+printf '%s' "$verify_resume" | /usr/bin/grep -q '"type":"result"'
+printf '%s' "$verify_resume" | /usr/bin/grep -q 'crash-probe.txt'
+[ "$(/usr/bin/grep -c '"type":"tool_call"' "$HOME_DIR/jobs/$VERIFY_JOB/events.jsonl")" = 1 ]
+[ "$(/usr/bin/grep -c '"type":"tool_result"' "$HOME_DIR/jobs/$VERIFY_JOB/events.jsonl")" = 1 ]
+
+# --- JI.8: Offline fixture suite (confidence contract regression locks) ---
+#
+# (a) Well-named target: already covered by the main find test above — it
+#     asserts cat-medical-note.txt in the result with "Titli vaccination record"
+#     evidence through a structured finish().
+# (b) Anonymous scan / RC1+RC5 lock: already covered by the main find test —
+#     verdicts.jsonl has no "verdict":"no" (confidence triage, not binary),
+#     and skim.jsonl has first_lines for the text files.
+# (c) Clutter exclusion: the existing find folder has miso-record.txt and
+#     receipt-b.txt as junk; the finish() rejected_count=3 confirms they were
+#     excluded from matches. Additional clutter names are tested in (f) below.
+
+# (d) No-canned-question (RC2 lock): goal "find my education certificates" —
+#     the word "education" contains substring "cat" which the old C scorer would
+#     have treated as pet-related. Assert no event ever mentions "pet".
+edu=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/run" \
+  -H 'Content-Type: application/json' \
+  --data-binary "{\"goal\":\"find my education certificates\",\"folder\":\"$TMP/edu-files\"}")
+printf '%s' "$edu" | /usr/bin/grep -q '"type":"triage_progress"'
+printf '%s' "$edu" | /usr/bin/grep -q '"type":"index_complete"'
+printf '%s' "$edu" | /usr/bin/grep -q '"type":"skim_progress"'
+printf '%s' "$edu" | /usr/bin/grep -q '"type":"classify_progress"'
+printf '%s' "$edu" | /usr/bin/grep -q '"type":"result"'
+printf '%s' "$edu" | /usr/bin/grep -q 'diploma_bsc_2020.txt'
+printf '%s' "$edu" | /usr/bin/grep -q 'Bachelor of Science'
+printf '%s' "$edu" | /usr/bin/grep -q '"type":"done"'
+if printf '%s' "$edu" | /usr/bin/grep -qi 'pet'; then
+  echo "education find mentioned 'pet' (RC2 regression)" >&2
+  exit 1
+fi
+if printf '%s' "$edu" | /usr/bin/grep -qi 'what is your'; then
+  echo "education find emitted a canned question (RC2 regression)" >&2
+  exit 1
+fi
+# Confidence assigned (not binary), no hard drops.
+EDU_JOB=$(printf '%s' "$edu" | /usr/bin/sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p' | /usr/bin/head -1)
+[ -n "$EDU_JOB" ]
+/usr/bin/grep -q '"confidence":' "$HOME_DIR/jobs/$EDU_JOB/verdicts.jsonl"
+if /usr/bin/grep -q '"verdict":"no"' "$HOME_DIR/jobs/$EDU_JOB/verdicts.jsonl"; then
+  echo "education triage still hard-drops files" >&2
+  exit 1
+fi
+
+# JI.0: no substring router match is required. The three-way model fallback
+# may select the read-only find pipeline for an implicit request.
+implicit_find=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/run" \
+  -H 'Content-Type: application/json' \
+  --data-binary "{\"goal\":\"my university diploma\",\"folder\":\"$TMP/edu-files\"}")
+printf '%s' "$implicit_find" | /usr/bin/grep -q '"type":"intent","kind":"find"'
+printf '%s' "$implicit_find" | /usr/bin/grep -q 'diploma_bsc_2020.txt'
+printf '%s' "$implicit_find" | /usr/bin/grep -q '"type":"result"'
+
+# (f) Sweep contract: two planted vet record targets + junk + an image file.
+#     The image has no OCR sidecar → parked as ocr_unavailable. Assert:
+#     - both matches present in result with evidence
+#     - the image file in unreadable with its error code
+#     - junk files NOT in matches
+sweep=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/run" \
+  -H 'Content-Type: application/json' \
+  --data-binary "{\"goal\":\"find all vet records for my pets\",\"folder\":\"$TMP/sweep-files\"}")
+printf '%s' "$sweep" | /usr/bin/grep -q '"type":"triage_progress"'
+printf '%s' "$sweep" | /usr/bin/grep -q '"type":"index_complete"'
+printf '%s' "$sweep" | /usr/bin/grep -q '"type":"skim_progress"'
+printf '%s' "$sweep" | /usr/bin/grep -q '"type":"classify_progress"'
+printf '%s' "$sweep" | /usr/bin/grep -q '"type":"result"'
+# Both targets in matches.
+printf '%s' "$sweep" | /usr/bin/grep -q 'miso_vet_checkup.txt'
+printf '%s' "$sweep" | /usr/bin/grep -q 'Miso annual checkup'
+printf '%s' "$sweep" | /usr/bin/grep -q 'titli_vaccination_2023.txt'
+printf '%s' "$sweep" | /usr/bin/grep -q 'Titli rabies booster'
+# Unreadable with error code.
+printf '%s' "$sweep" | /usr/bin/grep -q 'scan_unknown.png'
+printf '%s' "$sweep" | /usr/bin/grep -q 'ocr_unavailable'
+printf '%s' "$sweep" | /usr/bin/grep -q '"type":"done"'
+# Clutter exclusion: junk files must not be in matches.
+SWEEP_JOB=$(printf '%s' "$sweep" | /usr/bin/sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p' | /usr/bin/head -1)
+[ -n "$SWEEP_JOB" ]
+[ -f "$HOME_DIR/jobs/$SWEEP_JOB/result.json" ]
+# Junk files must not appear in the matches array of result.json.
+# The fake backend's finish payload has exactly {miso_vet_checkup, titli_vaccination_2023}
+# in matches — verify the gateway accepted it and no extra paths leaked.
+if /usr/bin/grep 'grocery_list' "$HOME_DIR/jobs/$SWEEP_JOB/result.json" | /usr/bin/grep -q '"path"'; then
+  echo "sweep result included junk file grocery_list in matches" >&2
+  exit 1
+fi
+if /usr/bin/grep 'wallpaper_gallery' "$HOME_DIR/jobs/$SWEEP_JOB/result.json" | /usr/bin/grep -q '"path"'; then
+  echo "sweep result included junk file wallpaper_gallery in matches" >&2
+  exit 1
+fi
+# Confidence contract: no hard drops, skim has entries for all readable files.
+/usr/bin/grep -q '"confidence":' "$HOME_DIR/jobs/$SWEEP_JOB/verdicts.jsonl"
+if /usr/bin/grep -q '"verdict":"no"' "$HOME_DIR/jobs/$SWEEP_JOB/verdicts.jsonl"; then
+  echo "sweep triage still hard-drops files" >&2
+  exit 1
+fi
+# Skim index recorded the planted targets' content.
+/usr/bin/grep -q '"first_lines":"Miso annual checkup' "$HOME_DIR/jobs/$SWEEP_JOB/skim.jsonl"
+/usr/bin/grep -q '"first_lines":"Titli rabies booster' "$HOME_DIR/jobs/$SWEEP_JOB/skim.jsonl"
+# The parked image appears in skim with parked:true.
+/usr/bin/grep -q '"parked":true' "$HOME_DIR/jobs/$SWEEP_JOB/skim.jsonl"
+
+# JI.3/JI.6: a skim budget is an honest mechanical checkpoint. The first run
+# stops at 300, /continue reads the remaining file, and durable skim rows are
+# never appended a second time.
+checkpoint=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/run" \
+  -H 'Content-Type: application/json' \
+  --data-binary "{\"goal\":\"find checkpoint fixtures\",\"folder\":\"$TMP/checkpoint-files\"}")
+printf '%s' "$checkpoint" | /usr/bin/grep -q '"type":"await_continue"'
+printf '%s' "$checkpoint" | /usr/bin/grep -q '"skimmed":300'
+printf '%s' "$checkpoint" | /usr/bin/grep -q '"remaining":1'
+CHECKPOINT_JOB=$(printf '%s' "$checkpoint" | /usr/bin/sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p' | /usr/bin/head -1)
+[ -n "$CHECKPOINT_JOB" ]
+[ "$(/usr/bin/grep -c '"path":' "$HOME_DIR/jobs/$CHECKPOINT_JOB/skim.jsonl")" = 300 ]
+checkpoint_resume=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/continue" \
+  -H 'Content-Type: application/json' --data-binary "{\"job_id\":\"$CHECKPOINT_JOB\"}")
+[ "$(/usr/bin/grep -c '"path":' "$HOME_DIR/jobs/$CHECKPOINT_JOB/skim.jsonl")" = 301 ]
+if printf '%s' "$checkpoint_resume" | /usr/bin/grep -q '"type":"await_continue"'; then
+  echo "skim resume incorrectly checkpointed after completing the final file" >&2; exit 1
+fi
 
 review=$(/usr/bin/curl -fsS -X POST "http://127.0.0.1:$PORT/v1/jobs/review" \
   -H 'Content-Type: application/json' --data-binary '{"job_id":"review-native"}')

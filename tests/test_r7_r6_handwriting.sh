@@ -22,7 +22,7 @@ out_print=$("${BUILD_DIR}/samosa-ocr" read tools/testdata/ocr/tiny.png)
 printf '%s' "$out_print" | grep -q '"script":"printed"' || { echo "Printed fixture missing script:printed" >&2; exit 1; }
 printf '%s' "$out_print" | grep -q '"reader":"rec_print"' || { echo "Printed fixture missing reader:rec_print" >&2; exit 1; }
 
-# 2. Test mock handwriting pack creation
+# 2. Test mock handwriting pack creation & rec_hand reader path
 mkdir -p "$TMP/mock_pack"
 cp "$PACK"/* "$TMP/mock_pack/"
 cp "$PACK/rec.bin" "$TMP/mock_pack/rec_hand.bin"

@@ -70,11 +70,14 @@ class TestSamosaFsSidecar(unittest.TestCase):
 
         # Magic-byte typing + UTF-8 text fallback, exact sizes.
         self.assertEqual(by_name["a.txt"]["media_type"], "text/plain")
+        self.assertEqual(by_name["a.txt"]["magic_type"], "text/plain")
+        self.assertEqual(by_name["a.txt"]["rel_path"], "a.txt")
         self.assertEqual(by_name["a.txt"]["size"], 11)
         self.assertEqual(by_name["b.pdf"]["media_type"], "application/pdf")
         self.assertEqual(by_name["b.pdf"]["size"], 13)
         self.assertEqual(by_name["c.jpg"]["media_type"], "image/jpeg")
         self.assertEqual(by_name["c.jpg"]["size"], 9)
+        self.assertIn("mtime", by_name["a.txt"])
         # Real SHA-256 of the content.
         self.assertEqual(
             by_name["a.txt"]["input_sha256"],

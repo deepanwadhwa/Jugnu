@@ -821,6 +821,7 @@
           case "fs_read_document": return { dot: "·", title: file ? `Reading document ${file}` : "Reading a document" };
           case "fs_read_page": return { dot: "·", title: file ? `Reading page ${args.page || ""} of ${file}`.trim() : "Reading a document page" };
           case "fs_read_pages": return { dot: "·", title: file ? `Reading pages ${args.start || 1}-${Number(args.start || 1) + Number(args.count || 5) - 1} of ${file}` : "Reading document pages" };
+          case "doc.read": return { dot: "·", title: file ? `Reading ${file}` : "Reading a document" };
           case "notes_append": return { dot: "·", title: "Saving a note for this job" };
           case "notes_read": return { dot: "·", title: "Checking job notes" };
           case "ask_user": return { dot: "?", title: args.question || "Asking for one detail" };
@@ -839,6 +840,11 @@
           case "fs_read_document": return "Document read";
           case "fs_read_page": return "Document page read";
           case "fs_read_pages": return "Document pages read";
+          case "doc.read": {
+            const file = baseName(evt.path || "");
+            const source = evt.source ? ` (${evt.source})` : "";
+            return file ? `Read page 1${source} — ${file}` : `Document page read${source}`;
+          }
           case "notes_append": return "Job note saved";
           case "notes_read": return "Job notes checked";
           case "ask_user": return "Question prepared";
@@ -1003,6 +1009,17 @@
             input.focus();
             break;
           }
+          case "await_continue": {
+            ctx.jobId = evt.job_id; lastJobId = evt.job_id;
+            const skimmed = Number.isFinite(evt.skimmed) ? evt.skimmed : null;
+            const remaining = Number.isFinite(evt.remaining) ? evt.remaining : null;
+            const rounds = Number.isFinite(evt.rounds_spent) ? evt.rounds_spent : null;
+            const detail = skimmed !== null && remaining !== null
+              ? `Skimmed ${skimmed} files; ${remaining} remain.`
+              : rounds !== null ? `Verification paused after ${rounds} rounds.` : "This job is ready to continue.";
+            showBar(detail, [["Continue", "apply", () => continueJob(evt.job_id, ctx)]]);
+            break;
+          }
           case "action": {
             if (!ctx.progress) ctx.progress = jobLine("⟳", "");
             const verb = evt.op === "revert" ? "Restoring" : "Moving";
@@ -1039,14 +1056,85 @@
             ctx.undone = true;
             jobLine("●", `Restored ${evt.reverted} file${evt.reverted === 1 ? "" : "s"}`, "step-done");
             break;
+          case "triage_progress": {
+            if (!ctx.triageLine) ctx.triageLine = jobLine("·", `Triaging filenames (${evt.done}/${evt.total})`);
+            else ctx.triageLine.querySelector(".title").textContent = `Triaging filenames (${evt.done}/${evt.total})`;
+            if (evt.done >= evt.total) {
+              ctx.triageLine.querySelector(".dot").textContent = "✓";
+              ctx.triageLine.classList.add("step-done");
+              ctx.triageLine = null;
+            }
+            break;
+          }
+          case "skim_progress": {
+            if (!ctx.skimLine) ctx.skimLine = jobLine("·", `Skimming content (${evt.done}/${evt.total})`);
+            const fn = baseName(evt.current || "");
+            const badge = evt.confidence ? ` [${evt.confidence}]` : "";
+            const src = evt.source ? ` (${evt.source})` : "";
+            const eta = Number.isFinite(evt.expected_remaining_seconds) && evt.done < evt.total
+              ? ` — first skim ~${Math.max(1, Math.ceil(evt.expected_remaining_seconds / 60))} min remaining` : "";
+            ctx.skimLine.querySelector(".title").textContent = `Skimming ${evt.done}/${evt.total}: ${fn}${badge}${src}${eta}`;
+            if (evt.done >= evt.total) {
+              ctx.skimLine.querySelector(".dot").textContent = "✓";
+              ctx.skimLine.querySelector(".title").textContent = `Skimmed ${evt.total} files`;
+              ctx.skimLine.classList.add("step-done");
+              ctx.skimLine = null;
+            }
+            break;
+          }
+          case "classify_progress": {
+            if (!ctx.classifyLine) ctx.classifyLine = jobLine("·", `Classifying skimmed files (${evt.done}/${evt.total})`);
+            else ctx.classifyLine.querySelector(".title").textContent = `Classifying (${evt.done}/${evt.total}), shortlisted: ${evt.shortlist}`;
+            if (evt.done >= evt.total) {
+              ctx.classifyLine.querySelector(".dot").textContent = "✓";
+              ctx.classifyLine.querySelector(".title").textContent = `Classified ${evt.total} files (shortlisted ${evt.shortlist})`;
+              ctx.classifyLine.classList.add("step-done");
+              ctx.classifyLine = null;
+            }
+            break;
+          }
+          case "result": {
+            let md = "";
+            if (evt.matches && evt.matches.length) {
+              md += "### Matches Found\n\n";
+              evt.matches.forEach(m => {
+                const confBadge = m.confidence ? ` \`${m.confidence}\`` : "";
+                const pg = m.page ? ` (p. ${m.page})` : "";
+                md += `- **\`${baseName(m.path)}\`**${confBadge}${pg}\n  *“${m.evidence}”*\n\n`;
+              });
+            } else {
+              md += "### No Matches Found\n\n";
+            }
+            if (evt.rejected_count) {
+              md += `*${evt.rejected_count} file${evt.rejected_count === 1 ? "" : "s"} checked and rejected.*\n\n`;
+            }
+            if (evt.unreadable && evt.unreadable.length) {
+              md += "#### Unreadable Files\n";
+              evt.unreadable.forEach(u => {
+                md += `- \`${baseName(u.path)}\` (${u.reason || "could not read"})\n`;
+              });
+              md += "\n";
+            }
+            if (evt.deferred && evt.deferred.length) {
+              md += "#### Not Yet Skimmed\n";
+              evt.deferred.forEach(d => {
+                const confidence = d.confidence ? `, ${d.confidence} confidence` : "";
+                md += `- \`${baseName(d.path)}\` (continue to read${confidence})\n`;
+              });
+              md += "\n";
+            }
+            if (evt.notes) md += evt.notes;
+            showJobResult(md);
+            break;
+          }
           case "done": {
             const summary = (evt.summary || "").trim();
             if (!summary || summary === "Find job completed without a summary.") {
-              showJobResult("This job did not produce an answer. Run it again.", true);
+              if (jobEls.result.hidden) showJobResult("This job did not produce an answer. Run it again.", true);
               jobEls.bar.hidden = true;
               break;
             }
-            showJobResult(summary);
+            if (jobEls.result.hidden) showJobResult(summary);
             loadReviewQueue(ctx.jobId || lastJobId, ctx);
             if (ctx.moved && !ctx.undone) showBar("Done — files were moved.", [["Undo", "undo", () => undoJob(ctx.jobId || lastJobId, ctx)]]);
             else jobEls.bar.hidden = true;
@@ -1136,6 +1224,12 @@
       async function answerJob(jobId, answer, ctx) {
         if (jobRunning || !answer.trim()) return; jobRunning = true; jobEls.bar.hidden = true;
         try { await streamJob("/v1/jobs/answer", { job_id: jobId, answer }, ctx); }
+        catch (e) { renderJobEvent({ type: "error", message: String(e) }, ctx); }
+        finally { jobRunning = false; }
+      }
+      async function continueJob(jobId, ctx) {
+        if (jobRunning) return; jobRunning = true; jobEls.bar.hidden = true;
+        try { await streamJob("/v1/jobs/continue", { job_id: jobId }, ctx); }
         catch (e) { renderJobEvent({ type: "error", message: String(e) }, ctx); }
         finally { jobRunning = false; }
       }

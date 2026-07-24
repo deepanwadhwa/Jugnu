@@ -203,6 +203,7 @@ test: pagecache-residency-test tests/test_expert_cache.c tests/test_kv_cache.c t
 # with python3 removed from PATH.
 jobs-test: samosa-fs
 	SAMOSA_FS="$$PWD/$(BUILD_DIR)/samosa-fs" python3 -m unittest discover -s tests/jobs -v
+	node tests/test_jobs_ui.mjs
 	$(MAKE) compiled-gateway-test
 
 clean:

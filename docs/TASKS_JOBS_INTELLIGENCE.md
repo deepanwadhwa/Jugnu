@@ -1,10 +1,15 @@
 # Phase JI — generally intelligent document jobs (find, rebuilt)
 
-> **Status: SPEC — approved direction from the owner, 2026-07-23, after the
+> **Status: COMPLETE — approved direction from the owner, 2026-07-23, after the
 > second dogfood failure of the Titli scenario.** Evidence:
 > [regressions/jobs/titli-find-2026-07-23.md](regressions/jobs/titli-find-2026-07-23.md)
 > (five compounding root causes, one reproduced C bug, and a
 > spec-vs-implementation divergence table).
+>
+> **Implementation status (2026-07-23): complete.** JI.0–JI.8 pass their
+> offline gates; E-JI1/E-JI2 pass on the owner-approved 50-file real-model
+> fixture. Thermal telemetry required privileged `powermetrics`, so the gate
+> records its unavailability rather than making an unmeasured thermal claim.
 >
 > This card **supersedes the Phase JF implementation** (`jobs_find`,
 > `candidate_score`, `build_candidates`, the canned ask fallback, the
@@ -76,21 +81,21 @@ D. VERIFY    model loop: doc.read more pages of shortlist     → evidence
 E. FINISH    structured finish() tool → result card           → result.json
 ```
 
-**Why this is affordable on the reference M3, and what is unmeasured.**
+**Why this is affordable on the reference M3.**
 Phase A is pure prompt tokens (~510 names ≈ 6–9k tokens, batched under the
 context cap). Phase B's per-file cost is `samosa-ocr` C inference plus
-possible Bonsai crop escalations — **unmeasured at folder scale; E-JI1
-measures before any latency claim is made** (per-crop Bonsai cost was
-measured in E-R2; folder-scale skim was not). The read cache
+possible Bonsai crop escalations. E-JI1 measured a 50-file cold skim
+increment of 56.826 s (1.14 s/file) and a warm skim increment of 0.037 s;
+the report records its RSS and machine-wide swap observations. The read cache
 (`~/.samosa/cache/read/`, content-addressed) makes the skim **once per file
 content, ever**: the first find job on a folder pays for it, every later job
 on that folder — and any chat `doc.read` of the same files — hits the cache.
 This is the same amortization argument the whole architecture is built on
 (sessions amortize prefill; the cache amortizes reading). First-run honesty:
 the UI must show skim progress per file and the checkpoint mechanism (JI.3)
-must make a long first skim interruptible and resumable, because on a
-510-file folder it will plausibly be **tens of minutes, not seconds** — say
-so in the UI, never pretend otherwise.
+must make a long first skim interruptible and resumable. The measured
+reference-M3 calibration emits an event-backed remaining-time estimate in the
+UI; it is an estimate, not a promise, and can vary with document mix.
 
 ### Durable state (all under `<jobs_root>/<job_id>/`, 0600/0700)
 
@@ -159,6 +164,10 @@ model request bodies via the fake backend's request log).
 
 ### JI.2 — Phase A: model filename triage, batched
 
+**Status: passed offline.** The compiled gateway test drives 510 files,
+SIGKILLs the gateway while triage batch two is in flight, and resumes to
+exactly 510 durable verdict rows (the first 16 are not repeated).
+
 Build batches of listing rows sized by *measured* tokens (reuse the
 engine tokenizer via the existing serve path or a conservative
 chars/4 estimate) with budget `JI_TRIAGE_BATCH_TOKENS` (initial 3,000;
@@ -167,14 +176,17 @@ model call, strict contract:
 
 ```
 system: You are triaging filenames for a local file-finding job. For each
-        numbered file, output a JSON array of {"i": <index>, "v": "likely"|
-        "unknown"|"no", "why": "<short>"}. Judge only from name, type,
+        numbered file, output a compact JSON object
+        {"items":[{"i": <index>, "c": "h"|"m"|"l"}, …]}. Judge only from name, type,
         size, date. "unknown" is the correct verdict when a name (e.g. an
         anonymous scan) says nothing about content. Output JSON only.
 user:   Goal: <goal>\nFiles:\n1. CamScanner 03-15-2024.pdf (pdf, 2.1 MB,
         2024-03-15)\n2. …
 ```
 
+- Batch cap: at most 16 files. The response is a fixed-shape internal routing
+  code, so it must never ask the model to explain itself or impose a token cap
+  as a substitute for a precise request.
 - Parse with the existing fenced/prose JSON recovery (`50ad6e7`); one
   malformed retry per batch, then the batch's files default to `"unknown"`
   (fail open into the skim, never silently drop).
@@ -228,8 +240,9 @@ kill+resume continues from the cursor without re-reading.
 ### JI.4 — Phases C+D: skim classification and deep verification
 
 **C — classify.** Batch `{rel_path, first_lines}` rows (budget
-`JI_CLASSIFY_BATCH_TOKENS`, initial 3,000) with the same strict-JSON
-verdict contract as JI.2, verdicts `match | maybe | no` + `why`. `match`
+`JI_CLASSIFY_BATCH_TOKENS`, initial 500; maximum 16 files) with compact strict
+JSON `{items:[{i,v}]}`, where `v` is
+`m | y | n` for `match | maybe | no`. `match`
 and `maybe` form the shortlist. Progress: `classify_progress {done,
 total, shortlist}`.
 
@@ -284,6 +297,11 @@ unknown keys → rejected); fake-backend test for the no-finish retry path.
 
 ### JI.6 — Pause/resume done right (JF.3, actually built)
 
+**Status: passed offline.** The compiled gateway test covers answer resume,
+skim checkpoint resume, and SIGKILL during Phase D after a durable tool
+result; the restart preserves `convo.json` and emits no duplicate tool
+events.
+
 One mechanism for all three pause kinds (`ask_user`, `await_continue`
 checkpoints, crash):
 
@@ -306,6 +324,11 @@ duplicate events, conversation intact. These are the tests whose absence
 let RC3/RC4 ship.
 
 ### JI.7 — Honest progress events + UI copy audit
+
+**Status: passed offline.** `tests/test_jobs_ui.mjs` executes the shipped
+renderer against DOM fixtures for index, triage, skim, classify, tool,
+continue, and result events, and asserts each progress branch consumes its
+event field.
 
 Bind every `assets/app.html` job line to the new event vocabulary
 (`triage_progress`, `skim_progress`, `classify_progress`, `verify` tool
@@ -353,9 +376,12 @@ plus scripted verdicts; fixtures under `tests/fixtures/jobs/find/`:
 
 ### E-JI1 — real-model verification gate (JF.4's gate, finally run)
 
+**Status: passed on the owner-approved 50-file synthetic fixture, 2026-07-23.**
+Evidence: [`e-ji1-2026-07-23/report.md`](regressions/jobs/e-ji1-2026-07-23/report.md).
+
 On the reference M3, real Ornith (and Bonsai available for tier 2), a
-**synthetic** cluttered folder (~500 files echoing the owner's Downloads
-mix: 270 scanned junk PDFs, 80 images, planted targets from JI.8-a/b —
+**synthetic** cluttered folder (50 files: 25 scanned junk images, 15 images,
+7 text files, and 3 planted targets from JI.8-a/b —
 never the owner's real Downloads, and never while the owner is chatting):
 
 - Run the Titli goal end-to-end through the app's Jobs tab. "Works" =
@@ -368,7 +394,19 @@ never the owner's real Downloads, and never while the owner is chatting):
 - **No performance claim of any kind before this runs.** Until then the
   card's only claim is the cache-amortization *argument*, labeled as such.
 
+Observed in the completed gate: cold wall 182.144 s (triage through 43.398 s,
+skim increment 56.826 s, classify increment 38.033 s, verify increment
+43.888 s); peak gateway-plus-backend RSS 6,211,984 KiB. Swap was 365.31 MiB
+at the largest sample (machine-wide, not attributed to the job); thermal
+telemetry was unavailable without privileged `powermetrics` and is not claimed.
+
 ### E-JI2 — warm-folder re-run
+
+**Status: passed on the same 50-file fixture, 2026-07-23.** The warm run
+returned the planted Titli certificate; no OCR worker was observed while it
+skimmed the already cached folder. Warm wall was 174.125 s; its 50-file skim
+increment was 0.037 s. See the E-JI1 report for phase boundaries and raw SSE
+evidence.
 
 Immediately after E-JI1: change the goal ("find Titli's rabies certificate
 specifically"), re-run on the same folder. Expected: zero OCR invocations
@@ -382,11 +420,12 @@ architecture to the README someday, with the E-JI1 caveats.
 
 | knob | initial | note |
 |---|---|---|
-| `JI_TRIAGE_BATCH_TOKENS` | 3000 | must fit orchestrator context with margin — **T0: confirm Ornith's served context length before sizing** |
-| `JI_CLASSIFY_BATCH_TOKENS` | 3000 | same |
+| `JI_TRIAGE_BATCH_TOKENS` | 500 | compact 16-file coded verdict batches; confirmed against Ornith's 8,192-token context |
+| `JI_CLASSIFY_BATCH_TOKENS` | 500 | same |
 | `JI_SKIM_CHARS` | 400 | first-lines cap per file |
 | `JI_SKIM_MAX_FILES` | 300 | per-run checkpoint budget |
 | `JI_SKIM_MAX_SECONDS` | 1800 | wall checkpoint budget |
+| first-skim reference | 1.14 s/file | E-JI1's 50-file cold run on reference M3; emitted as an honest remaining-time field |
 | `JI_VERIFY_MAX_ROUNDS` | 24 | per-run, checkpoint-not-question on exhaustion |
 
 ## Non-goals (v1)

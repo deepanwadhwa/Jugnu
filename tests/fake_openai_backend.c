@@ -3,11 +3,13 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "samosa_http.h"
 
@@ -16,6 +18,18 @@ static SamosaHttpServer *active_server;
 static void sleep_ms(long ms) {
     struct timespec pause = {.tv_sec = ms / 1000, .tv_nsec = (ms % 1000) * 1000000L};
     while (nanosleep(&pause, &pause) && errno == EINTR) {}
+}
+
+/* The compiled-gateway crash tests need to stop at a durable boundary, not
+   merely race an arbitrary model response.  A marker is atomically claimed
+   once, so the restarted gateway receives the normal response. */
+static int claim_marker(const char *name) {
+    const char *path = getenv(name);
+    if (!path || !*path) return 0;
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) return 0;
+    close(fd);
+    return 1;
 }
 
 static void stop_server(int number) {
@@ -35,6 +49,148 @@ static int handler(SamosaHttpServer *server, int fd,
             "{\"choices\":[{\"index\":0,\"finish_reason\":\"stop\","
             "\"message\":{\"role\":\"assistant\",\"content\":\"slow interactive reply\"}}]}", NULL);
     }
+    /* JI.2 process-crash seam: return one full triage batch, then hold the
+       second.  The test SIGKILLs the gateway while this request is in flight;
+       its restart must retain the first 16 durable verdicts exactly once. */
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
+        strstr(request->body, "triaging filenames") && strstr(request->body, "find triage crash fixtures")) {
+        if (!getenv("SAMOSA_FAKE_TRIAGE_FIRST") || claim_marker("SAMOSA_FAKE_TRIAGE_FIRST"))
+            return samosa_http_response(fd, 200, "application/json",
+                "{\"choices\":[{\"index\":0,\"finish_reason\":\"stop\","
+                "\"message\":{\"role\":\"assistant\",\"content\":"
+                "\"{\\\"items\\\":[{\\\"i\\\":1,\\\"c\\\":\\\"h\\\"}]}\"}}]}", NULL);
+        if (claim_marker("SAMOSA_FAKE_TRIAGE_DELAY")) sleep_ms(5000);
+        return samosa_http_response(fd, 200, "application/json",
+            "{\"choices\":[{\"index\":0,\"finish_reason\":\"stop\","
+            "\"message\":{\"role\":\"assistant\",\"content\":"
+            "\"{\\\"items\\\":[{\\\"i\\\":1,\\\"c\\\":\\\"m\\\"}]}\"}}]}", NULL);
+    }
+    /* JI.6 process-crash seam: the read result has already been appended to
+       convo.json before this held verification turn.  On restart the saved
+       conversation must produce the finish without a duplicate tool event. */
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
+        strstr(request->body, "find verify crash fixture") && strstr(request->body, "\"role\":\"tool\"")) {
+        if (claim_marker("SAMOSA_FAKE_VERIFY_DELAY")) sleep_ms(5000);
+        return samosa_http_response(fd, 200, "application/json",
+            "{\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\","
+            "\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{"
+            "\"id\":\"call_finish_crash\",\"type\":\"function\",\"function\":{"
+            "\"name\":\"finish\",\"arguments\":\"{\\\"matches\\\":[{\\\"path\\\":\\\"crash-probe.txt\\\","
+            "\\\"evidence\\\":\\\"durable crash probe content\\\",\\\"confidence\\\":\\\"high\\\"}],"
+            "\\\"rejected_count\\\":0,\\\"notes\\\":\\\"Recovered the crash probe.\\\"}\"}}]}}]}", NULL);
+    }
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
+        strstr(request->body, "find verify crash fixture") && !strstr(request->body, "\"role\":\"tool\""))
+        return samosa_http_response(fd, 200, "application/json",
+            "{\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\","
+            "\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{"
+            "\"id\":\"call_read_crash\",\"type\":\"function\",\"function\":{"
+            "\"name\":\"fs_read_text\",\"arguments\":\"{\\\"path\\\":\\\"crash-probe.txt\\\"}\"}}]}}]}", NULL);
+    /* JI.0 fallback: an implicit finding request reaches the model classifier
+       and is routed to the same read-only find pipeline. */
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
+        strstr(request->body, "Classify this local-files request") && strstr(request->body, "my university diploma"))
+        return samosa_http_response(fd, 200, "application/json",
+            "{\"choices\":[{\"index\":0,\"finish_reason\":\"stop\","
+            "\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"kind\\\":\\\"find\\\"}\"}}]}", NULL);
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
+        strstr(request->body, "my university diploma") && !strstr(request->body, "Classify this local-files request") &&
+        !strstr(request->body, "\"role\":\"tool\""))
+        return samosa_http_response(fd, 200, "application/json",
+            "{\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\","
+            "\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{"
+            "\"id\":\"call_read_diploma\",\"type\":\"function\",\"function\":{"
+            "\"name\":\"fs_read_text\",\"arguments\":\"{\\\"path\\\":\\\"diploma_bsc_2020.txt\\\"}\"}}]}}]}", NULL);
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
+        strstr(request->body, "my university diploma") && strstr(request->body, "\"role\":\"tool\""))
+        return samosa_http_response(fd, 200, "application/json",
+            "{\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\","
+            "\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{"
+            "\"id\":\"call_finish_diploma\",\"type\":\"function\",\"function\":{"
+            "\"name\":\"finish\",\"arguments\":\"{\\\"matches\\\":[{\\\"path\\\":\\\"diploma_bsc_2020.txt\\\",\\\"evidence\\\":\\\"Bachelor of Science in Computer Science, 2020\\\",\\\"confidence\\\":\\\"high\\\"}],\\\"rejected_count\\\":2,\\\"notes\\\":\\\"Found the diploma.\\\"}\"}}]}}]}", NULL);
+    /* ---- JI.8 scenario (d): education certificates (RC2 lock — no "pet") ----
+       Triage: the education goal gets confidences for its 3-file folder.
+       The handler MUST NOT mention "pet" anywhere — asserted by the test. */
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
+        strstr(request->body, "triaging filenames") && strstr(request->body, "find my education certificates"))
+        return samosa_http_response(fd, 200, "application/json",
+            "{\"choices\":[{\"index\":0,\"finish_reason\":\"stop\","
+            "\"message\":{\"role\":\"assistant\",\"content\":"
+            "\"[{\\\"i\\\":1,\\\"conf\\\":\\\"high\\\",\\\"why\\\":\\\"name suggests education\\\"},"
+            "{\\\"i\\\":2,\\\"conf\\\":\\\"medium\\\",\\\"why\\\":\\\"uninformative\\\"},"
+            "{\\\"i\\\":3,\\\"conf\\\":\\\"low\\\",\\\"why\\\":\\\"unrelated\\\"}]\"}}]}", NULL);
+    /* Classify for education: match the diploma, maybe the anonymous one. */
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
+        strstr(request->body, "classifying skimmed files") && strstr(request->body, "find my education certificates"))
+        return samosa_http_response(fd, 200, "application/json",
+            "{\"choices\":[{\"index\":0,\"finish_reason\":\"stop\","
+            "\"message\":{\"role\":\"assistant\",\"content\":"
+            "\"[{\\\"i\\\":1,\\\"v\\\":\\\"match\\\",\\\"why\\\":\\\"diploma content\\\"},"
+            "{\\\"i\\\":2,\\\"v\\\":\\\"no\\\",\\\"why\\\":\\\"unrelated\\\"},"
+            "{\\\"i\\\":3,\\\"v\\\":\\\"no\\\",\\\"why\\\":\\\"unrelated\\\"}]\"}}]}", NULL);
+    /* Verify for education: read the diploma, then finish with one match. */
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
+        strstr(request->body, "find my education certificates") && !strstr(request->body, "\"role\":\"tool\""))
+        return samosa_http_response(fd, 200, "application/json",
+            "{\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\","
+            "\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{"
+            "\"id\":\"call_read_edu\",\"type\":\"function\",\"function\":{"
+            "\"name\":\"fs_read_text\",\"arguments\":\"{\\\"path\\\":\\\"diploma_bsc_2020.txt\\\"}\"}}]}}]}", NULL);
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
+        strstr(request->body, "\"role\":\"tool\"") && strstr(request->body, "find my education certificates"))
+        return samosa_http_response(fd, 200, "application/json",
+            "{\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\","
+            "\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{"
+            "\"id\":\"call_finish_edu\",\"type\":\"function\",\"function\":{"
+            "\"name\":\"finish\",\"arguments\":\"{\\\"matches\\\":[{\\\"path\\\":\\\"diploma_bsc_2020.txt\\\","
+            "\\\"evidence\\\":\\\"Bachelor of Science in Computer Science, 2020\\\",\\\"confidence\\\":\\\"high\\\"}],"
+            "\\\"rejected_count\\\":2,\\\"notes\\\":\\\"Found the diploma.\\\"}\"}}]}}]}", NULL);
+
+    /* ---- JI.8 scenario (f): sweep contract (two matches + unreadable) ----
+       Triage: 5 files — two targets high, junk medium, image file medium. */
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
+        strstr(request->body, "triaging filenames") && strstr(request->body, "find all vet records"))
+        return samosa_http_response(fd, 200, "application/json",
+            "{\"choices\":[{\"index\":0,\"finish_reason\":\"stop\","
+            "\"message\":{\"role\":\"assistant\",\"content\":"
+            "\"[{\\\"i\\\":1,\\\"conf\\\":\\\"high\\\",\\\"why\\\":\\\"vet record name\\\"},"
+            "{\\\"i\\\":2,\\\"conf\\\":\\\"medium\\\",\\\"why\\\":\\\"anonymous\\\"},"
+            "{\\\"i\\\":3,\\\"conf\\\":\\\"medium\\\",\\\"why\\\":\\\"uninformative\\\"},"
+            "{\\\"i\\\":4,\\\"conf\\\":\\\"high\\\",\\\"why\\\":\\\"vaccination name\\\"},"
+            "{\\\"i\\\":5,\\\"conf\\\":\\\"medium\\\",\\\"why\\\":\\\"image file\\\"}]\"}}]}", NULL);
+    /* Classify for sweep: both targets match, junk no, image parked. */
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
+        strstr(request->body, "classifying skimmed files") && strstr(request->body, "find all vet records"))
+        return samosa_http_response(fd, 200, "application/json",
+            "{\"choices\":[{\"index\":0,\"finish_reason\":\"stop\","
+            "\"message\":{\"role\":\"assistant\",\"content\":"
+            "\"[{\\\"i\\\":1,\\\"v\\\":\\\"match\\\",\\\"why\\\":\\\"vet record\\\"},"
+            "{\\\"i\\\":2,\\\"v\\\":\\\"no\\\",\\\"why\\\":\\\"unrelated\\\"},"
+            "{\\\"i\\\":3,\\\"v\\\":\\\"match\\\",\\\"why\\\":\\\"vaccination record\\\"}]\"}}]}", NULL);
+    /* Verify for sweep: read both targets, then finish with both matches
+       + the unreadable image in unreadable[]. */
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
+        strstr(request->body, "find all vet records") && !strstr(request->body, "\"role\":\"tool\""))
+        return samosa_http_response(fd, 200, "application/json",
+            "{\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\","
+            "\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{"
+            "\"id\":\"call_read_vet1\",\"type\":\"function\",\"function\":{"
+            "\"name\":\"fs_read_text\",\"arguments\":\"{\\\"path\\\":\\\"miso_vet_checkup.txt\\\"}\"}}]}}]}", NULL);
+    if (!strcmp(request->method, "POST") && !strcmp(request->path, "/v1/chat/completions") &&
+        strstr(request->body, "\"role\":\"tool\"") && strstr(request->body, "find all vet records") &&
+        !strstr(request->body, "call_finish_sweep"))
+        return samosa_http_response(fd, 200, "application/json",
+            "{\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\","
+            "\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{"
+            "\"id\":\"call_finish_sweep\",\"type\":\"function\",\"function\":{"
+            "\"name\":\"finish\",\"arguments\":\"{\\\"matches\\\":[{\\\"path\\\":\\\"miso_vet_checkup.txt\\\","
+            "\\\"evidence\\\":\\\"Miso annual checkup 2026\\\",\\\"confidence\\\":\\\"high\\\"},"
+            "{\\\"path\\\":\\\"titli_vaccination_2023.txt\\\","
+            "\\\"evidence\\\":\\\"Titli rabies booster 2023\\\",\\\"confidence\\\":\\\"high\\\"}],"
+            "\\\"rejected_count\\\":2,"
+            "\\\"unreadable\\\":[{\\\"path\\\":\\\"scan_unknown.png\\\",\\\"reason\\\":\\\"ocr_unavailable\\\"}],"
+            "\\\"notes\\\":\\\"Found both vet records. One image could not be read.\\\"}\"}}]}}]}", NULL);
+
     /* Phase A triage (JI.2, confidence): the system prompt asks for a JSON array
        of per-file confidence. Index 1 (sorted) is high; the rest medium — so
        every file is a survivor and nothing is dropped (the E-JI1 lesson). */
@@ -199,6 +355,15 @@ int main(int argc, char **argv) {
     for (int i = 1; i + 1 < argc; ++i)
         if (!strcmp(argv[i], "--port")) port = atoi(argv[i + 1]);
     if (port < 1) return 2;
+    const char *pid_file = getenv("SAMOSA_FAKE_PID_FILE");
+    if (pid_file && *pid_file) {
+        int pidfd = open(pid_file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (pidfd >= 0) {
+            char text[32]; int n = snprintf(text, sizeof(text), "%ld\n", (long)getpid());
+            if (n > 0) (void)write(pidfd, text, (size_t)n);
+            close(pidfd);
+        }
+    }
     SamosaHttpServer server;
     if (!samosa_http_server_init(&server, port, handler, NULL)) return 2;
     active_server = &server;

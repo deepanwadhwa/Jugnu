@@ -760,15 +760,30 @@ static int type_count_cmp(const void *a, const void *b) {
     return strcmp(ta->media_type, tb->media_type);
 }
 
-static int emit_items(Buffer *out, const ItemList *items) {
+/* The list interface is consumed by document jobs.  Keep the absolute path for
+ * the existing sidecar callers, but also expose the jailed, root-relative path
+ * and the magic-byte type under their explicit contract names. */
+static const char *relative_to_root(const char *root, const char *path) {
+    size_t n = strlen(root);
+    if (!strncmp(root, path, n)) {
+        if (root[n - 1] == '/') return path + n;
+        if (path[n] == '/') return path + n + 1;
+    }
+    return path;
+}
+
+static int emit_items(Buffer *out, const ItemList *items, const char *root) {
     size_t i;
     if (!buf_put(out, "\"items\":[")) return 0;
     for (i = 0; i < items->len; ++i) {
         const FileItem *it = &items->items[i];
+        const char *rel = relative_to_root(root, it->path);
         if (i && !buf_put(out, ",")) return 0;
         if (!buf_put(out, "{\"path\":") || !buf_json_string(out, it->path) ||
             !buf_put(out, ",\"name\":") || !buf_json_string(out, it->name) ||
+            !buf_put(out, ",\"rel_path\":") || !buf_json_string(out, rel) ||
             !buf_put(out, ",\"media_type\":") || !buf_json_string(out, it->media_type) ||
+            !buf_put(out, ",\"magic_type\":") || !buf_json_string(out, it->media_type) ||
             !buf_put(out, ",\"input_sha256\":") || !buf_json_string(out, it->hash) ||
             !buf_printf(out, ",\"size\":%lld,\"mtime\":%.9f}", (long long)it->size, it->mtime))
             return 0;
@@ -789,10 +804,10 @@ static int emit_skips(Buffer *out, const SkipList *skips) {
     return buf_put(out, "]");
 }
 
-static int emit_list(const ItemList *items, const SkipList *skips) {
+static int emit_list(const ItemList *items, const SkipList *skips, const char *root) {
     Buffer out = {0};
     int ok = buf_put(&out, "{\"ok\":true,") &&
-             emit_items(&out, items) &&
+             emit_items(&out, items, root) &&
              buf_put(&out, ",") &&
              emit_skips(&out, skips) &&
              buf_put(&out, "}\n");
@@ -1160,7 +1175,7 @@ int main(int argc, char **argv) {
             put_error("scan_failed");
             return 65;
         }
-        return strcmp(cmd, "survey") == 0 ? emit_survey(&items, &skips) : emit_list(&items, &skips);
+        return strcmp(cmd, "survey") == 0 ? emit_survey(&items, &skips) : emit_list(&items, &skips, path);
     }
     if (strcmp(cmd, "metadata") == 0) {
         FileItem item;
